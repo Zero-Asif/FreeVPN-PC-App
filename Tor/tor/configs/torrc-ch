@@ -1,0 +1,6 @@
+SocksPort 9059 
+ExitNodes {ch} 
+StrictNodes 1 
+DataDirectory C:/Tor/tor/data/ch 
+GeoIPFile C:/Tor/tor/geoip 
+GeoIPv6File C:/Tor/tor/geoip6 

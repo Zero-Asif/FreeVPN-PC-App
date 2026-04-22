@@ -1,0 +1,6 @@
+SocksPort 9057 
+ExitNodes {au} 
+StrictNodes 1 
+DataDirectory C:/Tor/tor/data/au 
+GeoIPFile C:/Tor/tor/geoip 
+GeoIPv6File C:/Tor/tor/geoip6 

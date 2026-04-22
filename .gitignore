@@ -1,0 +1,29 @@
+# Node dependencies
+node_modules/
+
+# Electron build and distribution folders
+dist/
+out/
+build/
+release/
+
+# Editor directories and files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# App specific log files
+vpn_debug.log
+npm-debug.log*
+
+# Tor dynamic data and cache files (Keeps geoip, geoip6 and .exe files safe)
+Tor/data/cached-*
+Tor/data/lock
+Tor/data/state
+Tor/data/unverified-*
+Tor/tor/data/
+Tor/torrc_temp
+Tor/tor/torrc_temp

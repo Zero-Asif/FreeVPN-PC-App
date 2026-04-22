@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FreeProxy VPN</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="wrapper">
+        <header>
+            <img src="icon.png" alt="Logo" class="app-logo">
+            <h2>FreeProxy</h2>
+            <div class="header-badges">
+                <span class="badge free">FREE</span>
+                <span class="badge secured">TOR-BACKED</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="connection-card">
+
+                <div class="custom-dropdown" id="customDropdown">
+                    <div class="selected-server" id="selectedServer">
+                        <span id="selectedText">🇺🇸 United States</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <ul class="dropdown-list" id="dropdownList">
+                    </ul>
+                </div>
+
+                <button id="connectButton">Tap to Connect</button>
+
+                <div class="status-indicator">
+                    <div class="status-pulse disconnected" id="statusPulse"></div>
+                    <span id="statusText">Disconnected</span>
+                </div>
+            </div>
+
+            <div class="features-section">
+                <h3><img src="icon.png" alt="" class="feature-icon-title"> Advanced Features</h3>
+                <div class="feature-item">
+                    <div class="feature-info">
+                        <h4>Kill Switch</h4>
+                        <p>Disable internet if VPN drops.</p>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="killSwitchToggle">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+                <div class="feature-item" style="flex-direction: column; align-items: flex-start;">
+                    <div style="display: flex; justify-content: space-between; width: 100%;">
+                        <div class="feature-text">
+                            <strong>Split Tunneling</strong>
+                            <div style="font-size: 11px; color: #666;">Bypass VPN for specific sites</div>
+                        </div>
+                    </div>
+                    <input type="text" id="bypassInput" placeholder="e.g. *.bkash.com; *.netflix.com"
+                        style="width: 100%; margin-top: 8px; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; outline: none;">
+                </div>
+                
+                <a href="https://ipleak.net/" target="_blank" class="verify-btn">Verify My Privacy</a>
+            </div>
+        </main>
+    </div>
+    <script src="renderer.js"></script>
+</body>
+</html>

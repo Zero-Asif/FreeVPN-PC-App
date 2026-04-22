@@ -1,0 +1,47 @@
+{
+  "name": "freeproxy-vpn",
+  "productName": "FreeProxy",
+  "version": "1.0.0",
+  "description": "A premium Tor-backed VPN experience with advanced privacy features.",
+  "main": "main.js",
+  "author": {
+    "name": "Zero-Asif (Asifuzzaman Asif)",
+    "url": "https://github.com/Zero-Asif"
+  },
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.zeroasif.freeproxy",
+    "copyright": "Copyright © 2026 Zero-Asif",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "icon.png",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "FreeProxy VPN",
+      "runAfterFinish": true
+    },
+    "asar": true,
+    "asarUnpack": [
+      "Tor/**/*"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}
