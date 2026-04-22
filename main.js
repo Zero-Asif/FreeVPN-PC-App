@@ -60,7 +60,7 @@ function runAdminApp() {
 
     function createWindow () {
         const win = new BrowserWindow({
-            width: 365, height: 670, resizable: false, autoHideMenuBar: true,
+            width: 355, height: 670, resizable: false, autoHideMenuBar: true,
             icon: path.join(__dirname, 'icon.png'),
             webPreferences: { nodeIntegration: true, contextIsolation: false }
         });
