@@ -1,7 +1,7 @@
 # FreeProxy VPN - Premium Tor-Backed Experience
 
 <p align="center">
-  <img src="https://capsule-render.vercel.app/render?type=waving&color=gradient&height=280&section=header&text=FreeProxy%20VPN&fontSize=80&animation=fadeIn&fontAlignY=35&desc=High-Performance%20Tor%20Privacy%20Tool&descAlignY=55&descSize=25" width="100%" />
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&height=280&section=header&text=FreeProxy%20VPN&fontSize=80&animation=fadeIn&fontAlignY=35&desc=High-Performance%20Tor%20Privacy%20Tool&descAlignY=55&descSize=25" width="100%" />
 </p>
 
 <p align="center">
@@ -34,8 +34,8 @@
 
 ## 📸 Screenshots
 
-![Main Interface](https://i.ibb.co/fac3f25c/image-4bfec5.jpg)
-![Privacy Verification](https://i.ibb.co/ab999968/image-abddad.jpg)
+![Main Interface](screenshots/main-interface.png)
+![Privacy Verification](screenshots/privacy-verification.png)
 
 ---
 
@@ -58,6 +58,13 @@ npm install
 ```bash
 npm start
 ```
+
+### 4. Build Windows Installer (.exe)
+To package the app into a professional Windows setup file:
+```bash
+npm run dist
+```
+*The compiled `.exe` installer will be generated in the `release/` directory.*
 
 > [!IMPORTANT]
 > Ensure that the `Tor/data` folder contains the required `geoip` and `geoip6` files. The app automatically requests **Administrator** privileges to configure system proxy settings effectively.
