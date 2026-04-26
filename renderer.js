@@ -119,6 +119,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
+    // 🔴 সার্ভার সুইচ করার আপডেট লজিক
     dropdownList.addEventListener('click', async (e) => {
         const li = e.target.closest('li');
         if(!li || !li.hasAttribute('data-value')) return;
@@ -137,10 +138,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             connectButton.classList.remove('connected');
             statusPulse.className = 'status-pulse'; 
             
-            await ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked);
-            
-            const bypassValue = document.getElementById('bypassInput').value;
-            const response = await ipcRenderer.invoke('connect-vpn', { serverCode: currentServer, bypassList: bypassValue });
+            // অ্যানিমেশন সাথে সাথে শুরু করে দেওয়া হলো
+            flyToCountry(currentServer);
+
+            // 4.7 সেকেন্ড অ্যানিমেশন টাইম এবং ব্যাকএন্ড একসাথে সিঙ্ক করা হলো
+            const [response] = await Promise.all([
+                (async () => {
+                    await ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked);
+                    const bypassValue = document.getElementById('bypassInput').value;
+                    return await ipcRenderer.invoke('connect-vpn', { serverCode: currentServer, bypassList: bypassValue });
+                })(),
+                new Promise(resolve => setTimeout(resolve, 4700)) 
+            ]);
             
             connectButton.disabled = false; 
 
@@ -151,6 +160,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else {
                 localStorage.setItem('isConnected', 'false');
                 updateUI(false, currentServer);
+                backToHome();
                 fetchAndRenderCountries();
                 alert(`⚠️ This server (${cName}) is slow, busy, or unavailable right now. Please try faster servers.`);
             }
@@ -193,6 +203,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     selectedServer.addEventListener('click', () => { dropdownList.classList.toggle('show'); });
 
+    // 🔴 মেইন কানেক্ট বাটনের আপডেট লজিক
     connectButton.addEventListener('click', async () => {
         if (isLoading) { alert("🔄 Please wait! Fetching active server list..."); return; }
 
@@ -201,9 +212,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         try{ cName = regionNames.of(currentServer.toUpperCase()); }catch(e){}
 
         if (isAppConnected) {
-            connectButton.innerText = "Disconnecting...";
+            connectButton.innerText = "Disconnecting... 🛸";
             connectButton.disabled = true;
-            const response = await ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked);
+
+            // ডিসকানেক্ট হওয়ার অ্যানিমেশন শুরু (৪ সেকেন্ড লাগে)
+            backToHome();
+
+            // ৪ সেকেন্ড সিঙ্ক ওয়েট
+            const [response] = await Promise.all([
+                ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked),
+                new Promise(resolve => setTimeout(resolve, 4000))
+            ]);
+
             connectButton.disabled = false;
             
             if (response.status === "disconnected") {
@@ -212,10 +232,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 fetchAndRenderCountries(); 
             }
         } else {
-            connectButton.innerText = "Connecting... ⏳";
+            connectButton.innerText = "Connecting... 🚀";
             connectButton.disabled = true; 
             
-            const response = await ipcRenderer.invoke('connect-vpn', { serverCode: currentServer, bypassList: bypassValue });
+            // কানেক্ট হওয়ার অ্যানিমেশন শুরু (৪.৭ সেকেন্ড লাগে)
+            flyToCountry(currentServer);
+
+            // ৪.৭ সেকেন্ড সিঙ্ক ওয়েট
+            const [response] = await Promise.all([
+                ipcRenderer.invoke('connect-vpn', { serverCode: currentServer, bypassList: bypassValue }),
+                new Promise(resolve => setTimeout(resolve, 4700))
+            ]);
 
             connectButton.disabled = false; 
 
@@ -226,6 +253,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else {
                 localStorage.setItem('isConnected', 'false');
                 updateUI(false, currentServer);
+                backToHome();
                 fetchAndRenderCountries();
                 alert(`⚠️ This server (${cName}) is slow, busy, or unavailable right now. Please try faster servers.`);
             }
@@ -236,5 +264,40 @@ document.addEventListener('DOMContentLoaded', async () => {
         const isEnabled = e.target.checked;
         localStorage.setItem('killSwitch', isEnabled ? 'true' : 'false');
         if (!isAppConnected) await ipcRenderer.invoke('toggle-killswitch', isEnabled);
+    });
+
+    // Input from extension to sync UI state in real-time
+    ipcRenderer.on('sync-ui-state', (event, state) => {
+        if (currentServer !== state.serverCode) {
+            currentServer = state.serverCode;
+            let cName = currentServer.toUpperCase();
+            try { cName = regionNames.of(currentServer.toUpperCase()); } catch(e){}
+            selectedText.innerHTML = `${getFlagImg(currentServer)} ${cName}`;
+        }
+        
+        if (killSwitchToggle.checked !== state.killSwitch) {
+            killSwitchToggle.checked = state.killSwitch;
+            localStorage.setItem('killSwitch', state.killSwitch ? 'true' : 'false');
+            if (!isAppConnected) ipcRenderer.invoke('toggle-killswitch', state.killSwitch);
+        }
+
+        if (bypassInput.value !== state.bypassList) {
+            bypassInput.value = state.bypassList;
+            if (isAppConnected) ipcRenderer.invoke('update-live-bypass', bypassInput.value);
+        }
+    });
+
+    // Connect signal from extension to force UI update
+    ipcRenderer.on('force-connect-ui', () => {
+        if (!isAppConnected) {
+            connectButton.click(); 
+        }
+    });
+
+    // Disconnect signal from extension to force UI update
+    ipcRenderer.on('force-disconnect-ui', () => {
+        if (isAppConnected) {
+            connectButton.click(); 
+        }
     });
 });

@@ -1,12 +1,11 @@
+const WebSocket = require('ws');
 const { app, BrowserWindow, ipcMain } = require('electron');
 const { exec, execSync, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-// ==========================================
-// 🚀 UAC PROMPT (For smooth Git Bash & EXE execution)
-// ==========================================
+// UAC PROMPT (For smooth Git Bash & EXE execution)
 function isRunAsAdmin() {
     try {
         execSync('net session', { stdio: 'ignore', windowsHide: true });
@@ -60,12 +59,59 @@ function runAdminApp() {
 
     function createWindow () {
         const win = new BrowserWindow({
-            width: 355, height: 670, resizable: false, autoHideMenuBar: true,
+            width: 1000, height: 670, resizable: false, autoHideMenuBar: true,
             icon: path.join(__dirname, 'icon.png'),
             webPreferences: { nodeIntegration: true, contextIsolation: false }
         });
         win.loadFile('index.html');
     }
+
+    // 🌐 WebSocket Server Setup
+    const wss = new WebSocket.Server({ port: 8080 });
+    let appState = {
+        connected: false,
+        serverCode: 'us',
+        killSwitch: false,
+        bypassList: '',
+        servers: {}
+    };
+
+    function broadcastState() {
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ type: "STATE_SYNC", state: appState }));
+            }
+        });
+    }
+
+    wss.on('connection', (ws) => {
+        ws.send(JSON.stringify({ type: "STATE_SYNC", state: appState }));
+
+        ws.on('message', async (message) => {
+            const data = JSON.parse(message);
+            if (data.command === "PING") return;
+
+            const webContents = BrowserWindow.getAllWindows()[0].webContents;
+
+            if (data.command === "CONNECT") webContents.send('force-connect-ui');
+            else if (data.command === "DISCONNECT") webContents.send('force-disconnect-ui');
+            else if (data.command === "CHANGE_SERVER") {
+                appState.serverCode = data.server;
+                webContents.send('sync-ui-state', appState);
+                broadcastState();
+            }
+            else if (data.command === "TOGGLE_KS") {
+                appState.killSwitch = data.enabled;
+                webContents.send('sync-ui-state', appState);
+                broadcastState();
+            }
+            else if (data.command === "UPDATE_BYPASS") {
+                appState.bypassList = data.list;
+                webContents.send('sync-ui-state', appState);
+                broadcastState();
+            }
+        });
+    });
 
     try { execSync(`taskkill /F /IM tor.exe`, { stdio: 'ignore' }); } catch(e){}
     setupWritableTor();
@@ -113,7 +159,11 @@ function runAdminApp() {
             const counts = {};
             relays.forEach(r => { if (r.country) counts[r.country.toLowerCase()] = (counts[r.country.toLowerCase()] || 0) + 1; });
             if (Object.keys(counts).length > 0) {
-                cachedRelays = counts; lastFetchTime = Date.now(); return counts;
+                cachedRelays = counts;
+                appState.servers = cachedRelays;
+                broadcastState();
+                lastFetchTime = Date.now();
+                return counts;
             }
         }
         
@@ -125,6 +175,7 @@ function runAdminApp() {
         };
     });
 
+    // 🚀 VPN Connect Handler
     ipcMain.handle('connect-vpn', async (event, data) => {
         return new Promise((resolve) => {
             const { serverCode, bypassList } = data;
@@ -138,23 +189,24 @@ function runAdminApp() {
 
             try { execSync(`taskkill /F /IM tor.exe`, { stdio: 'ignore' }); } catch(e){}
 
-            // 🚀 THE RETURN OF THE BAT FILE: আগের মতো সরাসরি আপনার start-vpn.bat রান করানো হচ্ছে!
             const batPath = path.join(torDir, 'start-vpn.bat');
             exec(`"${batPath}" ${serverCode} ${port}`, { cwd: torDir, windowsHide: true });
 
-            // মাত্র ৩ সেকেন্ড ওয়েট করে প্রক্সি সেট করে সাকসেস রিটার্ন করবে!
+            // ৩ সেকেন্ড ওয়েট করে প্রক্সি সেট করে সাকসেস রিটার্ন করবে এবং এক্সটেনশনকে জানাবে
             setTimeout(() => {
                 const helperBatPath = getScriptPath('fp_conn.bat');
                 const batContent = `@echo off\nreg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "socks=127.0.0.1:${port}" /f\nreg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f\nreg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyOverride /t REG_SZ /d "${formattedBypass}" /f\npowershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Set-DnsClientServerAddress -ServerAddresses '127.0.0.1'"`;
                 fs.writeFileSync(helperBatPath, batContent);
                 exec(`"${helperBatPath}"`, { windowsHide: true });
                 
-                // কোনো আজাইরা ভেরিফিকেশন নেই, সরাসরি Connected!
-                resolve({ status: "connected" });
+                appState.connected = true;
+                broadcastState();
+                resolve({ status: "connected" }); // UI আপডেট
             }, 3000); 
         });
     });
 
+    // 🛑 VPN Disconnect Handler
     ipcMain.handle('disconnect-vpn', async (event, isKillSwitchOn) => {
         return new Promise((resolve) => {
             const helperBatPath = getScriptPath('fp_disconn.bat');
@@ -164,11 +216,19 @@ function runAdminApp() {
 
             fs.writeFileSync(helperBatPath, batContent);
             exec(`"${helperBatPath}"`, { windowsHide: true });
-            exec(`taskkill /F /IM tor.exe`, { windowsHide: true }, () => resolve({ status: "disconnected" }));
+            
+            exec(`taskkill /F /IM tor.exe`, { windowsHide: true }, () => {
+                appState.connected = false;
+                broadcastState();
+                resolve({ status: "disconnected" }); // UI আপডেট
+            });
         });
     });
 
     ipcMain.handle('toggle-killswitch', async (event, isEnabled) => {
+        appState.killSwitch = isEnabled; 
+        broadcastState(); // এক্সটেনশন আপডেট হবে
+
         const helperBatPath = getScriptPath('fp_ks.bat');
         let batContent = isEnabled 
             ? `@echo off\nreg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "socks=127.0.0.1:9999" /f\nreg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f\npowershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Set-DnsClientServerAddress -ResetServerAddresses"`
@@ -180,6 +240,9 @@ function runAdminApp() {
 
     ipcMain.handle('update-live-bypass', async (event, bypassList) => {
         return new Promise((resolve) => {
+            appState.bypassList = bypassList; 
+            broadcastState(); // এক্সটেনশন আপডেট হবে
+
             let formattedBypass = "<local>";
             if (bypassList && bypassList.trim() !== '') {
                 const list = bypassList.replace(/,/g, ';').split(';').map(s => s.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/[\*\s]/g, '') ? `*${s.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/[\*\s]/g, '')}*` : '').filter(s => s !== '').join(';');

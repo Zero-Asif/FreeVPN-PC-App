@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { margin: 0; padding: 0; background-color: #090b14; overflow: hidden; font-family: 'Segoe UI', monospace, sans-serif; }
+        #globeViz { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+        
+        /* ওভারলে টেক্সটটি এখন গ্লোবের ফাইলের ভেতরেই সুরক্ষিত থাকবে */
+        #status-overlay {
+            position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+            background: rgba(9, 11, 20, 0.9); border: 1px solid #00ffcc; padding: 12px 25px;
+            border-radius: 30px; color: #00ffcc; font-size: 14px; font-weight: bold;
+            z-index: 10; box-shadow: 0 0 15px rgba(0,255,204,0.4); text-align: center;
+            white-space: nowrap; transition: all 0.3s ease; letter-spacing: 1px;
+        }
+    </style>
+
+    <script>
+        if (typeof module === 'object') {
+            window.__nodeModule = module; window.__nodeExports = exports;
+            module = undefined; exports = undefined;
+        }
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/globe.gl@2.27.2/dist/globe.gl.min.js"></script>
+    <script>
+        if (window.__nodeModule) { module = window.__nodeModule; exports = window.__nodeExports; }
+    </script>
+</head>
+<body>
+    <div id="globeViz"></div>
+    <div id="status-overlay">Powering up Cyber Engine... 🚀</div>
+
+    <script>
+        const countryCoords = {
+            'us': { lat: 37.0902, lng: -95.7129, name: 'United States' },
+            'de': { lat: 51.1657, lng: 10.4515, name: 'Germany' },
+            'fr': { lat: 46.2276, lng: 2.2137, name: 'France' },
+            'nl': { lat: 52.1326, lng: 5.2913, name: 'Netherlands' },
+            'gb': { lat: 55.3781, lng: -3.4360, name: 'United Kingdom' },
+            'ca': { lat: 56.1304, lng: -106.3468, name: 'Canada' },
+            'sg': { lat: 1.3521, lng: 103.8198, name: 'Singapore' },
+            'jp': { lat: 36.2048, lng: 138.2529, name: 'Japan' },
+            'au': { lat: -25.2744, lng: 133.7751, name: 'Australia' },
+            'in': { lat: 20.5937, lng: 78.9629, name: 'India' },
+            'bd': { lat: 23.6850, lng: 90.3563, name: 'Bangladesh' }
+        };
+
+        let globe;
+        let homeLat = 23.8103, homeLng = 90.4125; 
+        const overlay = document.getElementById('status-overlay');
+
+        // 🔴 আল্টিমেট ফিক্স: কোড দিয়ে লাইভ টেক্সচার বানানো (কোনো ছবি ডাউনলোড হবে না)
+        function createCyberGrid() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 2048; canvas.height = 1024;
+            const ctx = canvas.getContext('2d');
+            
+            ctx.fillStyle = '#050711'; // ডার্ক স্পেস ব্যাকগ্রাউন্ড
+            ctx.fillRect(0, 0, 2048, 1024);
+            
+            ctx.strokeStyle = '#101830'; // সাইবার গ্রিড লাইন
+            ctx.lineWidth = 4;
+            for(let i=0; i<=2048; i+=64) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 1024); ctx.stroke(); }
+            for(let j=0; j<=1024; j+=64) { ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(2048, j); ctx.stroke(); }
+            
+            ctx.strokeStyle = '#1b2a59'; // গ্লোবের বিষুবরেখা (Equator)
+            ctx.lineWidth = 8;
+            ctx.beginPath(); ctx.moveTo(0, 512); ctx.lineTo(2048, 512); ctx.stroke();
+            
+            return canvas.toDataURL('image/png'); // ডিরেক্ট WebGL এ সাপ্লাই দেওয়া হলো
+        }
+
+        function initGlobe() {
+            globe = Globe()(document.getElementById('globeViz'))
+                .backgroundColor('#090b14')
+                .showAtmosphere(true).atmosphereColor('#8E54E9').atmosphereAltitude(0.2)
+                .globeImageUrl(createCyberGrid()); // ইন্টারনেট ছাড়াই গ্লোব রেন্ডার হবে!
+
+            globe.pointOfView({ lat: 20, lng: 0, altitude: 3.0 });
+            globe.controls().autoRotate = true; // হালকা ঘুরতে থাকবে
+            globe.controls().autoRotateSpeed = 0.3;
+        }
+
+        function setPulse(lat, lng, color) {
+            if(!globe) return;
+            globe.ringsData([{ lat: lat, lng: lng }])
+                .ringColor(() => color).ringMaxRadius(8).ringPropagationSpeed(4).ringRepeatPeriod(800);
+        }
+
+        // মেইন অ্যাপ থেকে কমান্ড রিসিভ করা এবং ওভারলে আপডেট করা
+        window.addEventListener('message', (event) => {
+            const data = event.data;
+            if(!globe) return;
+
+            if(data.command === 'INIT_LOC') {
+                homeLat = data.lat; homeLng = data.lng;
+                overlay.innerText = `Standing by in Local Region 🌐`;
+                globe.pointOfView({ lat: homeLat, lng: homeLng, altitude: 2.5 }, 2000);
+                setTimeout(() => setPulse(homeLat, homeLng, '#FF416C'), 1000);
+            } 
+            else if(data.command === 'FLY') {
+                let dest = countryCoords[data.code.toLowerCase()] || { lat: 0, lng: 0, name: data.code.toUpperCase() };
+                overlay.innerText = `Routing to ${dest.name}... 🛰️`;
+                overlay.style.color = '#f1c40f'; overlay.style.borderColor = 'rgba(241, 196, 15, 0.5)';
+
+                globe.ringsData([]); globe.arcsData([]);
+                globe.pointOfView({ altitude: 3.5 }, 1000); 
+
+                setTimeout(() => {
+                    globe.arcsData([{ startLat: homeLat, startLng: homeLng, endLat: dest.lat, endLng: dest.lng, color: ['#FF416C', '#00ffcc'] }])
+                    .arcColor('color').arcDashLength(0.5).arcDashGap(0.2).arcDashAnimateTime(2000).arcStroke(1.5);
+
+                    setTimeout(() => {
+                        globe.pointOfView({ lat: dest.lat, lng: dest.lng, altitude: 1.5 }, 2000); 
+                        setTimeout(() => {
+                            setPulse(dest.lat, dest.lng, '#00ffcc');
+                            overlay.innerText = `Secured & Routed via ${dest.name} 🛡️`;
+                            overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)';
+                        }, 1500);
+                    }, 1500);
+                }, 1000);
+            }
+            else if(data.command === 'HOME') {
+                overlay.innerText = `Connection Dropped. Returning... 📡`;
+                overlay.style.color = '#e74c3c'; overlay.style.borderColor = 'rgba(231, 76, 60, 0.5)';
+                globe.arcsData([]); globe.ringsData([]);
+                globe.pointOfView({ altitude: 3.5 }, 1200);
+                
+                setTimeout(() => {
+                    globe.pointOfView({ lat: homeLat, lng: homeLng, altitude: 2.5 }, 2000);
+                    setTimeout(() => {
+                        setPulse(homeLat, homeLng, '#FF416C');
+                        overlay.innerText = `Standing by in Local Region 🌐`;
+                        overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)';
+                    }, 2000);
+                }, 1200);
+            }
+        });
+
+        initGlobe();
+    </script>
+</body>
+</html>

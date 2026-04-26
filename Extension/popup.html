@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        /* ইমপোর্ট করা হচ্ছে মডার্ন প্রিমিয়াম ফন্ট */
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+        
+        body { 
+            width: 320px; 
+            font-family: 'Poppins', sans-serif; 
+            margin: 0; 
+            padding: 18px; 
+            background: #f4f7f6; /* সফট মডার্ন ব্যাকগ্রাউন্ড */
+            overflow: visible;
+            color: #2c3e50;
+        }
+        
+        /* প্রিমিয়াম হেডার (লোগো সহ) */
+        .header { 
+            background: linear-gradient(135deg, #662d8c, #ed1e79); 
+            color: white; 
+            padding: 15px; 
+            border-radius: 12px; 
+            text-align: center; 
+            margin-bottom: 20px; 
+            box-shadow: 0 4px 15px rgba(237, 30, 121, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        .header img { 
+            width: 28px; 
+            height: 28px; 
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2)); 
+        }
+        .header h3 { 
+            margin: 0; 
+            font-size: 16px; 
+            font-weight: 600; 
+            letter-spacing: 0.5px; 
+        }
+        
+        /* অ্যানিমেটেড ওয়ার্নিং ব্যানার */
+        .warning { 
+            color: #d32f2f; 
+            font-size: 12px; 
+            font-weight: 500;
+            margin-bottom: 15px; 
+            display: none; 
+            background: #ffebee; 
+            padding: 10px; 
+            border-radius: 8px; 
+            text-align: center; 
+            border-left: 4px solid #f44336;
+            animation: pulse-warning 2s infinite; /* পালস অ্যানিমেশন */
+        }
+        @keyframes pulse-warning {
+            0% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(244, 67, 54, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0); }
+        }
+
+        /* কাস্টম ড্রপডাউন (মডার্ন লুক) */
+        .custom-dropdown { position: relative; width: 100%; margin-bottom: 20px; }
+        .selected-server { 
+            display: flex; align-items: center; background: white; padding: 12px 15px; 
+            border-radius: 10px; cursor: pointer; border: 1px solid #e0e0e0; 
+            font-size: 14px; font-weight: 500; justify-content: space-between; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.02); transition: all 0.3s ease;
+        }
+        .selected-server:hover { 
+            border-color: #662d8c; 
+            box-shadow: 0 4px 12px rgba(102, 45, 140, 0.1); 
+        }
+        
+        /* ড্রপডাউন লিস্ট স্লাইড অ্যানিমেশন */
+        .dropdown-list { 
+            position: absolute; top: 100%; left: 0; right: 0; background: white; 
+            border-radius: 10px; border: 1px solid #e0e0e0; margin-top: 5px; 
+            list-style: none; padding: 0; max-height: 180px; overflow-y: auto; 
+            z-index: 100; display: none; box-shadow: 0 10px 25px rgba(0,0,0,0.1); 
+            animation: slideDown 0.2s ease forwards;
+        }
+        @keyframes slideDown { 
+            from { opacity: 0; transform: translateY(-5px); } 
+            to { opacity: 1; transform: translateY(0); } 
+        }
+        .dropdown-list.show { display: block; }
+        .dropdown-list li { 
+            padding: 10px 15px; cursor: pointer; font-size: 13px; display: flex; 
+            align-items: center; justify-content: space-between; border-bottom: 1px solid #f5f5f5; 
+            transition: background 0.2s;
+        }
+        .dropdown-list li:hover { background: #f8f4fa; color: #662d8c; }
+        .flag-img { 
+            width: 20px; margin-right: 10px; vertical-align: middle; 
+            border-radius: 3px; box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+
+        /* মেইন কানেক্ট বাটন (থ্রিডি গ্লো ইফেক্ট) */
+        button { 
+            width: 100%; padding: 14px; border: none; border-radius: 10px; 
+            background: linear-gradient(135deg, #4776E6, #8E54E9); color: white; 
+            font-size: 14px; font-weight: 600; cursor: pointer; text-transform: uppercase; 
+            letter-spacing: 1px; margin-bottom: 20px; transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(71, 118, 230, 0.3);
+        }
+        button:hover { 
+            transform: translateY(-2px); 
+            box-shadow: 0 6px 20px rgba(71, 118, 230, 0.4); 
+        }
+        button:active { transform: translateY(0); }
+        button.connected { 
+            background: linear-gradient(135deg, #FF416C, #FF4B2B); 
+            box-shadow: 0 4px 15px rgba(255, 65, 108, 0.3);
+        }
+        button.connected:hover { box-shadow: 0 6px 20px rgba(255, 65, 108, 0.4); }
+
+        /* অ্যাডভান্সড ফিচার সেকশন */
+        .advanced { 
+            background: white; padding: 15px; border-radius: 12px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.03); border: 1px solid #f0f0f0;
+        }
+        .flex-row { 
+            display: flex; justify-content: space-between; align-items: center; 
+            margin-bottom: 12px; font-size: 13px; font-weight: 600; color: #34495e;
+        }
+        
+        /* মডার্ন iOS স্টাইল টগল সুইচ */
+        .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { 
+            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; 
+            background-color: #dcdde1; border-radius: 22px; transition: .4s; 
+        }
+        .slider:before { 
+            position: absolute; content: ""; height: 18px; width: 18px; left: 2px; bottom: 2px; 
+            background-color: white; border-radius: 50%; transition: .4s; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2); 
+        }
+        input:checked + .slider { background-color: #2ecc71; }
+        input:checked + .slider:before { transform: translateX(18px); }
+
+        /* ইনপুট ফিল্ড */
+        .input-label { 
+            font-size: 11px; font-weight: 600; color: #7f8c8d; text-transform: uppercase; 
+            margin-bottom: 5px; display: block; letter-spacing: 0.5px;
+        }
+        input[type="text"] { 
+            width: 100%; padding: 10px; border: 1px solid #e0e0e0; border-radius: 8px; 
+            font-size: 13px; box-sizing: border-box; outline: none; transition: border 0.3s ease;
+            background: #f8f9fa; font-family: 'Poppins', sans-serif;
+        }
+        input[type="text"]:focus { 
+            border-color: #662d8c; background: white; 
+            box-shadow: 0 0 0 3px rgba(102, 45, 140, 0.1); 
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img src="icon.png" alt="Logo" id="extLogo">
+        <h3>FreeProxy VPN</h3>
+    </div>
+    
+    <div id="warningBox" class="warning">
+        <div style="font-size: 18px; margin-bottom: 2px;">⚠️</div>
+        Windows Desktop App is not running! <br>
+        <span style="font-size: 10px; font-weight: 400; color: #555;">Please launch the FreeProxy app first.</span>
+    </div>
+
+    <div class="custom-dropdown" id="customDropdown">
+        <div class="selected-server" id="selectedServer">
+            <span id="selectedText"><img src="https://flagcdn.com/w20/us.png" class="flag-img"> United States</span>
+            <span class="arrow" style="color: #95a5a6; font-size: 10px;">▼</span>
+        </div>
+        <ul class="dropdown-list" id="dropdownList"></ul>
+    </div>
+
+    <button id="actionButton">Connect Browser Only</button>
+
+    <div class="advanced">
+        <div class="flex-row">
+            <span>Kill Switch 🛡️</span>
+            <label class="switch"><input type="checkbox" id="killSwitchToggle"><span class="slider"></span></label>
+        </div>
+        <div style="margin-top: 15px;">
+            <span class="input-label">Split Tunneling (Bypass) 🌐</span>
+            <input type="text" id="bypassInput" placeholder="e.g. *.bkash.com">
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

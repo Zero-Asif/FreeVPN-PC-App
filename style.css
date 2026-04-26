@@ -14,6 +14,75 @@ body {
     overflow-x: hidden;
 }
 
+/* --- NEW APP SPLIT LAYOUT --- */
+html { width: 100%; max-width: 850px; overflow: hidden; }
+body { margin: 0; background-color: #0b0d17; /* Dark background for Globe */ }
+
+.app-layout {
+    display: flex;
+    width: 100%;
+    height: 100vh;
+}
+
+.left-panel {
+    width: 350px;
+    min-width: 350px;
+    background-color: #f9fafb;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 5px 0 15px rgba(0,0,0,0.2);
+    z-index: 10;
+}
+
+.right-panel, #globe-parent {
+    flex-grow: 1;
+    position: relative;
+    background: radial-gradient(circle at center, #1b203a 0%, #050711 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    width: 100%;
+    height: 100vh;
+}
+
+#globeViz {
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+}
+#globeViz:active { cursor: grabbing; }
+
+#globe-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+}
+#globe-container:active { cursor: grabbing; }
+
+.globe-overlay {
+    position: absolute;
+    bottom: 40px;
+    left: 50%; /* একদম মাঝখানে আনার জন্য */
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.7);
+    border: 1px solid rgba(0, 255, 204, 0.4);
+    padding: 10px 20px;
+    border-radius: 30px;
+    color: #00ffcc;
+    font-family: 'Segoe UI', monospace, sans-serif;
+    font-size: 13px;
+    font-weight: bold;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 0 15px rgba(0, 255, 204, 0.2);
+    z-index: 999999; /* গ্লোবের ক্যানভাস যেন এটিকে ঢাকতে না পারে */
+    white-space: nowrap;
+}
+
 .container {
     width: 100%;
     max-width: 100%; /* কোনো রেস্ট্রিকশন নেই, ফুল উইন্ডো নেবে */
@@ -245,7 +314,7 @@ button.connected {
     text-decoration: none;
     font-size: 0.8rem;
     font-weight: 700;
-    padding: 8px;
+    padding: 5px;
     border-radius: 8px;
     margin-top: 15px;
     transition: all 0.2s;

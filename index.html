@@ -7,17 +7,19 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="wrapper">
-        <header>
+    <div class="app-container">
+        <div class="left-panel">
+            <div class="wrapper">
+                <header>
             <img src="icon.png" alt="Logo" class="app-logo">
             <h2>FreeProxy</h2>
             <div class="header-badges">
                 <span class="badge free">FREE</span>
                 <span class="badge secured">TOR-BACKED</span>
             </div>
-        </header>
-
-        <main>
+                </header>
+            
+                <main>
             <div class="connection-card">
 
                 <div class="custom-dropdown" id="customDropdown">
@@ -62,8 +64,32 @@
                 
                 <a href="https://ipleak.net/" target="_blank" class="verify-btn">Verify My Privacy</a>
             </div>
-        </main>
+                </main>
+            </div>
+        </div>
+
+        <div class="right-panel" id="globe-parent" style="position: relative; flex-grow: 1; height: 100vh; background-color: #090b14; overflow: hidden;">
+            </div>
     </div>
+
+    <script>
+        var nodeModule = typeof module !== 'undefined' ? module : undefined;
+        var nodeExports = typeof exports !== 'undefined' ? exports : undefined;
+        if (typeof module !== 'undefined') module = undefined;
+        if (typeof exports !== 'undefined') exports = undefined;
+        window.exports = {};
+    </script>
+
+    <script src="https://unpkg.com/three@0.147.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/globe.gl@2.27.2/dist/globe.gl.min.js"></script>
+
+    <script>
+        if (nodeModule) module = nodeModule;
+        if (nodeExports) exports = nodeExports;
+        delete window.exports;
+    </script>
+
+    <script src="globe-controller.js"></script>
     <script src="renderer.js"></script>
 </body>
 </html>
