@@ -1,5 +1,5 @@
 // ==========================================
-// 🌍 FREEPROXY 3D GLOBE CONTROLLER (THE FLAWLESS ROCKET FIX)
+// 🌍 FREEPROXY 3D GLOBE CONTROLLER (THE ULTIMATE FLAWLESS SYNC & RECOVERY)
 // ==========================================
 console.log("✅ Globe Engine Loading...");
 
@@ -39,28 +39,28 @@ const countryCoords = {
     'ec': { lat: -1.8312, lng: -78.1834, name: 'Ecuador' }, 'bo': { lat: -16.2902, lng: -63.5887, name: 'Bolivia' }
 };
 
-// 🔴 THE BULLETPROOF Z-AXIS ROCKET: জন্মগতভাবেই মাথা সামনে, লেজ জিরোতে!
+// 🔴 THE BULLETPROOF Z-AXIS ROCKET
 function build3DRocket() {
     const wrapper = new window.THREE.Group(); 
     
-    // 1. Flame (ধোঁয়া) - বেস 0.75, মাথা ঠিক 0 তে (পেছনের দিকে মুখ করা)
+    // 1. Flame (ধোঁয়া)
     const flameGeo = new window.THREE.ConeGeometry(0.5, 1.5, 16);
-    flameGeo.rotateX(-Math.PI / 2); // ধোঁয়ার কোণ পেছনের দিকে (-Z)
-    flameGeo.translate(0, 0, 0.75); // ধোঁয়ার মাথা একদম (0,0,0) তে লক!
+    flameGeo.rotateX(-Math.PI / 2); 
+    flameGeo.translate(0, 0, 0.75); 
     const flameMat = new window.THREE.MeshBasicMaterial({ color: 0xdddddd, transparent: true, opacity: 0.8 });
     wrapper.add(new window.THREE.Mesh(flameGeo, flameMat));
 
-    // 2. Body - Z অ্যাক্সিস বরাবর সোজা
+    // 2. Body
     const bodyGeo = new window.THREE.CylinderGeometry(0.8, 0.8, 4, 16);
-    bodyGeo.rotateX(Math.PI / 2); // সিলিন্ডারকে Z অ্যাক্সিসে শোয়ানো হলো
-    bodyGeo.translate(0, 0, 3.5); // বডি সামনের দিকে (+Z)
+    bodyGeo.rotateX(Math.PI / 2); 
+    bodyGeo.translate(0, 0, 3.5); 
     const bodyMat = new window.THREE.MeshLambertMaterial({ color: 0xffffff });
     wrapper.add(new window.THREE.Mesh(bodyGeo, bodyMat));
 
-    // 3. Nose (লাল নাক) - মাথা একদম সামনের দিকে (+Z)
+    // 3. Nose (লাল নাক)
     const noseGeo = new window.THREE.ConeGeometry(0.8, 2, 16);
-    noseGeo.rotateX(Math.PI / 2); // নাক সামনের দিকে (+Z)
-    noseGeo.translate(0, 0, 6.5); // নাক সবার সামনে!
+    noseGeo.rotateX(Math.PI / 2); 
+    noseGeo.translate(0, 0, 6.5); 
     const noseMat = new window.THREE.MeshLambertMaterial({ color: 0xff416c });
     wrapper.add(new window.THREE.Mesh(noseGeo, noseMat));
 
@@ -69,13 +69,14 @@ function build3DRocket() {
     const finMat = new window.THREE.MeshLambertMaterial({ color: 0xff416c });
     for(let i=0; i<4; i++) {
         const fin = new window.THREE.Mesh(finGeo, finMat);
-        fin.position.z = 2.5; // পাখাগুলা বডির নিচের দিকে
+        fin.position.z = 2.5; 
         fin.rotation.z = (Math.PI / 2) * i;
         fin.translateX(0.8);
         wrapper.add(fin);
     }
 
-    wrapper.scale.set(1.2, 1.2, 1.2); // রকেটের সুন্দর সাইজ
+    // 🔴 আপনার ইনস্ট্রাকশন অনুযায়ী ডবল সাইজই রাখা হয়েছে।
+    wrapper.scale.set(1.2, 1.2, 1.2); 
     return wrapper;
 }
 
@@ -87,7 +88,10 @@ function setPulse(lat, lng, color) {
 
 async function initUserLocation() {
     const overlay = document.getElementById('status-overlay');
-    if(overlay) overlay.innerText = `Detecting Present Location... 🌍`;
+    if(overlay) {
+        overlay.innerText = `Detecting Present Location... 🌍`;
+        overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
+    }
 
     try {
         const controller = new AbortController();
@@ -111,6 +115,7 @@ async function initUserLocation() {
 
     if(overlay) {
         overlay.innerText = `Standing by in ${HOME_LOC.name} 🌐`;
+        overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
     }
 
     if(globe) {
@@ -119,7 +124,7 @@ async function initUserLocation() {
     }
 }
 
-// 🔴 EXACT GLOBE.GL MATH
+// 🔴 THE EXACT GLOBE.GL INTERNAL MATH
 function animate3DRocket(startLat, startLng, endLat, endLng, duration) {
     if(!rocketMesh) return;
     rocketMesh.visible = true; 
@@ -146,11 +151,11 @@ function animate3DRocket(startLat, startLng, endLat, endLng, duration) {
         let vCur = curve.getPoint(t);
         let vNext = curve.getPoint(Math.min(t + 0.02, 1.0));
         
-        rocketMesh.position.copy(vCur); // লেজ ঠিক ধোঁয়ার শেষ মাথায় থাকবে
-        rocketMesh.up.copy(vCur).normalize(); // পৃথিবীর দিকে পেট
+        rocketMesh.position.copy(vCur); 
+        rocketMesh.up.copy(vCur).normalize(); 
         
         if (vNext.distanceToSquared(vCur) > 0.0001) {
-            rocketMesh.lookAt(vNext); // নাক গ্যারান্টি দিয়ে সামনের দিকে থাকবে!
+            rocketMesh.lookAt(vNext); // মাথা একদম সামনে থাকবে গ্যারান্টি!
         }
 
         if (t < 1) {
@@ -182,13 +187,20 @@ function buildGlobeUI() {
         zIndex: '1', backgroundColor: '#090b14', overflow: 'hidden'
     });
 
-    // 🔴 UI FIX: আপনার HTML এর ডিজাইনে কোনো হাত দেওয়া হয়নি।
     let overlay = document.getElementById('status-overlay');
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'status-overlay';
         document.body.appendChild(overlay); 
     }
+    // 🔴 UI FIX: আপনার আগের ডিজাইনের সব CSS হুবহু এখানে ফিরিয়ে এনেছি।
+    Object.assign(overlay.style, {
+        position: 'fixed', bottom: '40px', left: `calc(${sidebarWidth}px + (100vw - ${sidebarWidth}px) / 2)`, 
+        transform: 'translateX(-50%)', background: 'rgba(9, 11, 20, 0.9)', 
+        border: '1px solid #00ffcc', padding: '12px 25px', borderRadius: '30px', 
+        color: '#00ffcc', fontFamily: 'monospace', fontSize: '14px', fontWeight: 'bold', 
+        zIndex: '9999', boxShadow: '0 0 15px rgba(0,255,204,0.4)', textAlign: 'center', whiteSpace: 'nowrap'
+    });
 
     let gWidth = window.innerWidth - sidebarWidth;
     let gHeight = window.innerHeight;
@@ -221,6 +233,7 @@ function buildGlobeUI() {
         sidebarWidth = leftSidebar ? leftSidebar.clientWidth : 350;
         container.style.left = `${sidebarWidth}px`;
         container.style.width = `calc(100vw - ${sidebarWidth}px)`;
+        overlay.style.left = `calc(${sidebarWidth}px + (100vw - ${sidebarWidth}px) / 2)`;
         if(globe) { globe.width(window.innerWidth - sidebarWidth); globe.height(window.innerHeight); }
     });
 }
@@ -228,7 +241,7 @@ function buildGlobeUI() {
 if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', buildGlobeUI); } 
 else { buildGlobeUI(); }
 
-// 🚀 কানেক্ট ফ্লাইট (Perfect Smoke Sync)
+// 🚀 কানেক্ট ফ্লাইট
 window.flyToCountry = function(countryCode) {
     if(!globe) return;
     let dest = countryCoords[countryCode.toLowerCase()] || { lat: 0, lng: 0, name: countryCode.toUpperCase() };
@@ -236,6 +249,7 @@ window.flyToCountry = function(countryCode) {
     const overlay = document.getElementById('status-overlay');
     if(overlay) {
         overlay.innerText = `Routing to ${dest.name}... 🛰️`;
+        overlay.style.color = '#f1c40f'; overlay.style.borderColor = 'rgba(241, 196, 15, 0.5)'; // টেক্সট কালার ফিক্স
     }
 
     globe.ringsData([]); 
@@ -247,11 +261,11 @@ window.flyToCountry = function(countryCode) {
     setTimeout(() => {
         animate3DRocket(CURRENT_LOC.lat, CURRENT_LOC.lng, dest.lat, dest.lng, flightDuration);
 
-        // 🔴 SMOKE TRAIL LOGIC: রকেটের সাথে সাথে সাদা ধোঁয়া!
+        // 🔴 SMOKE TRAIL LOGIC
         globe.arcsData([{ 
             startLat: CURRENT_LOC.lat, startLng: CURRENT_LOC.lng, 
             endLat: dest.lat, endLng: dest.lng, 
-            color: ['rgba(255,255,255,0.0)', 'rgba(200,200,200,0.8)'] 
+            color: ['rgba(255,255,255,0.0)', 'rgba(200,200,200,0.8)'] // সাদা ধোঁয়া
         }])
         .arcAltitude(0.35) 
         .arcColor('color')
@@ -264,12 +278,13 @@ window.flyToCountry = function(countryCode) {
         setTimeout(() => {
             globe.pointOfView({ lat: dest.lat, lng: dest.lng, altitude: 1.5 }, 2000); 
             setTimeout(() => {
-                globe.arcsData([]); // ধোঁয়া গায়েব
+                globe.arcsData([]); 
                 setPulse(dest.lat, dest.lng, '#00ffcc'); 
                 CURRENT_LOC = dest; 
 
                 if(overlay) {
                     overlay.innerText = `Secured & Routed via ${dest.name} 🛡️`;
+                    overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
                 }
             }, 1500);
         }, 1500);
@@ -282,6 +297,7 @@ window.backToHome = function() {
     const overlay = document.getElementById('status-overlay');
     if(overlay) {
         overlay.innerText = `Connection Dropped. Returning... 📡`;
+        overlay.style.color = '#e74c3c'; overlay.style.borderColor = 'rgba(231, 76, 60, 0.5)'; // টেক্সট কালার ফিক্স
     }
 
     globe.ringsData([]); 
@@ -312,6 +328,7 @@ window.backToHome = function() {
 
             if(overlay) {
                 overlay.innerText = `Standing by in ${HOME_LOC.name} 🌐`;
+                overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
             }
         }, 2000);
     }, 1200);
