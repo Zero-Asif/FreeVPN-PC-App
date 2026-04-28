@@ -43,7 +43,7 @@ const countryCoords = {
 function build3DRocket() {
     const wrapper = new window.THREE.Group(); 
     
-    // 1. Flame (ধোঁয়া)
+    // 1. Flame (ধোঁয়া)
     const flameGeo = new window.THREE.ConeGeometry(0.5, 1.5, 16);
     flameGeo.rotateX(-Math.PI / 2); 
     flameGeo.translate(0, 0, 0.75); 
@@ -75,8 +75,7 @@ function build3DRocket() {
         wrapper.add(fin);
     }
 
-    // 🔴 আপনার ইনস্ট্রাকশন অনুযায়ী ডবল সাইজই রাখা হয়েছে।
-    wrapper.scale.set(1.2, 1.2, 1.2); 
+    wrapper.scale.set(1.7, 1.7, 1.7); 
     return wrapper;
 }
 
@@ -90,7 +89,7 @@ async function initUserLocation() {
     const overlay = document.getElementById('status-overlay');
     if(overlay) {
         overlay.innerText = `Detecting Present Location... 🌍`;
-        overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
+        overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)';
     }
 
     try {
@@ -115,7 +114,7 @@ async function initUserLocation() {
 
     if(overlay) {
         overlay.innerText = `Standing by in ${HOME_LOC.name} 🌐`;
-        overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
+        overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)';
     }
 
     if(globe) {
@@ -124,7 +123,15 @@ async function initUserLocation() {
     }
 }
 
-// 🔴 THE EXACT GLOBE.GL INTERNAL MATH
+// ============================================================
+// 🚀 THE PERFECT FIX: Custom Three.js trail along the SAME
+//    bezier curve as the rocket — zero gap, guaranteed.
+//
+//    পুরোনো globe.arcsData() trail এবং রকেটের bezier curve
+//    দুটো আলাদা math ব্যবহার করত, তাই gap হত।
+//    এখন trail-ও একই QuadraticBezierCurve3 থেকে তৈরি,
+//    setDrawRange দিয়ে প্রতি frame-এ রকেটের সাথে সাথে grow করে।
+// ============================================================
 function animate3DRocket(startLat, startLng, endLat, endLng, duration) {
     if(!rocketMesh) return;
     rocketMesh.visible = true; 
@@ -142,26 +149,73 @@ function animate3DRocket(startLat, startLng, endLat, endLng, duration) {
     let vMid = vStart.clone().add(vEnd).multiplyScalar(0.5);
     let vControl = vMid.clone().normalize().multiplyScalar(globeRadius * (1 + maxAlt * 2));
     
+    // রকেট এবং trail একই curve ব্যবহার করবে
     let curve = new window.THREE.QuadraticBezierCurve3(vStart, vControl, vEnd);
+
+    // ── Trail Setup ──────────────────────────────────────────
+    // পুরো path এর সব points আগেই compute করে রাখা হল।
+    // Vertex colors দিয়ে tail (উজ্জ্বল) থেকে পুরানো অংশ (ম্লান) gradient তৈরি।
+    const TRAIL_SEGMENTS = 300;
+    const positions = new Float32Array((TRAIL_SEGMENTS + 1) * 3);
+    const colors    = new Float32Array((TRAIL_SEGMENTS + 1) * 3);
+
+    for (let i = 0; i <= TRAIL_SEGMENTS; i++) {
+        const pt = curve.getPoint(i / TRAIL_SEGMENTS);
+        positions[i * 3]     = pt.x;
+        positions[i * 3 + 1] = pt.y;
+        positions[i * 3 + 2] = pt.z;
+
+        // পুরানো অংশ → ম্লান ধূসর; নতুন অংশ (tail কাছে) → উজ্জ্বল সাদা
+        // i / TRAIL_SEGMENTS = 0..1 → frac বাড়লে সামনের দিক
+        // Trail বাড়ার সাথে সাথে পুরানো অংশ ম্লান দেখাবে।
+        // রকেট সামনে যাচ্ছে মানে index শেষের দিক উজ্জ্বল থাকবে।
+        const brightness = 0.25 + (i / TRAIL_SEGMENTS) * 0.75; // 0.25 → 1.0
+        colors[i * 3]     = brightness;
+        colors[i * 3 + 1] = brightness;
+        colors[i * 3 + 2] = brightness;
+    }
+
+    const trailGeo = new window.THREE.BufferGeometry();
+    trailGeo.setAttribute('position', new window.THREE.BufferAttribute(positions, 3));
+    trailGeo.setAttribute('color',    new window.THREE.BufferAttribute(colors, 3));
+    trailGeo.setDrawRange(0, 0); // শুরুতে কিছু দেখাবে না
+
+    const trailMat = new window.THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.85
+    });
+    const trailLine = new window.THREE.Line(trailGeo, trailMat);
+    globe.scene().add(trailLine);
+    // ─────────────────────────────────────────────────────────
 
     function update() {
         let t = (Date.now() - startTime) / duration;
         if (t > 1) t = 1;
         
-        let vCur = curve.getPoint(t);
+        let vCur  = curve.getPoint(t);
         let vNext = curve.getPoint(Math.min(t + 0.02, 1.0));
         
         rocketMesh.position.copy(vCur); 
         rocketMesh.up.copy(vCur).normalize(); 
         
         if (vNext.distanceToSquared(vCur) > 0.0001) {
-            rocketMesh.lookAt(vNext); // মাথা একদম সামনে থাকবে গ্যারান্টি!
+            rocketMesh.lookAt(vNext);
         }
+
+        // Trail এর endpoint সবসময় রকেটের position = curve.getPoint(t)
+        // কোনো gap নেই কারণ দুটো একই curve ব্যবহার করছে।
+        const visibleCount = Math.floor(t * TRAIL_SEGMENTS) + 2;
+        trailGeo.setDrawRange(0, Math.min(visibleCount, TRAIL_SEGMENTS + 1));
 
         if (t < 1) {
             requestAnimationFrame(update);
         } else {
-            rocketMesh.visible = false; 
+            rocketMesh.visible = false;
+            // Trail সাথে সাথে মুছে দেওয়া হল
+            globe.scene().remove(trailLine);
+            trailGeo.dispose();
+            trailMat.dispose();
         }
     }
     update();
@@ -193,7 +247,6 @@ function buildGlobeUI() {
         overlay.id = 'status-overlay';
         document.body.appendChild(overlay); 
     }
-    // 🔴 UI FIX: আপনার আগের ডিজাইনের সব CSS হুবহু এখানে ফিরিয়ে এনেছি।
     Object.assign(overlay.style, {
         position: 'fixed', bottom: '40px', left: `calc(${sidebarWidth}px + (100vw - ${sidebarWidth}px) / 2)`, 
         transform: 'translateX(-50%)', background: 'rgba(9, 11, 20, 0.9)', 
@@ -249,42 +302,28 @@ window.flyToCountry = function(countryCode) {
     const overlay = document.getElementById('status-overlay');
     if(overlay) {
         overlay.innerText = `Routing to ${dest.name}... 🛰️`;
-        overlay.style.color = '#f1c40f'; overlay.style.borderColor = 'rgba(241, 196, 15, 0.5)'; // টেক্সট কালার ফিক্স
+        overlay.style.color = '#f1c40f'; overlay.style.borderColor = 'rgba(241, 196, 15, 0.5)';
     }
 
     globe.ringsData([]); 
-    globe.arcsData([]);
+    globe.arcsData([]); // যেকোনো পুরানো arc সাফ করা
     globe.pointOfView({ altitude: 3.5 }, 1000); 
 
     let flightDuration = 2500;
 
     setTimeout(() => {
+        // animate3DRocket এর ভেতরেই trail তৈরি হয় — globe.arcsData() এর দরকার নেই।
         animate3DRocket(CURRENT_LOC.lat, CURRENT_LOC.lng, dest.lat, dest.lng, flightDuration);
-
-        // 🔴 SMOKE TRAIL LOGIC
-        globe.arcsData([{ 
-            startLat: CURRENT_LOC.lat, startLng: CURRENT_LOC.lng, 
-            endLat: dest.lat, endLng: dest.lng, 
-            color: ['rgba(255,255,255,0.0)', 'rgba(200,200,200,0.8)'] // সাদা ধোঁয়া
-        }])
-        .arcAltitude(0.35) 
-        .arcColor('color')
-        .arcDashLength(1) 
-        .arcDashGap(2) 
-        .arcDashInitialGap(() => 1) 
-        .arcDashAnimateTime(flightDuration) 
-        .arcStroke(2.5);
 
         setTimeout(() => {
             globe.pointOfView({ lat: dest.lat, lng: dest.lng, altitude: 1.5 }, 2000); 
             setTimeout(() => {
-                globe.arcsData([]); 
                 setPulse(dest.lat, dest.lng, '#00ffcc'); 
                 CURRENT_LOC = dest; 
 
                 if(overlay) {
                     overlay.innerText = `Secured & Routed via ${dest.name} 🛡️`;
-                    overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
+                    overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)';
                 }
             }, 1500);
         }, 1500);
@@ -297,38 +336,28 @@ window.backToHome = function() {
     const overlay = document.getElementById('status-overlay');
     if(overlay) {
         overlay.innerText = `Connection Dropped. Returning... 📡`;
-        overlay.style.color = '#e74c3c'; overlay.style.borderColor = 'rgba(231, 76, 60, 0.5)'; // টেক্সট কালার ফিক্স
+        overlay.style.color = '#e74c3c'; overlay.style.borderColor = 'rgba(231, 76, 60, 0.5)';
     }
 
     globe.ringsData([]); 
-    globe.arcsData([]);
+    globe.arcsData([]); // যেকোনো পুরানো arc সাফ করা
     globe.pointOfView({ altitude: 3.5 }, 1200);
 
     let flightDuration = 2500;
 
     setTimeout(() => {
+        // animate3DRocket এর ভেতরেই trail তৈরি হয় — globe.arcsData() এর দরকার নেই।
         animate3DRocket(CURRENT_LOC.lat, CURRENT_LOC.lng, HOME_LOC.lat, HOME_LOC.lng, flightDuration);
-
-        globe.arcsData([{ 
-            startLat: CURRENT_LOC.lat, startLng: CURRENT_LOC.lng, 
-            endLat: HOME_LOC.lat, endLng: HOME_LOC.lng, 
-            color: ['rgba(255,255,255,0.0)', 'rgba(200,200,200,0.8)'] 
-        }])
-        .arcAltitude(0.35)
-        .arcColor('color')
-        .arcDashLength(1).arcDashGap(2).arcDashInitialGap(() => 1)
-        .arcDashAnimateTime(flightDuration).arcStroke(2.5);
 
         globe.pointOfView({ lat: HOME_LOC.lat, lng: HOME_LOC.lng, altitude: 2.5 }, 2000);
         
         setTimeout(() => {
-            globe.arcsData([]); 
             setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C'); 
             CURRENT_LOC = HOME_LOC; 
 
             if(overlay) {
                 overlay.innerText = `Standing by in ${HOME_LOC.name} 🌐`;
-                overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)'; // টেক্সট কালার ফিক্স
+                overlay.style.color = '#00ffcc'; overlay.style.borderColor = 'rgba(0, 255, 204, 0.5)';
             }
         }, 2000);
     }, 1200);
