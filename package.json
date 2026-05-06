@@ -1,8 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package",
   "name": "freeproxy-vpn",
-  "productName": "FreeProxy",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A premium Tor-backed VPN experience with advanced privacy features.",
   "main": "main.js",
   "author": {
@@ -10,43 +9,78 @@
     "url": "https://github.com/Zero-Asif"
   },
   "license": "MIT",
+  "private": true,
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win"
+    "dist": "electron-builder --win --x64",
+    "dist:debug": "electron-builder --win --x64 --publish never"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1"
   },
   "build": {
     "appId": "com.zeroasif.freeproxy",
+    "productName": "FreeProxy VPN",
     "copyright": "Copyright © 2026 Zero-Asif",
     "directories": {
       "output": "release"
     },
+    "asar": true,
+    "asarUnpack": [
+      "Tor/**/*"
+    ],
+    "files": [
+      "main.js",
+      "renderer.js",
+      "globe-controller.js",
+      "index.html",
+      "style.css",
+      "icon.png",
+      "Tor/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "vc_redist.x64.exe",
+        "to": "vc_redist.x64.exe",
+        "filter": ["**/*"]
+      }
+    ],
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
       ],
       "icon": "icon.png",
       "requestedExecutionLevel": "requireAdministrator"
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "installerIcon": "icon.png",
+      "uninstallerIcon": "icon.png",
+      "installerHeaderIcon": "icon.png",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "FreeProxy VPN",
       "runAfterFinish": true,
-      "include": "installer.nsh"
+      "deleteAppDataOnUninstall": false,
+      "include": "installer.nsh",
+      "installerSidebar": "installerSidebar.bmp",
+      "uninstallerSidebar": "installerSidebar.bmp",
+      "license": "LICENSE.txt",
+      "artifactName": "FreeProxy-VPN-Setup-${version}.${ext}",
+      "displayLanguageSelector": false,
+      "language": "1033"
     },
-    "asar": true,
-    "asarUnpack": [
-      "Tor/**/*"
-    ]
-  },
-  "devDependencies": {
-    "electron": "^41.3.0",
-    "electron-builder": "^26.8.1"
-  },
-  "dependencies": {
-    "ws": "^8.20.0"
+    "publish": null
   }
 }

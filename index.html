@@ -7,89 +7,175 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="app-container">
-        <div class="left-panel">
-            <div class="wrapper">
-                <header>
-            <img src="icon.png" alt="Logo" class="app-logo">
-            <h2>FreeProxy</h2>
-            <div class="header-badges">
-                <span class="badge free">FREE</span>
-                <span class="badge secured">TOR-BACKED</span>
-            </div>
-                </header>
-            
-                <main>
-            <div class="connection-card">
 
-                <div class="custom-dropdown" id="customDropdown">
-                    <div class="selected-server" id="selectedServer">
-                        <span id="selectedText">🇺🇸 United States</span>
-                        <span class="arrow">▼</span>
+<div class="app-container">
+
+    <!-- ══════════════ LEFT PANEL ══════════════ -->
+    <div class="left-panel">
+        <div class="wrapper">
+
+            <!-- Header -->
+            <header>
+                <img src="icon.png" alt="Logo" class="app-logo">
+                <h2>FreeProxy</h2>
+                <div class="header-badges">
+                    <span class="badge free">FREE</span>
+                    <span class="badge secured">TOR-BACKED</span>
+                </div>
+                <div class="version-tag">v2.0.0 · Tor Network</div>
+            </header>
+
+            <main>
+
+                <!-- Connection Card -->
+                <div class="connection-card">
+
+                    <!-- Server Selector -->
+                    <div class="custom-dropdown" id="customDropdown">
+                        <div class="selected-server" id="selectedServer">
+                            <span id="selectedText">🇺🇸 United States</span>
+                            <span class="arrow">▼</span>
+                        </div>
+                        <ul class="dropdown-list" id="dropdownList"></ul>
                     </div>
-                    <ul class="dropdown-list" id="dropdownList">
-                    </ul>
-                </div>
 
-                <button id="connectButton">Tap to Connect</button>
+                    <!-- Connect Button -->
+                    <button id="connectButton">Tap to Connect</button>
 
-                <div class="status-indicator">
-                    <div class="status-pulse disconnected" id="statusPulse"></div>
-                    <span id="statusText">Disconnected</span>
-                </div>
-            </div>
-
-            <div class="features-section">
-                <h3><img src="icon.png" alt="" class="feature-icon-title"> Advanced Features</h3>
-                <div class="feature-item">
-                    <div class="feature-info">
-                        <h4>Kill Switch</h4>
-                        <p>Disable internet if VPN drops.</p>
+                    <!-- Status Row -->
+                    <div class="status-indicator">
+                        <div class="status-pulse disconnected" id="statusPulse"></div>
+                        <span id="statusText">Disconnected</span>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" id="killSwitchToggle">
-                        <span class="slider round"></span>
-                    </label>
-                </div>
-                <div class="feature-item" style="flex-direction: column; align-items: flex-start;">
-                    <div style="display: flex; justify-content: space-between; width: 100%;">
-                        <div class="feature-text">
-                            <strong>Split Tunneling</strong>
-                            <div style="font-size: 11px; color: #666;">Bypass VPN for specific sites</div>
+
+                    <!-- Connection Timer (shown only when connected) -->
+                    <div id="connection-timer-row">
+                        <span>⏱</span>
+                        <span id="connection-timer">00:00:00</span>
+                        <span style="color:#bbb;">connected</span>
+                    </div>
+
+                    <!-- Bootstrap Progress Bar (shown during connect) -->
+                    <div id="progress-section">
+                        <div class="progress-header">
+                            <span id="progress-text">Starting Tor Engine…</span>
+                            <span id="progress-label">0%</span>
+                        </div>
+                        <div class="progress-track">
+                            <div id="progress-fill"></div>
                         </div>
                     </div>
-                    <input type="text" id="bypassInput" placeholder="e.g. *.bkash.com; *.netflix.com"
-                        style="width: 100%; margin-top: 8px; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; outline: none;">
-                </div>
-                
-                <a href="https://ipleak.net/" target="_blank" class="verify-btn">Verify My Privacy</a>
-            </div>
-                </main>
-            </div>
+
+                </div><!-- /.connection-card -->
+
+                <!-- Advanced Features -->
+                <div class="features-section">
+                    <h3>
+                        <img src="icon.png" alt="" class="feature-icon-title">
+                        Advanced Features
+                    </h3>
+
+                    <!-- Kill Switch -->
+                    <div class="feature-item">
+                        <div class="feature-info">
+                            <h4>Kill Switch</h4>
+                            <p>Block internet if VPN drops.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="killSwitchToggle">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <!-- Split Tunneling -->
+                    <div class="feature-item" style="flex-direction:column;align-items:flex-start;">
+                        <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+                            <div class="feature-info">
+                                <h4>Split Tunneling</h4>
+                                <p>Bypass VPN for specific domains.</p>
+                            </div>
+                        </div>
+                        <input type="text" id="bypassInput"
+                            placeholder="e.g. bkash.com; netflix.com">
+                    </div>
+
+                    <!-- Bottom actions -->
+                    <div class="bottom-actions">
+                        <a href="#" class="verify-btn"
+                            onclick="require('electron').shell.openExternal('https://ipleak.net/'); return false;">
+                            🔍 Verify Privacy
+                        </a>
+                        <button class="log-btn" id="openLogBtn">
+                            📋 View Logs
+                        </button>
+                    </div>
+
+                </div><!-- /.features-section -->
+
+            </main>
+        </div><!-- /.wrapper -->
+
+        <!-- Panel Footer -->
+        <div class="panel-footer">
+            <p>FreeProxy VPN · Open Source · 100% Free<br>
+               Built with <a href="#" onclick="require('electron').shell.openExternal('https://www.torproject.org'); return false;">Tor Network</a></p>
         </div>
 
-        <div class="right-panel" id="globe-parent" style="position: relative; flex-grow: 1; height: 100vh; background-color: #090b14; overflow: hidden;">
+    </div><!-- /.left-panel -->
+
+    <!-- ══════════════ RIGHT PANEL (Globe) ══════════════ -->
+    <div class="right-panel" id="globe-parent"></div>
+
+</div><!-- /.app-container -->
+
+<!-- ══════════════ TOAST CONTAINER ══════════════ -->
+<div id="toast-container"></div>
+
+<!-- ══════════════ LOG VIEWER MODAL ══════════════ -->
+<div id="log-modal">
+    <div class="log-modal-box">
+        <div class="log-modal-header">
+            <h4><span>📋</span> FreeProxy Debug Logs</h4>
+            <div class="log-modal-controls">
+                <select class="log-filter" id="logFilter">
+                    <option value="ALL">All Levels</option>
+                    <option value="INFO">Info</option>
+                    <option value="WARN">Warnings</option>
+                    <option value="ERROR">Errors</option>
+                    <option value="SUCCESS">Success</option>
+                </select>
+                <button class="log-close-btn" id="closeLogBtn">✕</button>
             </div>
+        </div>
+        <div id="log-content"></div>
+        <div class="log-modal-footer">
+            <span class="log-path" id="log-path-display">Loading…</span>
+            <button class="log-open-btn" id="openLogFileBtn">Open in Explorer</button>
+        </div>
     </div>
+</div>
 
-    <script>
-        var nodeModule = typeof module !== 'undefined' ? module : undefined;
-        var nodeExports = typeof exports !== 'undefined' ? exports : undefined;
-        if (typeof module !== 'undefined') module = undefined;
-        if (typeof exports !== 'undefined') exports = undefined;
-        window.exports = {};
-    </script>
+<!-- ══════════════ SCRIPTS ══════════════ -->
+<script>
+    // Electron / Node module isolation for Three.js & Globe.gl
+    var nodeModule  = typeof module  !== 'undefined' ? module  : undefined;
+    var nodeExports = typeof exports !== 'undefined' ? exports : undefined;
+    if (typeof module  !== 'undefined') module  = undefined;
+    if (typeof exports !== 'undefined') exports = undefined;
+    window.exports = {};
+</script>
 
-    <script src="https://unpkg.com/three@0.147.0/build/three.min.js"></script>
-    <script src="https://unpkg.com/globe.gl@2.27.2/dist/globe.gl.min.js"></script>
+<script src="https://unpkg.com/three@0.147.0/build/three.min.js"></script>
+<script src="https://unpkg.com/globe.gl@2.27.2/dist/globe.gl.min.js"></script>
 
-    <script>
-        if (nodeModule) module = nodeModule;
-        if (nodeExports) exports = nodeExports;
-        delete window.exports;
-    </script>
+<script>
+    if (nodeModule)  module  = nodeModule;
+    if (nodeExports) exports = nodeExports;
+    delete window.exports;
+</script>
 
-    <script src="globe-controller.js"></script>
-    <script src="renderer.js"></script>
+<script src="globe-controller.js"></script>
+<script src="renderer.js"></script>
+
 </body>
 </html>

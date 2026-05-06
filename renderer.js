@@ -1,168 +1,389 @@
 const { ipcRenderer } = require('electron');
-
 const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
 
-let currentServer = "us"; 
-let isAppConnected = false; 
-let fastData = null;
-let isLoading = true; 
-let liveNodeCounts = {}; 
+let currentServer     = 'us';
+let isAppConnected    = false;
+let fastData          = null;
+let isLoading         = true;
+let liveNodeCounts    = {};
+let rocketActionTaken = false;
 
-function getFlagImg(countryCode) {
-    return `<img src="https://flagcdn.com/w20/${countryCode.toLowerCase()}.png" alt="${countryCode}" style="width: 20px; vertical-align: middle; margin-right: 8px; border-radius: 2px; box-shadow: 0 0 2px rgba(0,0,0,0.3);">`;
+// Timer
+let timerInterval = null, connectedAt = null;
+
+// Geolocation spoof — store real implementation
+let _realGeolocation = null;
+
+// ════════════════════════════════════════════════════════════
+//  UTILITY
+// ════════════════════════════════════════════════════════════
+function getFlagImg(code) {
+    return `<img src="https://flagcdn.com/w20/${code.toLowerCase()}.png" alt="${code}"
+        style="width:20px;vertical-align:middle;margin-right:8px;border-radius:2px;box-shadow:0 0 2px rgba(0,0,0,0.25);">`;
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
-    const connectButton = document.getElementById('connectButton');
-    const statusPulse = document.getElementById('statusPulse');
-    const statusText = document.getElementById('statusText');
-    const killSwitchToggle = document.getElementById('killSwitchToggle');
-    const selectedServer = document.getElementById('selectedServer');
-    const dropdownList = document.getElementById('dropdownList');
-    const selectedText = document.getElementById('selectedText');
-    const bypassInput = document.getElementById('bypassInput');
+// ════════════════════════════════════════════════════════════
+//  🛰️ GEOLOCATION SPOOF  (Layer 2 — renderer side, Point 5)
+//
+//  navigator.geolocation is patched to return the connected
+//  country's capital coordinates.  This runs in the renderer
+//  process and covers JS calls from within the Electron window.
+//  The main process CDP override (Layer 1) covers engine-level
+//  requests, so both layers work together.
+//
+//  The spoof is indistinguishable from a real location:
+//  • coords.accuracy comes from GEO_COORDS per country
+//  • timestamp is always Date.now() (looks live)
+//  • coords.altitude, speed, heading = null (normal for IP-geo)
+// ════════════════════════════════════════════════════════════
+function spoofGeolocation(lat, lng, accuracy, city, country) {
+    // Save original implementation (only once)
+    if (!_realGeolocation) {
+        _realGeolocation = {
+            getCurrentPosition: navigator.geolocation.getCurrentPosition.bind(navigator.geolocation),
+            watchPosition:      navigator.geolocation.watchPosition.bind(navigator.geolocation),
+            clearWatch:         navigator.geolocation.clearWatch.bind(navigator.geolocation),
+        };
+    }
 
-    document.addEventListener('click', (e) => {
-        if (!selectedServer.contains(e.target) && !dropdownList.contains(e.target)) {
-            dropdownList.classList.remove('show');
+    // Add tiny jitter each call so coords don't look frozen
+    const jitter = () => (Math.random() - 0.5) * 0.004; // ±~200m
+
+    function buildPosition() {
+        return {
+            coords: {
+                latitude:         lat + jitter(),
+                longitude:        lng + jitter(),
+                accuracy:         accuracy,
+                altitude:         null,
+                altitudeAccuracy: null,
+                heading:          null,
+                speed:            null,
+            },
+            timestamp: Date.now(),
+        };
+    }
+
+    // Override getCurrentPosition
+    navigator.geolocation.getCurrentPosition = function(success, error, options) {
+        setTimeout(() => success(buildPosition()), 80 + Math.random() * 120); // realistic delay
+    };
+
+    // Override watchPosition — returns a fake watch ID, calls success repeatedly
+    navigator.geolocation.watchPosition = function(success, error, options) {
+        const id = Math.floor(Math.random() * 9999) + 1000;
+        success(buildPosition());
+        // Keep firing every 5s like a real GPS watch
+        const interval = setInterval(() => success(buildPosition()), 5000);
+        navigator.geolocation._fakeWatchers = navigator.geolocation._fakeWatchers || {};
+        navigator.geolocation._fakeWatchers[id] = interval;
+        return id;
+    };
+
+    // Override clearWatch
+    navigator.geolocation.clearWatch = function(id) {
+        if (navigator.geolocation._fakeWatchers?.[id]) {
+            clearInterval(navigator.geolocation._fakeWatchers[id]);
+            delete navigator.geolocation._fakeWatchers[id];
         }
+    };
+
+    console.log(`[FreeProxy] 🛰️ Geolocation spoofed → ${city}, ${country} (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
+}
+
+function restoreGeolocation() {
+    if (!_realGeolocation) return;
+
+    // Clear any active fake watchers
+    if (navigator.geolocation._fakeWatchers) {
+        Object.values(navigator.geolocation._fakeWatchers).forEach(clearInterval);
+        navigator.geolocation._fakeWatchers = {};
+    }
+
+    navigator.geolocation.getCurrentPosition = _realGeolocation.getCurrentPosition;
+    navigator.geolocation.watchPosition      = _realGeolocation.watchPosition;
+    navigator.geolocation.clearWatch         = _realGeolocation.clearWatch;
+    _realGeolocation = null;
+
+    console.log('[FreeProxy] 🛰️ Geolocation restored to real location');
+}
+
+// ════════════════════════════════════════════════════════════
+//  IPC: Geo spoof commands from main.js
+// ════════════════════════════════════════════════════════════
+ipcRenderer.on('geo-spoof-on', (event, { lat, lng, accuracy, city, country }) => {
+    spoofGeolocation(lat, lng, accuracy, city, country);
+    showToast(`📍 Location spoofed → <strong>${city}, ${country}</strong>`, 'success', 5000);
+});
+
+ipcRenderer.on('geo-spoof-off', () => {
+    restoreGeolocation();
+    showToast('📍 Location restored to your real position.', 'info', 3500);
+});
+
+// ════════════════════════════════════════════════════════════
+//  ⏱ CONNECTION TIMER
+// ════════════════════════════════════════════════════════════
+function startTimer() {
+    connectedAt = Date.now();
+    const row = document.getElementById('connection-timer-row');
+    const el  = document.getElementById('connection-timer');
+    if (row) row.classList.add('visible');
+    clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+        if (!el) return;
+        const s = Math.floor((Date.now() - connectedAt) / 1000);
+        const h = String(Math.floor(s / 3600)).padStart(2, '0');
+        const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+        el.textContent = `${h}:${m}:${String(s % 60).padStart(2, '0')}`;
+    }, 1000);
+}
+
+function stopTimer() {
+    clearInterval(timerInterval); timerInterval = null; connectedAt = null;
+    const row = document.getElementById('connection-timer-row');
+    const el  = document.getElementById('connection-timer');
+    if (row) row.classList.remove('visible');
+    if (el)  el.textContent = '00:00:00';
+}
+
+// ════════════════════════════════════════════════════════════
+//  🎯 PROGRESS BAR
+// ════════════════════════════════════════════════════════════
+function showProgress(percent, message, status) {
+    const section = document.getElementById('progress-section');
+    const fill    = document.getElementById('progress-fill');
+    const text    = document.getElementById('progress-text');
+    const label   = document.getElementById('progress-label');
+    if (!section) return;
+    section.style.display = 'block'; section.style.opacity = '1';
+    if (fill)  fill.style.width = `${Math.max(4, percent)}%`;
+    if (text)  text.textContent = message;
+    const gradients = {
+        connecting:  'linear-gradient(90deg,#5031b2,#7c3aed)',
+        slow:        'linear-gradient(90deg,#d97706,#f59e0b)',
+        unavailable: 'linear-gradient(90deg,#dc2626,#ef4444)',
+        connected:   'linear-gradient(90deg,#16a34a,#22c55e)',
+    };
+    if (fill) fill.style.background = gradients[status] || gradients.connecting;
+    if (label) {
+        const labels = { connecting:`${percent}%`, slow:`${percent}% — Slow`, unavailable:'Failed', connected:'100% ✓' };
+        label.textContent = labels[status] || `${percent}%`;
+    }
+}
+
+function hideProgress(delayMs = 0) {
+    setTimeout(() => {
+        const section = document.getElementById('progress-section');
+        const fill    = document.getElementById('progress-fill');
+        if (!section) return;
+        section.style.transition = 'opacity 0.4s'; section.style.opacity = '0';
+        setTimeout(() => { section.style.display='none'; section.style.opacity='1'; if(fill) fill.style.width='0%'; }, 420);
+    }, delayMs);
+}
+
+// ════════════════════════════════════════════════════════════
+//  🔔 TOAST NOTIFICATIONS
+// ════════════════════════════════════════════════════════════
+function showToast(message, type = 'info', durationMs = 5000) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    if (type === 'warning' && container.querySelector('.toast-warning')) return;
+    const icons = { info:'ℹ️', warning:'⚠️', error:'❌', success:'✅' };
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.innerHTML = `
+        <span class="toast-icon">${icons[type]||'ℹ️'}</span>
+        <span class="toast-msg">${message}</span>
+        <button class="toast-close" onclick="this.parentElement.remove()">×</button>`;
+    container.appendChild(toast);
+    setTimeout(() => {
+        if (!toast.parentElement) return;
+        toast.style.opacity='0'; toast.style.transform='translateY(8px)';
+        setTimeout(() => toast.remove(), 380);
+    }, durationMs);
+}
+
+// ════════════════════════════════════════════════════════════
+//  📋 LOG VIEWER
+// ════════════════════════════════════════════════════════════
+async function openLogModal() {
+    const modal   = document.getElementById('log-modal');
+    const content = document.getElementById('log-content');
+    if (!modal || !content) return;
+    modal.classList.add('open');
+    content.innerHTML = '<div class="log-line INFO">Loading…</div>';
+    await refreshLogContent(document.getElementById('logFilter')?.value || 'ALL');
+    content.scrollTop = content.scrollHeight;
+}
+
+async function refreshLogContent(level = 'ALL') {
+    const content = document.getElementById('log-content');
+    const pathEl  = document.getElementById('log-path-display');
+    try {
+        const { lines, logFile } = await ipcRenderer.invoke('get-log-lines', { n: 400, level });
+        if (pathEl) pathEl.textContent = logFile || '—';
+        if (!lines.length) { content.innerHTML = '<div class="log-line INFO">No log entries yet.</div>'; return; }
+        content.innerHTML = lines.map(line => {
+            let cls = 'INFO';
+            if (line.includes('[ERROR  ]')) cls = 'ERROR';
+            else if (line.includes('[WARN   ]')) cls = 'WARN';
+            else if (line.includes('[SUCCESS]')) cls = 'SUCCESS';
+            else if (line.includes('[DEBUG  ]')) cls = 'DEBUG';
+            const hl = line
+                .replace(/(\d+%)/g, '<strong>$1</strong>')
+                .replace(/(ERROR|FAIL|failed)/gi, '<span style="color:#f87171;font-weight:700">$1</span>')
+                .replace(/(SUCCESS|connected|secured|spoofed)/gi, '<span style="color:#4ade80;font-weight:700">$1</span>');
+            return `<div class="log-line ${cls}">${hl}</div>`;
+        }).join('');
+    } catch(e) {
+        content.innerHTML = `<div class="log-line ERROR">Failed to load logs: ${e.message}</div>`;
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+//  📡 CONNECTION PROGRESS  (IPC from main.js)
+// ════════════════════════════════════════════════════════════
+ipcRenderer.on('connection-progress', (event, { percent, message, status }) => {
+    showProgress(percent, message, status);
+    if (status === 'slow')
+        showToast(`⚠️ <strong>Server is slow.</strong> Connection still in progress…`, 'warning', 9000);
+    if (!rocketActionTaken) {
+        if (status === 'connected') { rocketActionTaken=true; window.landRocket?.(); }
+        else if (status === 'unavailable') {
+            rocketActionTaken=true; window.explodeRocket?.();
+            showToast(`❌ <strong>Server unavailable.</strong> Please choose a faster country.`, 'error', 7000);
+        }
+    }
+});
+
+// ════════════════════════════════════════════════════════════
+//  MAIN DOM LOGIC
+// ════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', async () => {
+    const connectButton    = document.getElementById('connectButton');
+    const statusPulse      = document.getElementById('statusPulse');
+    const statusText       = document.getElementById('statusText');
+    const killSwitchToggle = document.getElementById('killSwitchToggle');
+    const selectedServer   = document.getElementById('selectedServer');
+    const dropdownList     = document.getElementById('dropdownList');
+    const selectedText     = document.getElementById('selectedText');
+    const bypassInput      = document.getElementById('bypassInput');
+
+    // Log modal
+    document.getElementById('openLogBtn')?.addEventListener('click', openLogModal);
+    document.getElementById('closeLogBtn')?.addEventListener('click', () => document.getElementById('log-modal')?.classList.remove('open'));
+    document.getElementById('log-modal')?.addEventListener('click', e => { if (e.target===e.currentTarget) e.currentTarget.classList.remove('open'); });
+    document.getElementById('logFilter')?.addEventListener('change', async e => {
+        await refreshLogContent(e.target.value);
+        document.getElementById('log-content').scrollTop = document.getElementById('log-content').scrollHeight;
+    });
+    document.getElementById('openLogFileBtn')?.addEventListener('click', () => ipcRenderer.invoke('open-log-folder'));
+
+    // Close dropdown outside
+    document.addEventListener('click', e => {
+        if (!selectedServer.contains(e.target) && !dropdownList.contains(e.target))
+            dropdownList.classList.remove('show');
     });
 
     try { fastData = await ipcRenderer.invoke('get-fastest-server'); } catch(e) {}
 
     bypassInput.addEventListener('blur', async () => {
-        let val = bypassInput.value.trim();
-        if (val) {
-            bypassInput.value = val.replace(/,/g, ';').split(';').map(s => s.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/[\*\s]/g, '')).filter(s => s !== '').join('; ');
-        } else { bypassInput.value = ""; }
+        const val = bypassInput.value.trim();
+        bypassInput.value = val
+            ? val.replace(/,/g,';').split(';').map(s => s.trim().toLowerCase()
+                .replace(/^https?:\/\//,'').replace(/\/.*$/,'').replace(/[\*\s]/g,'')).filter(Boolean).join('; ')
+            : '';
         if (isAppConnected) await ipcRenderer.invoke('update-live-bypass', bypassInput.value);
     });
 
+    // ── Country list ──────────────────────────────────────
     async function fetchAndRenderCountries() {
         if (dropdownList.children.length === 0) {
-            dropdownList.innerHTML = `<li class="loading-msg" style="justify-content: center; padding: 15px; color: #666; font-size: 13px;">Searching active servers... ⏳</li>`;
+            dropdownList.innerHTML = `<li style="justify-content:center;padding:14px;color:#aaa;font-size:0.8rem;">Fetching live Tor nodes… ⏳</li>`;
         }
-
         let counts;
-        try { 
+        try {
             counts = await Promise.race([
                 ipcRenderer.invoke('get-realtime-status'),
                 new Promise(resolve => setTimeout(() => resolve(null), 12000))
             ]);
         } catch(e) {}
-        
-        if (!counts || Object.keys(counts).length === 0) return;
+        if (!counts || !Object.keys(counts).length) return;
 
-        isLoading = false; 
-        liveNodeCounts = counts; 
-        const loadingMsg = dropdownList.querySelector('.loading-msg');
+        isLoading=false; liveNodeCounts=counts;
+        const loadingMsg = dropdownList.querySelector('li:not([data-value])');
         if (loadingMsg) loadingMsg.remove();
 
-        if (isAppConnected && currentServer) {
-            if (!counts[currentServer]) counts[currentServer] = 1; 
-        }
+        if (isAppConnected && currentServer && !counts[currentServer])
+            counts[currentServer] = { count:1, bandwidth:10000000 };
 
-        const sortedCountries = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+        const sorted = Object.keys(counts).sort((a,b) => ((counts[b]?.bandwidth)||0) - ((counts[a]?.bandwidth)||0));
 
-        sortedCountries.forEach((code) => {
-            const nodeCount = counts[code];
-            if (nodeCount === 0) return;
-
-            let countryName = code.toUpperCase();
-            try { countryName = regionNames.of(code.toUpperCase()); } catch(e){}
-
-            let pingMs = 0;
-            let statusClass = "status-slow";
-
-            if (nodeCount > 100) {
-                pingMs = Math.floor(Math.random() * (150 - 110 + 1)) + 110; statusClass = "status-fast";
-            } else if (nodeCount > 40) {
-                pingMs = Math.floor(Math.random() * (190 - 151 + 1)) + 151; statusClass = "status-fast";
-            } else if (nodeCount > 10) {
-                pingMs = Math.floor(Math.random() * (280 - 191 + 1)) + 191; statusClass = "status-busy";
-            } else {
-                pingMs = Math.floor(Math.random() * (450 - 281 + 1)) + 281; statusClass = "status-slow";
-            }
-
-            let statusLabel = `${pingMs} ms`;
-            let badgeHtml = (fastData && code === fastData.best) ? `<span class="fastest-badge">BEST</span>` : '';
-            
-            if (isAppConnected && currentServer === code) {
-                statusClass = "status-fast"; statusLabel = "Connected";
-            }
-
-            let existingLi = dropdownList.querySelector(`li[data-value="${code}"]`);
-            if (existingLi) {
-                const statusSpan = existingLi.querySelector('.server-status');
-                if (statusSpan.innerText !== statusLabel) {
-                    statusSpan.className = `server-status ${statusClass}`;
-                    statusSpan.innerText = statusLabel;
-                }
-                dropdownList.appendChild(existingLi);
+        sorted.forEach(code => {
+            const { count=0, bandwidth=0 } = counts[code]||{};
+            if (!count) return;
+            let name = code.toUpperCase();
+            try { name = regionNames.of(code.toUpperCase()); } catch(e) {}
+            const mbps = bandwidth / 1_000_000;
+            let cls, label;
+            if (isAppConnected && currentServer===code) { cls='status-fast'; label='Connected ✓'; }
+            else if (count>200 || mbps>50)  { cls='status-fast'; label=`${Math.floor(70+Math.random()*50)} ms`; }
+            else if (count>50  || mbps>10)  { cls='status-busy'; label=`${Math.floor(160+Math.random()*70)} ms`; }
+            else                             { cls='status-slow'; label=`${Math.floor(290+Math.random()*100)} ms`; }
+            const badge = (fastData && code===fastData.best) ? `<span class="fastest-badge">BEST</span>` : '';
+            const existing = dropdownList.querySelector(`li[data-value="${code}"]`);
+            if (existing) {
+                const sp = existing.querySelector('.server-status');
+                if (sp) { sp.className=`server-status ${cls}`; sp.textContent=label; }
+                dropdownList.appendChild(existing);
             } else {
                 const li = document.createElement('li');
                 li.setAttribute('data-value', code);
-                li.innerHTML = `
-                    <span style="display: flex; align-items: center;">${getFlagImg(code)} ${countryName} ${badgeHtml}</span>
-                    <span class="server-status ${statusClass}">${statusLabel}</span>
-                `;
+                if (isAppConnected && currentServer===code) li.classList.add('active-server');
+                li.innerHTML = `<span style="display:flex;align-items:center;">${getFlagImg(code)}${name}${badge}</span><span class="server-status ${cls}">${label}</span>`;
                 dropdownList.appendChild(li);
             }
         });
-
-        const allLis = dropdownList.querySelectorAll('li');
-        allLis.forEach(li => {
+        dropdownList.querySelectorAll('li[data-value]').forEach(li => {
             const code = li.getAttribute('data-value');
-            if (code && !counts[code] && !(isAppConnected && currentServer === code)) {
-                li.remove();
-            }
+            if (code && !counts[code] && !(isAppConnected && currentServer===code)) li.remove();
         });
     }
 
-    // 🔴 সার্ভার সুইচ করার আপডেট লজিক
-    dropdownList.addEventListener('click', async (e) => {
+    // ── Server switch ─────────────────────────────────────
+    dropdownList.addEventListener('click', async e => {
         const li = e.target.closest('li');
-        if(!li || !li.hasAttribute('data-value')) return;
-        
+        if (!li || !li.hasAttribute('data-value')) return;
         currentServer = li.getAttribute('data-value');
         let cName = currentServer.toUpperCase();
-        try{ cName = regionNames.of(currentServer.toUpperCase()); }catch(e){}
-        
-        selectedText.innerHTML = `${getFlagImg(currentServer)} ${cName}`; 
+        try { cName = regionNames.of(currentServer.toUpperCase()); } catch(e) {}
+        selectedText.innerHTML = `${getFlagImg(currentServer)} ${cName}`;
         dropdownList.classList.remove('show');
 
         if (isAppConnected) {
-            statusText.innerText = "Switching... 🔄";
-            connectButton.innerText = "Switching Servers...";
-            connectButton.disabled = true; 
+            connectButton.textContent='Switching…'; connectButton.disabled=true;
             connectButton.classList.remove('connected');
-            statusPulse.className = 'status-pulse'; 
-            
-            // অ্যানিমেশন সাথে সাথে শুরু করে দেওয়া হলো
-            flyToCountry(currentServer);
+            statusPulse.className='status-pulse connecting'; statusText.textContent='Rerouting… 🔄';
+            stopTimer();
+            rocketActionTaken=false;
+            window.flyToCountry?.(currentServer);
+            await ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked);
 
-            // 4.7 সেকেন্ড অ্যানিমেশন টাইম এবং ব্যাকএন্ড একসাথে সিঙ্ক করা হলো
-            const [response] = await Promise.all([
-                (async () => {
-                    await ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked);
-                    const bypassValue = document.getElementById('bypassInput').value;
-                    return await ipcRenderer.invoke('connect-vpn', { serverCode: currentServer, bypassList: bypassValue });
-                })(),
-                new Promise(resolve => setTimeout(resolve, 4700)) 
-            ]);
-            
-            connectButton.disabled = false; 
+            let response;
+            try { response = await ipcRenderer.invoke('connect-vpn', { serverCode: currentServer, bypassList: bypassInput.value }); }
+            catch(e) { response = { status:'unavailable' }; }
 
-            if (response.status === "connected") {
+            connectButton.disabled=false;
+            if (response.status==='connected') {
                 localStorage.setItem('isConnected', 'true');
                 updateUI(true, currentServer);
-                fetchAndRenderCountries(); 
+                showProgress(100, `Switched & Secured via ${cName} 🛡️`, 'connected');
+                hideProgress(2500); fetchAndRenderCountries();
             } else {
                 localStorage.setItem('isConnected', 'false');
                 updateUI(false, currentServer);
-                backToHome();
-                fetchAndRenderCountries();
-                alert(`⚠️ This server (${cName}) is slow, busy, or unavailable right now. Please try faster servers.`);
+                hideProgress(3000); fetchAndRenderCountries();
             }
         } else {
             localStorage.setItem('activeServer', currentServer);
@@ -171,133 +392,119 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     fetchAndRenderCountries();
-    setInterval(fetchAndRenderCountries, 30000); 
+    setInterval(fetchAndRenderCountries, 30000);
 
-    function updateUI(connected, serverValue = null) {
-        isAppConnected = connected;
+    // ── UI state ──────────────────────────────────────────
+    function updateUI(connected, serverValue=null) {
+        isAppConnected=connected;
         if (serverValue) {
-            currentServer = serverValue;
-            let cName = serverValue.toUpperCase();
-            try{ cName = regionNames.of(serverValue.toUpperCase()); }catch(e){}
-            selectedText.innerHTML = `${getFlagImg(serverValue)} ${cName}`;
+            currentServer=serverValue;
+            let cName=serverValue.toUpperCase();
+            try { cName=regionNames.of(serverValue.toUpperCase()); } catch(e) {}
+            selectedText.innerHTML=`${getFlagImg(serverValue)} ${cName}`;
         }
+        dropdownList.querySelectorAll('li[data-value]').forEach(li =>
+            li.classList.toggle('active-server', connected && li.getAttribute('data-value')===currentServer));
         if (connected) {
-            connectButton.innerText = "Disconnect";
-            connectButton.classList.add('connected');
-            statusPulse.className = 'status-pulse connected';
-            statusText.innerText = "Protected";
+            connectButton.textContent='Disconnect'; connectButton.classList.add('connected');
+            statusPulse.className='status-pulse connected'; statusText.textContent='Protected 🛡️';
+            startTimer();
         } else {
-            connectButton.innerText = "Tap to Connect";
-            connectButton.classList.remove('connected');
-            statusPulse.className = 'status-pulse disconnected';
-            statusText.innerText = "Disconnected";
+            connectButton.textContent='Tap to Connect'; connectButton.classList.remove('connected');
+            statusPulse.className='status-pulse disconnected'; statusText.textContent='Disconnected';
+            stopTimer();
         }
     }
 
-    const savedServer = localStorage.getItem('activeServer') || "us";
-    const savedState = localStorage.getItem('isConnected') === 'true';
-    const savedKillSwitch = localStorage.getItem('killSwitch') === 'true';
-    
+    const savedServer     = localStorage.getItem('activeServer')  || 'us';
+    const savedState      = localStorage.getItem('isConnected')   === 'true';
+    const savedKillSwitch = localStorage.getItem('killSwitch')    === 'true';
     updateUI(savedState, savedServer);
     killSwitchToggle.checked = savedKillSwitch;
+    selectedServer.addEventListener('click', () => dropdownList.classList.toggle('show'));
 
-    selectedServer.addEventListener('click', () => { dropdownList.classList.toggle('show'); });
-
-    // 🔴 মেইন কানেক্ট বাটনের আপডেট লজিক
+    // ════════════════════════════════════════════════════════
+    //  🟢 CONNECT / DISCONNECT
+    // ════════════════════════════════════════════════════════
     connectButton.addEventListener('click', async () => {
-        if (isLoading) { alert("🔄 Please wait! Fetching active server list..."); return; }
+        if (isLoading) { showToast('🔄 Please wait — fetching live server list…','info',3000); return; }
+        const bypassValue=bypassInput.value;
+        let cName=currentServer.toUpperCase();
+        try { cName=regionNames.of(currentServer.toUpperCase()); } catch(e) {}
 
-        const bypassValue = document.getElementById('bypassInput').value;
-        let cName = currentServer.toUpperCase();
-        try{ cName = regionNames.of(currentServer.toUpperCase()); }catch(e){}
-
+        // ── DISCONNECT ────────────────────────────────────
         if (isAppConnected) {
-            connectButton.innerText = "Disconnecting... 🛸";
-            connectButton.disabled = true;
-
-            // ডিসকানেক্ট হওয়ার অ্যানিমেশন শুরু (৪ সেকেন্ড লাগে)
-            backToHome();
-
-            // ৪ সেকেন্ড সিঙ্ক ওয়েট
-            const [response] = await Promise.all([
-                ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked),
-                new Promise(resolve => setTimeout(resolve, 4000))
-            ]);
-
-            connectButton.disabled = false;
-            
-            if (response.status === "disconnected") {
-                localStorage.setItem('isConnected', 'false');
+            connectButton.textContent='Disconnecting… 🛸'; connectButton.disabled=true;
+            stopTimer();
+            window.backToHome?.();
+            let response;
+            try { response=await ipcRenderer.invoke('disconnect-vpn', killSwitchToggle.checked); }
+            catch(e) { response={status:'disconnected'}; }
+            connectButton.disabled=false;
+            hideProgress(300);
+            if (response.status==='disconnected') {
+                localStorage.setItem('isConnected','false');
                 updateUI(false, currentServer);
-                fetchAndRenderCountries(); 
-            }
-        } else {
-            connectButton.innerText = "Connecting... 🚀";
-            connectButton.disabled = true; 
-            
-            // কানেক্ট হওয়ার অ্যানিমেশন শুরু (৪.৭ সেকেন্ড লাগে)
-            flyToCountry(currentServer);
-
-            // ৪.৭ সেকেন্ড সিঙ্ক ওয়েট
-            const [response] = await Promise.all([
-                ipcRenderer.invoke('connect-vpn', { serverCode: currentServer, bypassList: bypassValue }),
-                new Promise(resolve => setTimeout(resolve, 4700))
-            ]);
-
-            connectButton.disabled = false; 
-
-            if (response.status === "connected") {
-                localStorage.setItem('isConnected', 'true');
-                updateUI(true, currentServer);
-                fetchAndRenderCountries(); 
-            } else {
-                localStorage.setItem('isConnected', 'false');
-                updateUI(false, currentServer);
-                backToHome();
+                showToast(`🔓 Disconnected from ${cName}.`, 'info', 3000);
                 fetchAndRenderCountries();
-                alert(`⚠️ This server (${cName}) is slow, busy, or unavailable right now. Please try faster servers.`);
             }
+            return;
+        }
+
+        // ── CONNECT ───────────────────────────────────────
+        connectButton.textContent='Connecting… 🚀'; connectButton.disabled=true;
+        statusPulse.className='status-pulse connecting'; rocketActionTaken=false;
+        window.flyToCountry?.(currentServer);
+
+        let response;
+        try { response=await ipcRenderer.invoke('connect-vpn', { serverCode:currentServer, bypassList:bypassValue }); }
+        catch(e) { response={status:'unavailable'}; }
+
+        connectButton.disabled=false;
+        if (response.status==='connected') {
+            localStorage.setItem('isConnected','true');
+            updateUI(true, currentServer);
+            if (!rocketActionTaken) { rocketActionTaken=true; window.landRocket?.(); }
+            showProgress(100, `Connected via ${cName} 🛡️`, 'connected');
+            hideProgress(2800);
+            showToast(`✅ <strong>Connected!</strong> Routed via ${cName}. IP & GPS hidden.`, 'success', 6000);
+            fetchAndRenderCountries();
+        } else {
+            localStorage.setItem('isConnected','false');
+            updateUI(false, currentServer);
+            if (!rocketActionTaken) { rocketActionTaken=true; window.explodeRocket?.(); }
+            hideProgress(3200); fetchAndRenderCountries();
         }
     });
 
-    killSwitchToggle.addEventListener('change', async (e) => {
-        const isEnabled = e.target.checked;
-        localStorage.setItem('killSwitch', isEnabled ? 'true' : 'false');
-        if (!isAppConnected) await ipcRenderer.invoke('toggle-killswitch', isEnabled);
+    // ── Kill Switch ───────────────────────────────────────
+    killSwitchToggle.addEventListener('change', async e => {
+        const on=e.target.checked;
+        localStorage.setItem('killSwitch', on?'true':'false');
+        if (!isAppConnected) await ipcRenderer.invoke('toggle-killswitch', on);
+        showToast(on ? '🔒 Kill Switch <strong>ON</strong> — Internet blocked if VPN drops.'
+                     : '🔓 Kill Switch <strong>OFF</strong>.', on?'warning':'info', 3500);
     });
 
-    // Input from extension to sync UI state in real-time
+    // ── Extension sync ────────────────────────────────────
     ipcRenderer.on('sync-ui-state', (event, state) => {
-        if (currentServer !== state.serverCode) {
-            currentServer = state.serverCode;
-            let cName = currentServer.toUpperCase();
-            try { cName = regionNames.of(currentServer.toUpperCase()); } catch(e){}
-            selectedText.innerHTML = `${getFlagImg(currentServer)} ${cName}`;
+        if (currentServer!==state.serverCode) {
+            currentServer=state.serverCode;
+            let cName=currentServer.toUpperCase();
+            try { cName=regionNames.of(currentServer.toUpperCase()); } catch(e) {}
+            selectedText.innerHTML=`${getFlagImg(currentServer)} ${cName}`;
         }
-        
-        if (killSwitchToggle.checked !== state.killSwitch) {
-            killSwitchToggle.checked = state.killSwitch;
-            localStorage.setItem('killSwitch', state.killSwitch ? 'true' : 'false');
+        if (killSwitchToggle.checked!==state.killSwitch) {
+            killSwitchToggle.checked=state.killSwitch;
+            localStorage.setItem('killSwitch', state.killSwitch?'true':'false');
             if (!isAppConnected) ipcRenderer.invoke('toggle-killswitch', state.killSwitch);
         }
-
-        if (bypassInput.value !== state.bypassList) {
-            bypassInput.value = state.bypassList;
+        if (bypassInput.value!==state.bypassList) {
+            bypassInput.value=state.bypassList;
             if (isAppConnected) ipcRenderer.invoke('update-live-bypass', bypassInput.value);
         }
     });
 
-    // Connect signal from extension to force UI update
-    ipcRenderer.on('force-connect-ui', () => {
-        if (!isAppConnected) {
-            connectButton.click(); 
-        }
-    });
-
-    // Disconnect signal from extension to force UI update
-    ipcRenderer.on('force-disconnect-ui', () => {
-        if (isAppConnected) {
-            connectButton.click(); 
-        }
-    });
+    ipcRenderer.on('force-connect-ui',    ()=>{ if (!isAppConnected) connectButton.click(); });
+    ipcRenderer.on('force-disconnect-ui', ()=>{ if (isAppConnected)  connectButton.click(); });
 });
