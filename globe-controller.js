@@ -387,12 +387,14 @@ function createExplosionAt(worldPos) {
 // ════════════════════════════════════════════════════════════════════
 function createFC(curve, trail, destInfo) {
     return {
-        state:      'launching', // → hovering → landing | exploding
-        t:          0,
-        hoverPhase: 0,
+        // states: 'flying' → 'landing' | 'exploding' | 'done'
+        // Removed 'launching'/'hovering' — rocket now flies continuously
+        state:     'flying',
+        t:         0,
+        startTime: Date.now(),
         curve, trail, destInfo,
-        cancelled:  false,
-        worldPos:   new window.THREE.Vector3()
+        cancelled: false,
+        worldPos:  new window.THREE.Vector3()
     };
 }
 
@@ -403,6 +405,7 @@ function positionRocket(fc) {
     const vNext = fc.curve.getPoint(Math.min(fc.t + 0.018, 0.9999));
 
     rocketMesh.visible = true;
+    rocketMesh.scale.setScalar(1.3); // restore scale in case it was 0'd by landing
     rocketMesh.position.copy(vCur);
     fc.worldPos.copy(vCur);
 
@@ -412,27 +415,29 @@ function positionRocket(fc) {
     if (vNext.distanceToSquared(vCur) > 1e-6) rocketMesh.lookAt(vNext);
 }
 
-// ── Launch → Hover loop ──────────────────────────────────────────
-function runLaunchHover(fc, launchMs) {
-    const t0 = Date.now();
-    const APEX_COUNT = Math.floor(0.5 * TRAIL_SEG) + 2;
+// ── Continuous slow flight (0 → ~0.95 over FLIGHT_MS) ──────────
+// Rocket flies toward destination. Landing is triggered externally
+// by landRocket() when Tor bootstrap completes. No hover state.
+const FLIGHT_MS = 90000; // 90 seconds max flight before auto-abort
+
+function runContinuousFlight(fc) {
+    fc.startTime = Date.now();
 
     function frame() {
         if (fc.cancelled || !rocketMesh) return;
-        const el = Date.now() - t0;
+        if (fc.state === 'landing' || fc.state === 'done' || fc.state === 'exploding') return;
 
-        if (fc.state === 'launching') {
-            fc.t = Math.min((el / launchMs) * 0.5, 0.5);
-            fc.trail.geo.setDrawRange(0, Math.floor(fc.t * TRAIL_SEG) + 2);
-            if (fc.t >= 0.5) { fc.state = 'hovering'; fc.hoverPhase = 0; }
-        }
+        const elapsed = Date.now() - fc.startTime;
+        // Ease-in-out so rocket accelerates out of home and decelerates near dest
+        // Stop at 0.92 max so it never auto-lands (landRocket handles final descent)
+        const raw   = Math.min(elapsed / FLIGHT_MS, 0.92);
+        // Smooth: slow start, faster middle, slow end
+        fc.t = raw < 0.5
+            ? 2 * raw * raw
+            : 1 - Math.pow(-2 * raw + 2, 2) / 2;
+        fc.t = Math.min(fc.t, 0.92);
 
-        if (fc.state === 'hovering') {
-            fc.hoverPhase += 0.022;
-            fc.t = 0.5 + Math.sin(fc.hoverPhase) * 0.028;
-            fc.trail.geo.setDrawRange(0, APEX_COUNT); // trail frozen at apex
-        }
-
+        fc.trail.geo.setDrawRange(0, Math.floor(fc.t * TRAIL_SEG) + 2);
         positionRocket(fc);
         requestAnimationFrame(frame);
     }
@@ -448,15 +453,16 @@ function runLanding(fc, fromT, landMs) {
         const prog  = Math.min((Date.now() - t0) / landMs, 1);
         const eased = 1 - Math.pow(1 - prog, 2); // ease-out quad
         fc.t = fromT + (1 - fromT) * eased;
-        fc.trail.geo.setDrawRange(0, Math.min(Math.floor(fc.t * TRAIL_SEG) + 2, TRAIL_SEG + 1));
+        if (fc.trail) fc.trail.geo.setDrawRange(0, Math.min(Math.floor(fc.t * TRAIL_SEG) + 2, TRAIL_SEG + 1));
         positionRocket(fc);
 
         if (prog < 1) {
             requestAnimationFrame(frame);
         } else {
-            // ✅ Landed successfully
+            // ✅ Landed — hide rocket, show radar pulse only
             fc.state = 'done';
             rocketMesh.visible = false;
+            rocketMesh.scale.setScalar(0); // scale to 0 as belt-and-suspenders
             disposeTrail(fc.trail);
             fc.trail = null;
             FC = null;
@@ -479,36 +485,52 @@ window.flyToCountry = function(countryCode) {
 
     // Cancel any in-progress flight
     if (FC) { FC.cancelled = true; disposeTrail(FC.trail); rocketMesh.visible = false; FC = null; }
+    // Force-hide rocket in case it's stuck from a previous session
+    if (rocketMesh) rocketMesh.visible = false;
     clearPulse();
     globe.arcsData([]);
 
     const dest = countryCoords[countryCode.toLowerCase()]
               || { lat: 0, lng: 0, name: countryCode.toUpperCase() };
 
+    // ── Optimistic CURRENT_LOC update ────────────────────────────
+    // Set destination as current BEFORE the flight starts.
+    // If the user disconnects mid-flight, backToHome() will fly FROM
+    // the destination (not from home), producing the correct animation.
+    CURRENT_LOC = dest;
+
     setOverlay(`Routing to ${dest.name}… 🛰️`, '#f1c40f');
     globe.pointOfView({ altitude: 3.8 }, 900);
 
+    // Use a saved start location (before CURRENT_LOC was updated)
+    const fromLoc = HOME_LOC.name !== 'Detecting…' ? HOME_LOC : { lat: 0, lng: 0, name: 'Origin' };
+
     setTimeout(() => {
-        const curve = buildCurve(CURRENT_LOC.lat, CURRENT_LOC.lng, dest.lat, dest.lng);
+        // Build curve from actual origin (captured before optimistic update)
+        // We restore HOME_LOC as start since CURRENT_LOC is now = dest
+        const startLat = fromLoc.lat, startLng = fromLoc.lng;
+        const curve = buildCurve(startLat, startLng, dest.lat, dest.lng);
         const trail = buildTrail(curve);
         FC = createFC(curve, trail, dest);
-        runLaunchHover(FC, 3500); // 3.5 s to reach apex
+        runContinuousFlight(FC);
 
-        // Camera drifts toward mid-flight view
+        // Camera zooms out to see the full flight path
         setTimeout(() => {
-            if (FC && FC.state !== 'done') globe.pointOfView({ altitude: 2.9 }, 4000);
-        }, 1600);
+            if (FC && FC.state === 'flying') globe.pointOfView({ altitude: 2.8 }, 5000);
+        }, 1200);
     }, 960);
 };
 
 // ✅ Land rocket  (called when Tor bootstrap = 100%)
 window.landRocket = function() {
     if (!FC || FC.state === 'done' || FC.state === 'landing' || FC.state === 'exploding') return;
-    const fromT = FC.t;
+    const fromT = FC.t; // wherever rocket currently is on the curve
     FC.state    = 'landing';
     setOverlay(`Establishing secure tunnel… 🔐`, '#f1c40f');
-    globe.pointOfView({ lat: FC.destInfo.lat, lng: FC.destInfo.lng, altitude: 1.6 }, 2500);
-    runLanding(FC, fromT, 2500);
+    // Zoom camera to destination for landing
+    globe.pointOfView({ lat: FC.destInfo.lat, lng: FC.destInfo.lng, altitude: 1.6 }, 2000);
+    // Land over 2 seconds from wherever the rocket currently is
+    runLanding(FC, fromT, 2000);
 };
 
 // 💥 Explode rocket  (called when Tor bootstrap fails)
@@ -541,13 +563,28 @@ window.explodeRocket = function() {
 // 🏠 Back to home  (normal disconnect)
 window.backToHome = function() {
     if (!globe || !rocketMesh) return;
-    if (FC) { FC.cancelled = true; disposeTrail(FC.trail); rocketMesh.visible = false; FC = null; }
+    // Cancel any in-progress flight and force-hide rocket
+    if (FC) { FC.cancelled = true; disposeTrail(FC.trail); FC = null; }
+    rocketMesh.visible = false;  // always hide, regardless of FC state
+    rocketMesh.position.set(0, 0, 0);
     clearPulse();
     globe.arcsData([]);
     setOverlay(`Connection Dropped. Returning… 📡`, '#e74c3c');
     globe.pointOfView({ altitude: 3.8 }, 900);
 
+    // fromLoc = destination (where rocket just was / where VPN was connected)
+    // CURRENT_LOC was set optimistically in flyToCountry, so this is correct
+    // even if landing animation was never completed.
     const fromLoc = { ...CURRENT_LOC };
+
+    // If fromLoc == HOME_LOC (connection failed before any flight), skip animation
+    if (Math.abs(fromLoc.lat - HOME_LOC.lat) < 0.1 && Math.abs(fromLoc.lng - HOME_LOC.lng) < 0.1) {
+        CURRENT_LOC = HOME_LOC;
+        setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C');
+        setOverlay(`Standing by in ${HOME_LOC.name} 🌐`, '#00ffcc');
+        globe.pointOfView({ lat: HOME_LOC.lat, lng: HOME_LOC.lng, altitude: 2.5 }, 1500);
+        return;
+    }
 
     setTimeout(() => {
         const curve   = buildCurve(fromLoc.lat, fromLoc.lng, HOME_LOC.lat, HOME_LOC.lng);
@@ -570,6 +607,7 @@ window.backToHome = function() {
             } else {
                 fc.state = 'done';
                 rocketMesh.visible = false;
+                rocketMesh.scale.setScalar(0);
                 disposeTrail(fc.trail);
                 fc.trail = null;
                 FC = null;

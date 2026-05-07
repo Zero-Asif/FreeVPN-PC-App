@@ -228,11 +228,32 @@ function runAdminApp() {
     let mainWindow = null;
 
     function runBat(filePath, content) {
+        // ─────────────────────────────────────────────────────
+        //  ROOT CAUSE FIX: exec() path-with-spaces bug
+        //
+        //  exec(`"C:\Users\User pc\...\file.bat"`) runs:
+        //    cmd.exe /c "C:\Users\User pc\...\file.bat"
+        //  cmd.exe strips outer quotes → tries to run the bare
+        //  path → space splits it → bat never executes → proxy
+        //  never set → no internet.
+        //
+        //  spawn(['cmd.exe', '/c', filePath]) passes filePath as
+        //  a separate OS argument → Windows handles spaces → works.
+        // ─────────────────────────────────────────────────────
         return new Promise(resolve => {
             fs.writeFileSync(filePath, content, 'utf8');
-            exec(`"${filePath}"`, { windowsHide: true }, err => {
-                if (err) Logger.warn(`bat error: ${filePath}`, { code: err.code });
+            const proc = spawn('cmd.exe', ['/c', filePath], {
+                windowsHide: true,
+                stdio: 'pipe'
+            });
+            proc.on('exit', (code) => {
+                if (code !== 0) Logger.warn(`bat exit code ${code}`, { filePath });
+                else Logger.debug(`bat OK`, { filePath });
                 resolve();
+            });
+            proc.on('error', (err) => {
+                Logger.error(`bat spawn error`, { filePath, err: err.message });
+                resolve(); // always resolve so Promise chain continues
             });
         });
     }
@@ -268,8 +289,6 @@ function runAdminApp() {
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "" /f`,
             // Restore DNS
             `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.Name -ResetServerAddresses }"`,
-            // ── Remove any leftover portproxy from previous session ──
-            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
             // Restore IPv6
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 0 /f`,
             `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Enable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
@@ -281,7 +300,8 @@ function runAdminApp() {
 
         try {
             fs.writeFileSync(bat, content, 'utf8');
-            execSync(`"${bat}"`, { windowsHide: true, timeout: 15000 });
+            // Use cmd.exe with separate arg to handle spaces in path
+            execSync(`cmd.exe /c "${bat}"`, { windowsHide: true, timeout: 15000 });
             Logger.success('Startup cleanup complete');
         } catch(e) { Logger.error('Startup cleanup failed', { err: e.message }); }
     }
@@ -352,49 +372,38 @@ function runAdminApp() {
     //  IPv6 fix: registry + adapter binding disable (unchanged)
     // ════════════════════════════════════════════════════════
     async function applyLeakProtection() {
-        Logger.info('Applying DNS + IPv6 leak protection...');
+        // WHY NO DNS CHANGE: Chrome with SOCKS5 proxy sends hostname to Tor
+        // (SOCKS5 CONNECT domain), Tor resolves DNS on exit node remotely.
+        // Chrome never queries local DNS. Changing DNS to 127.0.0.1 caused
+        // DNS_PROBE_STARTED because portproxy took 16-19s (PowerShell startup).
+        // Fix: only disable IPv6. SOCKS5 handles all browser DNS automatically.
+        Logger.info('Applying IPv6 leak protection...');
         const bat = getScriptPath('fp_leak_on.bat');
         const content = [
             '@echo off',
-            // ── DNS: portproxy 53 -> 9053 (Tor's actual DNS port) ──
-            // First remove old rule if any
-            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
-            // Add fresh portproxy rule
-            `netsh interface portproxy add v4tov4 listenport=53 listenaddress=127.0.0.1 connectport=9053 connectaddress=127.0.0.1`,
-            // Point all adapters' DNS to 127.0.0.1 -- portproxy forwards to Tor
-            `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.Name -ServerAddresses '127.0.0.1' }"`,
-            `ipconfig /flushdns`,
-            // ── IPv6: registry disable ──
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f`,
-            // ── IPv6: live binding disable ──
             `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Disable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
-            // ── IPv6 tunnels ──
             `netsh interface teredo set state disabled`,
             `netsh interface isatap set state disabled`,
             `netsh interface 6to4 set state disabled`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.success('Leak protection ON -- DNS->127.0.0.1:53->9053->Tor, IPv6 disabled');
+        Logger.success('Leak protection ON -- IPv6 disabled, SOCKS5 handles remote DNS');
     }
 
     async function reverseLeakProtection() {
-        Logger.info('Reversing leak protection...');
+        Logger.info('Reversing IPv6 leak protection...');
         const bat = getScriptPath('fp_leak_off.bat');
         const content = [
             '@echo off',
-            // ── DNS: remove portproxy, restore DHCP ──
-            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
-            `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.Name -ResetServerAddresses }"`,
-            // ── IPv6: re-enable ──
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 0 /f`,
             `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Enable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
             `netsh interface teredo set state default`,
             `netsh interface isatap set state default`,
             `netsh interface 6to4 set state default`,
-            `ipconfig /flushdns`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.success('Leak protection OFF -- DNS & IPv6 restored');
+        Logger.success('Leak protection OFF -- IPv6 restored');
     }
 
     async function killSwitchLeakLock() {
@@ -402,14 +411,14 @@ function runAdminApp() {
         const bat = getScriptPath('fp_ks_leak.bat');
         const content = [
             '@echo off',
+            // Dead proxy port -- blocks all internet traffic
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "socks=127.0.0.1:9999" /f`,
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f`,
-            // DNS stays locked -- portproxy still active, Tor gone so DNS fails (no ISP leak)
-            `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.Name -ServerAddresses '127.0.0.1' }"`,
+            // Keep IPv6 disabled
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.warn('Kill Switch LOCKED -- internet blocked');
+        Logger.warn('Kill Switch LOCKED -- internet blocked, IPv6 off');
     }
 
     // ── Window creation ───────────────────────────────────
@@ -507,6 +516,13 @@ function runAdminApp() {
     ipcMain.handle('get-realtime-status', async () => {
         const now = Date.now();
         if (cachedRelays && now - lastFetchTime < 20000) return cachedRelays;
+        // Skip live fetch when connected: Node.js fetch() does not use
+        // Windows SOCKS proxy, so requests timeout through Tor.
+        // Use cached data during active sessions.
+        if (appState.connected) {
+            Logger.debug('Connected -- skipping relay fetch, using cached data');
+            return cachedRelays || {};
+        }
         Logger.info('Fetching live Tor relay data...');
 
         const fetchJSON = async (url, ms) => {
@@ -718,15 +734,21 @@ function runAdminApp() {
                     resolved = true;
                     if (pollId)   clearInterval(pollId);
                     if (maxTimer) clearTimeout(maxTimer);
-                    sendProgress(100, 'Applying leak protection...', 'connected');
-                    applyLeakProtection()
-                        .then(() => runBat(getScriptPath('fp_conn.bat'), buildProxyBat(SOCKS_PORT, bypassList)))
-                        .then(() => {
-                            appState.connected = true; appState.serverCode = serverCode;
-                            broadcastState();
-                            if (mainWindow) applyGeolocationSpoof(mainWindow, serverCode);
-                            resolve({ status: 'connected', serverCode });
-                        });
+                    sendProgress(100, 'Connecting to Tor network...', 'connected');
+
+                    // ── Set SOCKS proxy FIRST (internet works immediately) ──
+                    // Then disable IPv6 in parallel (background, no delay)
+                    // Old order (applyLeakProtection → proxy) caused 18s internet delay.
+                    const proxyBat = getScriptPath('fp_conn.bat');
+                    runBat(proxyBat, buildProxyBat(SOCKS_PORT, bypassList)).then(() => {
+                        Logger.success(`SOCKS proxy set → 127.0.0.1:${SOCKS_PORT}`);
+                        appState.connected = true; appState.serverCode = serverCode;
+                        broadcastState();
+                        if (mainWindow) applyGeolocationSpoof(mainWindow, serverCode);
+                        resolve({ status: 'connected', serverCode });
+                    });
+                    // IPv6 disable runs in background, doesn't block internet
+                    applyLeakProtection();
                 }
             }
 
