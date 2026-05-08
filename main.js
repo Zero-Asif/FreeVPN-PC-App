@@ -150,14 +150,18 @@ function applyGeolocationSpoof(win, serverCode) {
     const coord = GEO_COORDS[serverCode.toLowerCase()];
     if (!coord) { Logger.warn('No geo coords for code', { serverCode }); return; }
 
+    const jitter = () => (Math.random() - 0.5) * 0.004;
+    const lat = coord.lat + jitter();
+    const lng = coord.lng + jitter();
+
+    // ── Layer 1: CDP override (Electron window) ─────────────────
     try {
         if (!win.webContents.debugger.isAttached()) {
             win.webContents.debugger.attach('1.3');
         }
-        const jitter = () => (Math.random() - 0.5) * 0.004;
         win.webContents.debugger.sendCommand('Emulation.setGeolocationOverride', {
-            latitude:  coord.lat + jitter(),
-            longitude: coord.lng + jitter(),
+            latitude:  lat,
+            longitude: lng,
             accuracy:  coord.accuracy,
         }).then(() => {
             Logger.success(`GPS spoofed -> ${coord.city} (${serverCode.toUpperCase()})`);
@@ -167,10 +171,23 @@ function applyGeolocationSpoof(win, serverCode) {
         Logger.error('CDP debugger attach failed', { err: e.message });
     }
 
+    // ── Layer 2: Notify renderer to patch navigator.geolocation ─
     win.webContents.send('geo-spoof-on', {
-        lat: coord.lat, lng: coord.lng,
-        accuracy: coord.accuracy, city: coord.city, country: serverCode.toUpperCase(),
+        lat, lng, accuracy: coord.accuracy, city: coord.city, country: serverCode.toUpperCase(),
     });
+
+    // ── Layer 3: Windows Location Service registry override ──────
+    // Writes fake location to the Windows sensor simulator.
+    // Chrome/Edge on Windows reads from Google Location Services
+    // which is IP-based — so the exit IP country is the real fix.
+    // But this registry key acts as an additional layer for apps
+    // that read Windows Location directly.
+    try {
+        const regKey = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Location';
+        execSync(`reg add "${regKey}" /v "OverrideLatitude" /t REG_SZ /d "${lat.toFixed(6)}" /f`, { windowsHide: true });
+        execSync(`reg add "${regKey}" /v "OverrideLongitude" /t REG_SZ /d "${lng.toFixed(6)}" /f`, { windowsHide: true });
+        Logger.debug('Windows Location registry override set');
+    } catch(e) { Logger.debug('Windows Location registry: ' + e.message); }
 }
 
 function clearGeolocationSpoof(win) {
@@ -182,6 +199,12 @@ function clearGeolocationSpoof(win) {
         }
     } catch(e) {}
     win.webContents.send('geo-spoof-off');
+    // Clear Windows Location registry override
+    try {
+        const regKey = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Location';
+        execSync(`reg delete "${regKey}" /v "OverrideLatitude" /f 2>nul`, { windowsHide: true });
+        execSync(`reg delete "${regKey}" /v "OverrideLongitude" /f 2>nul`, { windowsHide: true });
+    } catch(e) {}
     geoSpoofActive = false;
     Logger.info('GPS spoof cleared -- real location restored');
 }
@@ -193,6 +216,16 @@ function isRunAsAdmin() {
     try { execSync('net session', { stdio: 'ignore', windowsHide: true }); return true; }
     catch(e) { return false; }
 }
+
+// Override userData to C:\ProgramData\freeproxy-vpn (no spaces in path)
+// Must be set BEFORE app.getPath() is ever called
+const APPDATA_PATH = 'C:\\ProgramData\\freeproxy-vpn';
+try {
+    if (!require('fs').existsSync(APPDATA_PATH)) {
+        require('fs').mkdirSync(APPDATA_PATH, { recursive: true });
+    }
+    app.setPath('userData', APPDATA_PATH);
+} catch(e) { /* fallback to default if setPath fails */ }
 
 app.whenReady().then(() => {
     Logger.init(app.getPath('userData'));
@@ -287,8 +320,10 @@ function runAdminApp() {
             // Remove proxy
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f`,
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "" /f`,
-            // Restore DNS
-            `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.Name -ResetServerAddresses }"`,
+            // Restore DNS: remove portproxy + clear global NameServer
+            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
+            `reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /f 2>nul`,
+            `ipconfig /flushdns`,
             // Restore IPv6
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 0 /f`,
             `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Enable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
@@ -372,38 +407,64 @@ function runAdminApp() {
     //  IPv6 fix: registry + adapter binding disable (unchanged)
     // ════════════════════════════════════════════════════════
     async function applyLeakProtection() {
-        // WHY NO DNS CHANGE: Chrome with SOCKS5 proxy sends hostname to Tor
-        // (SOCKS5 CONNECT domain), Tor resolves DNS on exit node remotely.
-        // Chrome never queries local DNS. Changing DNS to 127.0.0.1 caused
-        // DNS_PROBE_STARTED because portproxy took 16-19s (PowerShell startup).
-        // Fix: only disable IPv6. SOCKS5 handles all browser DNS automatically.
-        Logger.info('Applying IPv6 leak protection...');
+        // ── DNS Leak Fix ──────────────────────────────────────────────
+        // ipleak DNS test resolves a unique subdomain through the OS DNS
+        // stack, NOT via SOCKS5 tunnel. So even with SOCKS5 proxy set,
+        // DNS can still leak to ISP.
+        //
+        // Fast fix (no PowerShell = no 15s startup delay):
+        //  1. netsh portproxy: 127.0.0.1:53 → 127.0.0.1:9053 (Tor DNS)
+        //  2. reg NameServer = 127.0.0.1 (global DNS fallback, instant)
+        //  3. ipconfig /flushdns (clear ISP cache)
+        //
+        // This routes ALL DNS queries through Tor's DNSPort 9053.
+        // ── IPv6 Leak Fix ─────────────────────────────────────────────
+        // SOCKS5 cannot carry IPv6. Disable at registry level (fast, 
+        // no PowerShell). The adapter-level binding command is skipped 
+        // because it requires slow PowerShell and can disrupt network.
+        // Registry DisabledComponents=0xFF is sufficient for leak prevention.
+        Logger.info('Applying DNS + IPv6 leak protection...');
         const bat = getScriptPath('fp_leak_on.bat');
         const content = [
             '@echo off',
+            // ── DNS: portproxy 53 → 9053 (Tor's DNSPort) ──────────────
+            // Remove any old rule first, then add fresh
+            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
+            `netsh interface portproxy add v4tov4 listenport=53 listenaddress=127.0.0.1 connectport=9053 connectaddress=127.0.0.1`,
+            // ── DNS: global registry fallback (fast, no PowerShell) ────
+            `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /t REG_SZ /d "127.0.0.1" /f`,
+            // ── DNS: flush stale ISP entries ────────────────────────────
+            `ipconfig /flushdns`,
+            // ── IPv6: registry disable (reboot-persistent, fast) ────────
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f`,
-            `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Disable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
+            // ── IPv6 tunnels ─────────────────────────────────────────────
             `netsh interface teredo set state disabled`,
             `netsh interface isatap set state disabled`,
             `netsh interface 6to4 set state disabled`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.success('Leak protection ON -- IPv6 disabled, SOCKS5 handles remote DNS');
+        Logger.success('Leak protection ON -- DNS->127.0.0.1:53->9053->Tor, IPv6 disabled');
     }
 
     async function reverseLeakProtection() {
-        Logger.info('Reversing IPv6 leak protection...');
+        Logger.info('Reversing DNS + IPv6 leak protection...');
         const bat = getScriptPath('fp_leak_off.bat');
         const content = [
             '@echo off',
+            // ── DNS: remove portproxy ─────────────────────────────────
+            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
+            // ── DNS: restore global NameServer to empty (use DHCP) ────
+            `reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /f 2>nul`,
+            `ipconfig /flushdns`,
+            // ── IPv6: re-enable via registry ──────────────────────────
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 0 /f`,
-            `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Enable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
+            // ── IPv6 tunnels: restore ──────────────────────────────────
             `netsh interface teredo set state default`,
             `netsh interface isatap set state default`,
             `netsh interface 6to4 set state default`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.success('Leak protection OFF -- IPv6 restored');
+        Logger.success('Leak protection OFF -- DNS & IPv6 restored');
     }
 
     async function killSwitchLeakLock() {
@@ -414,11 +475,13 @@ function runAdminApp() {
             // Dead proxy port -- blocks all internet traffic
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "socks=127.0.0.1:9999" /f`,
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f`,
+            // Keep DNS locked -- Tor is gone so DNS queries fail (no ISP leak)
+            `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /t REG_SZ /d "127.0.0.1" /f`,
             // Keep IPv6 disabled
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.warn('Kill Switch LOCKED -- internet blocked, IPv6 off');
+        Logger.warn('Kill Switch LOCKED -- internet blocked, DNS locked, IPv6 off');
     }
 
     // ── Window creation ───────────────────────────────────
@@ -661,9 +724,14 @@ function runAdminApp() {
                     `GeoIPv6File "${geoip6.replace(/\\/g, '/')}"`,
                     `ExitNodes {${serverCode}}`,
                     `StrictNodes 1`,
-                    `MaxCircuitDirtiness 10`,
-                    `NewCircuitPeriod 10`,
+                    // Long circuit lifetime prevents exit country switching
+                    `MaxCircuitDirtiness 3600`,    // keep circuit 1 hour (was 10s!)
+                    `NewCircuitPeriod 600`,         // don't build new ones for 10min
+                    `LongLivedPorts 9050`,          // SOCKS port gets sticky long-lived circuits
+                    `CircuitBuildTimeout 60`,        // more time to find a good exit
                     `Log notice stderr`,
+                    // ControlPort for NEWNYM signal (country re-verification)
+                    `ControlPort 9051`,
                 ];
                 if (useBridges && hasLyrebird) {
                     lines.push(`UseBridges 1`);
@@ -734,22 +802,141 @@ function runAdminApp() {
                     resolved = true;
                     if (pollId)   clearInterval(pollId);
                     if (maxTimer) clearTimeout(maxTimer);
-                    sendProgress(100, 'Connecting to Tor network...', 'connected');
+                    sendProgress(97, 'Setting up secure proxy...', 'connected');
 
-                    // ── Set SOCKS proxy FIRST (internet works immediately) ──
-                    // Then disable IPv6 in parallel (background, no delay)
-                    // Old order (applyLeakProtection → proxy) caused 18s internet delay.
+                    // ── Set SOCKS proxy first, IPv6 disable in background ──
                     const proxyBat = getScriptPath('fp_conn.bat');
-                    runBat(proxyBat, buildProxyBat(SOCKS_PORT, bypassList)).then(() => {
-                        Logger.success(`SOCKS proxy set → 127.0.0.1:${SOCKS_PORT}`);
-                        appState.connected = true; appState.serverCode = serverCode;
+                    runBat(proxyBat, buildProxyBat(SOCKS_PORT, bypassList)).then(async () => {
+                        Logger.success(`SOCKS proxy set -> 127.0.0.1:${SOCKS_PORT}`);
+                        applyLeakProtection(); // background
+
+                        sendProgress(98, 'Verifying exit country...', 'connected');
+
+                        // Verify actual exit IP country matches requested country
+                        const { verified, actual } = await verifyAndFixExitCountry(
+                            serverCode, SOCKS_PORT, 9051
+                        );
+
+                        let finalCode = serverCode;
+                        if (actual && !verified) {
+                            // Couldn't get matching exit after 3 tries —
+                            // connect anyway but report the actual country
+                            Logger.warn(`Final exit country: ${actual} (requested: ${serverCode.toUpperCase()})`);
+                            finalCode = actual.toLowerCase();
+                            sendProgress(100, `Connected via ${actual}`, 'connected');
+                        } else {
+                            sendProgress(100, `Connected via ${serverCode.toUpperCase()}`, 'connected');
+                        }
+
+                        appState.connected  = true;
+                        appState.serverCode = finalCode;
                         broadcastState();
-                        if (mainWindow) applyGeolocationSpoof(mainWindow, serverCode);
-                        resolve({ status: 'connected', serverCode });
+                        if (mainWindow) applyGeolocationSpoof(mainWindow, finalCode);
+                        resolve({ status: 'connected', serverCode: finalCode });
                     });
-                    // IPv6 disable runs in background, doesn't block internet
-                    applyLeakProtection();
                 }
+            }
+
+            // ════════════════════════════════════════════════
+            //  EXIT COUNTRY VERIFICATION
+            //
+            //  Problem: Tor uses its bundled geoip to pick an exit
+            //  relay from the requested country. But that relay's IP
+            //  may be geolocated differently by external services
+            //  (ipleak, ipinfo) causing apparent "wrong country".
+            //
+            //  Fix:
+            //   1. After proxy is set, use Windows curl.exe to GET
+            //      https://ipinfo.io/country through the SOCKS5 proxy
+            //      -- this reveals what the exit IP actually is.
+            //   2. If wrong, send SIGNAL NEWNYM via Tor ControlPort
+            //      to force a new circuit (new exit relay).
+            //   3. Retry up to 3 times.
+            //
+            //  curl.exe ships with Windows 10 1803+ at System32.
+            //  ControlPort 9051 is now added to torrc (no password,
+            //  bound to 127.0.0.1 only -- safe).
+            // ════════════════════════════════════════════════
+
+            // Get actual exit country via curl through SOCKS5
+            function getActualExitCountry(socksPort) {
+                return new Promise(resolveInner => {
+                    const curlExe = path.join(
+                        process.env.SystemRoot || 'C:\\Windows',
+                        'System32', 'curl.exe'
+                    );
+                    if (!fs.existsSync(curlExe)) {
+                        Logger.debug('curl.exe not found -- skipping exit country check');
+                        resolveInner(null); return;
+                    }
+                    const proc = spawn(curlExe, [
+                        '--socks5-hostname', `127.0.0.1:${socksPort}`,
+                        '--max-time', '12',
+                        '--silent', '--fail',
+                        'https://ipinfo.io/country'
+                    ], { windowsHide: true, stdio: 'pipe' });
+
+                    let out = '';
+                    proc.stdout.on('data', d => out += d.toString());
+                    proc.on('exit', () => {
+                        const cc = out.trim().toUpperCase();
+                        // ipinfo returns 2-letter ISO code
+                        resolveInner(cc.length === 2 ? cc : null);
+                    });
+                    proc.on('error', () => resolveInner(null));
+                    setTimeout(() => { try { proc.kill(); } catch(e) {} resolveInner(null); }, 14000);
+                });
+            }
+
+            // Ask Tor for a new circuit via ControlPort
+            function requestNewCircuit(ctrlPort) {
+                return new Promise(resolveInner => {
+                    const net = require('net');
+                    const sock = new net.Socket();
+                    let buf = '', authed = false;
+
+                    sock.connect(ctrlPort, '127.0.0.1', () => {
+                        sock.write('AUTHENTICATE ""');
+                    });
+                    sock.on('data', chunk => {
+                        buf += chunk.toString();
+                        if (!authed && buf.includes('250 OK')) {
+                            authed = true; buf = '';
+                            sock.write('SIGNAL NEWNYM');
+                        } else if (authed && buf.includes('250 OK')) {
+                            sock.destroy(); resolveInner(true);
+                        } else if (buf.includes('515') || buf.includes('551')) {
+                            sock.destroy(); resolveInner(false);
+                        }
+                    });
+                    sock.on('error', () => resolveInner(false));
+                    setTimeout(() => { try { sock.destroy(); } catch(e) {} resolveInner(false); }, 6000);
+                });
+            }
+
+            // Verify + retry if needed (up to 3 circuits)
+            async function verifyAndFixExitCountry(serverCode, socksPort, ctrlPort) {
+                const want = serverCode.toUpperCase();
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                    const got = await getActualExitCountry(socksPort);
+                    if (!got) return { verified: false, actual: null }; // curl unavailable
+
+                    Logger.info(`Exit country check #${attempt}: want=${want}, got=${got}`);
+                    if (got === want) {
+                        Logger.success(`Exit country confirmed: ${got}`);
+                        return { verified: true, actual: got };
+                    }
+
+                    if (attempt < 3) {
+                        Logger.warn(`Exit mismatch (${got} != ${want}), requesting new circuit...`);
+                        const ok = await requestNewCircuit(ctrlPort);
+                        if (!ok) { Logger.warn('NEWNYM failed'); break; }
+                        // Wait for new circuit to establish
+                        await new Promise(r => setTimeout(r, 5000));
+                    }
+                }
+                const final = await getActualExitCountry(socksPort);
+                return { verified: final === want, actual: final };
             }
 
             function startTor(useBridges) {
@@ -881,11 +1068,14 @@ function runAdminApp() {
                     .filter(Boolean);
                 if (parts.length) fp = parts.join(';') + ';<local>';
             }
+            // REMOVED: Set-DnsClientServerAddress was crashing WiFi adapter
+            // when split tunneling was updated while connected.
+            // DNS is locked by applyLeakProtection() at connect time.
+            // Only ProxyOverride needs to change for bypass updates.
             runBat(getScriptPath('fp_bypass.bat'), [
                 '@echo off',
                 `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyOverride /t REG_SZ /d "${fp}" /f`,
-                `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.Name -ServerAddresses '127.0.0.1' }"`,
-            ].join('\r\n')).then(() => { Logger.debug('Bypass updated'); resolve({ status: 'updated' }); });
+            ].join('\r\n')).then(() => { Logger.debug('Bypass updated', { fp }); resolve({ status: 'updated' }); });
         });
     });
 }
