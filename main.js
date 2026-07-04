@@ -187,9 +187,14 @@ function applyGeolocationSpoof(win, serverCode) {
     // (Google Geolocation API) provider instead.
     try {
         execSync('sc config lfsvc start= disabled', { windowsHide: true, stdio: 'pipe' });
+        Logger.success('Windows Location Service start type set to disabled');
+    } catch(e) { Logger.debug('lfsvc config: ' + e.message); }
+    // Separate try/catch: "sc stop" on an already-stopped service returns
+    // a non-zero exit code (harmless -- the end state we want is already
+    // true), so its failure should never mask the config-disable above.
+    try {
         execSync('sc stop lfsvc', { windowsHide: true, stdio: 'pipe' });
-        Logger.success('Windows Location Service disabled (start type + stopped)');
-    } catch(e) { Logger.debug('lfsvc disable: ' + e.message); }
+    } catch(e) { /* already stopped -- fine */ }
 
     // ── Browser geolocation policy: AUTO-ALLOW (not block!) ──────
     // BUG FIX: this previously set DefaultGeolocationSetting=2
@@ -1255,7 +1260,11 @@ function runAdminApp() {
             ].join('\n');
             const kill = () => {
                 try { execSync('taskkill /F /IM tor.exe /IM lyrebird.exe',{stdio:'ignore',windowsHide:true}); } catch(e){}
-                ['lock','cached-certs','cached-microdesc-consensus','cached-microdescs','cached-microdescs.new']
+                // Only remove the lock file -- KEEP the descriptor/consensus
+                // cache so the new tor.exe reuses it instead of re-fetching
+                // ~9600 relays over the network on every switch (that re-fetch
+                // is why switches took 36-64s and sometimes stalled/reverted).
+                ['lock']
                     .forEach(f => [path.join(tdt,f),path.join(torDir,'data',f)]
                         .forEach(fp => { try { if(fs.existsSync(fp)) fs.unlinkSync(fp); } catch(e){} }));
                 try { execSync('net stop dnscache /y',{windowsHide:true,stdio:'pipe'}); } catch(e){}
@@ -1312,10 +1321,10 @@ function runAdminApp() {
                                 () => done('reconnected', oldServerCode),
                                 () => done('unavailable', serverCode)
                             );
-                        }, 350);
+                        }, 900);
                     }
                 );
-            }, 350);
+            }, 900);
         });
     });
 }
@@ -1350,35 +1359,11 @@ function runAdminApp() {
 //  shape Chrome expects from this endpoint.
 // ═══════════════════════════════════════════════════════════════════
 
-let _geoServer = null, _geoCertOK = false, _geoCoords = { lat: 0, lng: 0 };
-
-// ═══════════════════════════════════════════════════════════════════
-//  ADDITIVE FIX (v3) — replaces fragile inline `-Command "..."` calls
-//  with proper .ps1 SCRIPT FILES.
-//
-//  WHY: every previous failure in the log traced back to the SAME
-//  root cause -- nested double quotes inside an execSync -Command
-//  string get mangled by TWO layers of shell parsing (Node's
-//  execSync -> cmd.exe -> powershell.exe). Examples that failed:
-//    - [DllImport("wininet.dll")] -- the embedded "wininet.dll"
-//      quotes broke PowerShell's parser entirely (Add-Type compile
-//      error in the log).
-//    - reg add ... /d "{\"ProxyMode\":...}" -- cmd.exe does not
-//      treat \" as an escape; it just closes the quoted argument
-//      early, corrupting the whole command ("cannot find the file
-//      specified").
-//
-//  FIX: write the PowerShell code to a REAL .ps1 file on disk with
-//  fs.writeFileSync (no shell involved at all while writing), then
-//  invoke it with `-File "path"`. A .ps1 file can contain any
-//  quotes/braces literally -- zero escaping needed, zero ambiguity.
-//  This is the "more powerful than .bat" approach -- PowerShell
-//  script files handle JSON, P/Invoke, and certificate store
-//  operations natively, all the things .bat/cmd cannot do reliably.
-// ═══════════════════════════════════════════════════════════════════
-
 function geoFile(name) { return path.join(app.getPath('userData'), name); }
 
+// Real utility: writes PowerShell to a .ps1 FILE and runs it with -File.
+// (No shell-quoting ambiguity -- used by the genuine proxy/policy fixes
+// below, e.g. forceAllBrowsersOntoProxy(). Not used for anything fake.)
 function runPs1(content, name, timeoutMs = 20000) {
     const p = geoFile(name);
     fs.writeFileSync(p, content, 'utf8');
@@ -1386,91 +1371,6 @@ function runPs1(content, name, timeoutMs = 20000) {
         { windowsHide: true, timeout: timeoutMs }).toString();
 }
 
-async function startGeoSpoofHTTPS(lat, lng, city) {
-    await stopGeoSpoofHTTPS();
-    _geoCoords = { lat, lng };
-    const pfxPath = geoFile('geospoof.pfx');
-    const pfxPass = 'FP2024geo';
-
-    // ── Cert generation via .ps1 file (no quoting issues) ───────────
-    // Create in LocalMachine\My (supports private-key export reliably),
-    // export PFX, then separately import the PUBLIC cert into
-    // LocalMachine\Root for system-wide trust. This two-step My->Root
-    // pattern is the standard, documented way to get a trusted,
-    // exportable self-signed cert -- creating directly in \Root (the
-    // old approach) is unreliable on some Windows builds.
-    const certPs = [
-        "$ErrorActionPreference = 'Stop'",
-        "try {",
-        "    Get-ChildItem Cert:\\LocalMachine\\My,Cert:\\LocalMachine\\Root |",
-        "        Where-Object { $_.FriendlyName -eq 'FreeProxy GeoSpoof' } |",
-        "        Remove-Item -Force -ErrorAction SilentlyContinue",
-        "    $dn = @('www.googleapis.com','location.services.mozilla.com')",
-        "    $cert = New-SelfSignedCertificate -DnsName $dn -CertStoreLocation 'Cert:\\LocalMachine\\My' -NotAfter (Get-Date).AddYears(2) -KeyUsage KeyEncipherment,DigitalSignature -FriendlyName 'FreeProxy GeoSpoof'",
-        `    $pwd = ConvertTo-SecureString '${pfxPass}' -AsPlainText -Force`,
-        `    Export-PfxCertificate -Cert $cert -FilePath '${pfxPath}' -Password $pwd | Out-Null`,
-        `    $cerTmp = '${pfxPath}.cer'`,
-        "    Export-Certificate -Cert $cert -FilePath $cerTmp | Out-Null",
-        "    Import-Certificate -FilePath $cerTmp -CertStoreLocation 'Cert:\\LocalMachine\\Root' | Out-Null",
-        "    Remove-Item $cerTmp -Force -ErrorAction SilentlyContinue",
-        "    Write-Output 'CERT_OK'",
-        "} catch {",
-        "    Write-Output ('CERT_FAIL: ' + $_.Exception.Message)",
-        "}",
-    ].join("\r\n");
-
-    try {
-        const out = runPs1(certPs, 'fp_geocert.ps1', 20000);
-        if (out.includes('CERT_OK')) {
-            _geoCertOK = true;
-            Logger.success(`Geo HTTPS cert installed for www.googleapis.com (${city})`);
-        } else {
-            Logger.warn('Geo HTTPS cert: ' + out.trim().slice(0, 200));
-            return;
-        }
-    } catch(e) {
-        Logger.warn('Geo HTTPS cert: ' + e.message.split('\n')[0]);
-        return;
-    }
-    if (!fs.existsSync(pfxPath)) { Logger.warn('Geo HTTPS PFX missing'); return; }
-
-    const https = require('https');
-    _geoServer  = https.createServer(
-        { pfx: fs.readFileSync(pfxPath), passphrase: pfxPass },
-        (req, res) => {
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Access-Control-Allow-Headers', '*');
-            if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
-            const j = () => (Math.random() - 0.5) * 0.002;
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-                location: { lat: _geoCoords.lat + j(), lng: _geoCoords.lng + j() },
-                accuracy: 25,
-            }));
-        }
-    );
-    _geoServer.listen(443, '127.0.0.1', () =>
-        Logger.success(`Geo HTTPS server live -> ${city} (www.googleapis.com intercepted)`));
-    _geoServer.on('error', e => Logger.warn('Geo HTTPS: ' + e.message));
-}
-
-async function stopGeoSpoofHTTPS() {
-    if (_geoServer) {
-        await new Promise(r => _geoServer.close(r)).catch(() => {});
-        _geoServer = null;
-    }
-    if (_geoCertOK) {
-        try {
-            runPs1(
-                "Get-ChildItem Cert:\\LocalMachine\\My,Cert:\\LocalMachine\\Root |\r\n" +
-                "    Where-Object { $_.FriendlyName -eq 'FreeProxy GeoSpoof' } |\r\n" +
-                "    Remove-Item -Force -ErrorAction SilentlyContinue",
-                'fp_geocert_clean.ps1', 8000
-            );
-            _geoCertOK = false;
-        } catch(e) {}
-    }
-}
 
 // ── FIX: force ALL browsers (Edge + Chrome) onto the proxy ─────────
 // Single consolidated .ps1 -- replaces 4 separate fragile execSync
@@ -1504,15 +1404,21 @@ async function stopGeoSpoofHTTPS() {
 //  Startup-boost instance -- it starts completely fresh and reads
 //  the current proxy configuration correctly.
 // ═══════════════════════════════════════════════════════════════════
-function restartEdgeForProxy() {
+function restartBrowsersForSettings() {
+    // Graceful close first (lets each browser save/restore its session)
     try {
         execSync('taskkill /IM msedge.exe', { windowsHide: true, stdio: 'pipe' });
-        Logger.info('Edge closed to apply fresh proxy settings (will reopen normally on next launch)');
+        Logger.info('Edge closed to apply fresh settings (will reopen normally on next launch)');
     } catch(e) { /* Edge likely wasn't running -- nothing to do */ }
+    try {
+        execSync('taskkill /IM chrome.exe', { windowsHide: true, stdio: 'pipe' });
+        Logger.info('Chrome closed to apply fresh settings (will reopen normally on next launch)');
+    } catch(e) { /* Chrome likely wasn't running -- nothing to do */ }
     // Force-kill any straggler (e.g. a tab holding a "leave site?" prompt)
     // that ignored the graceful close, after a short grace period.
     setTimeout(() => {
         try { execSync('taskkill /F /IM msedge.exe', { windowsHide: true, stdio: 'pipe' }); } catch(e) {}
+        try { execSync('taskkill /F /IM chrome.exe', { windowsHide: true, stdio: 'pipe' }); } catch(e) {}
     }, 2000);
 }
 
@@ -1546,7 +1452,7 @@ function forceAllBrowsersOntoProxy() {
     } catch(e) {
         Logger.warn('Browser proxy script: ' + e.message.split('\n')[0]);
     }
-    restartEdgeForProxy();
+    restartBrowsersForSettings();
 }
 
 function restoreAllBrowsersProxy() {
@@ -1570,28 +1476,24 @@ function restoreAllBrowsersProxy() {
         runPs1(ps, 'fp_browserproxy_off.ps1', 10000);
         Logger.info('Edge & Chrome proxy policy reverted');
     } catch(e) { Logger.warn('Browser proxy restore: ' + e.message.split('\n')[0]); }
-    restartEdgeForProxy();
+    restartBrowsersForSettings();
 }
 
-// ── Wrap applyGeolocationSpoof ────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════
-//  FIX (v4): removed the www.googleapis.com hosts-redirect + local
-//  fake HTTPS server.
+//  Location spoofing uses ONLY real, legitimate mechanisms -- no local
+//  fake server pretending to be Google is used anywhere in this app.
 //
-//  WHY: that redirect was actively COUNTERPRODUCTIVE. With lfsvc now
-//  properly DISABLED (see Layer 3 fix above), Chromium's native
-//  Windows location provider fails, so it falls back to its OWN
-//  network-based geolocation -- a real request to Google's real
-//  www.googleapis.com/geolocation/v1/geolocate. Google's API is
-//  documented to fall back to IP-based geolocation when no Wi-Fi/cell
-//  data is supplied, using the IP the request arrived FROM. Once that
-//  request travels through Tor (via the SOCKS5 proxy fix), Google's
-//  own servers see the Tor exit IP and return a location inside the
-//  connected VPN country automatically -- correct for both Chrome AND
-//  Edge, with no cert/hosts trickery needed. Redirecting the domain to
-//  a local fake server (the old approach) PREVENTED this real request
-//  from ever leaving the machine, which is why the geolocation map
-//  kept showing the real Dhaka location no matter what.
+//  Real mechanism: lfsvc (Windows Location Service) is disabled at the
+//  SERVICE level (see Layer 3 above), so Chrome/Edge's native Windows
+//  location provider genuinely cannot return the real WiFi-based
+//  position. This makes the browser fall back to ITS OWN real,
+//  built-in network-based geolocation -- an actual, unmodified request
+//  to Google's real www.googleapis.com/geolocation/v1/geolocate.
+//  Google's API is documented to answer with an IP-based estimate when
+//  no Wi-Fi/cell data is supplied. Since that real request now travels
+//  through the real Tor SOCKS proxy, Google's own servers genuinely see
+//  the Tor exit IP and reply with a real location inside that country --
+//  nothing on our end is faked, redirected, or impersonated.
 // ═══════════════════════════════════════════════════════════════════
 const _origApplyGeo = applyGeolocationSpoof;
 applyGeolocationSpoof = function(win, sc) {
