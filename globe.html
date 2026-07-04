@@ -49,6 +49,7 @@
 
         let globe;
         let homeLat = 23.8103, homeLng = 90.4125; 
+        //let currentLat = homeLat, currentLng = homeLng;
         const overlay = document.getElementById('status-overlay');
 
         // 🔴 আল্টিমেট ফিক্স: কোড দিয়ে লাইভ টেক্সচার বানানো (কোনো ছবি ডাউনলোড হবে না)
@@ -75,6 +76,7 @@
         function initGlobe() {
             globe = Globe()(document.getElementById('globeViz'))
                 .backgroundColor('#090b14')
+                //.backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
                 .showAtmosphere(true).atmosphereColor('#8E54E9').atmosphereAltitude(0.2)
                 .globeImageUrl(createCyberGrid()); // ইন্টারনেট ছাড়াই গ্লোব রেন্ডার হবে!
 

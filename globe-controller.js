@@ -702,3 +702,47 @@ if (document.readyState === 'loading') {
 } else {
     buildGlobeUI();
 }
+// ADDITIVE: Globe visuals (stars + night lights, no clouds) + rocket origin fix
+(function enhanceGlobe() {
+    function tryEnhance() {
+        if (!globe || !window.THREE) { setTimeout(tryEnhance, 300); return; }
+        const scene = globe.scene(), R = globe.getGlobeRadius();
+        // Stars
+        const sg = new THREE.BufferGeometry(), N = 8000, pos = new Float32Array(N * 3);
+        for (let i = 0; i < N; i++) {
+            const th = Math.random()*Math.PI*2, ph = Math.acos(2*Math.random()-1), r = 800+Math.random()*600;
+            pos[i*3]=r*Math.sin(ph)*Math.cos(th); pos[i*3+1]=r*Math.sin(ph)*Math.sin(th); pos[i*3+2]=r*Math.cos(ph);
+        }
+        sg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color:0xffffff, size:0.7, sizeAttenuation:true, transparent:true, opacity:0.85 })));
+        // Night lights
+        const nm = new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0, blending:THREE.AdditiveBlending, depthWrite:false });
+        new THREE.TextureLoader().load('https://unpkg.com/three-globe/example/img/earth-night.jpg', tex => {
+            nm.map = tex; nm.needsUpdate = true;
+            scene.add(new THREE.Mesh(new THREE.SphereGeometry(R*1.001,64,64), nm));
+            const fi = setInterval(() => { if (nm.opacity < 0.38) nm.opacity += 0.004; else clearInterval(fi); }, 60);
+        });
+        globe.atmosphereColor('#3a8eff').atmosphereAltitude(0.20);
+    }
+    setTimeout(tryEnhance, 1800);
+})();
+
+// Rocket launches from CURRENT_LOC (connected country) during switch
+(function fixRocketOrigin() {
+    function wrap() {
+        const _orig = window.flyToCountry;
+        if (typeof _orig !== 'function') { setTimeout(wrap, 400); return; }
+        window.flyToCountry = function(countryCode) {
+            const diff = Math.abs(CURRENT_LOC.lat - HOME_LOC.lat) > 0.5 || Math.abs(CURRENT_LOC.lng - HOME_LOC.lng) > 0.5;
+            if (diff) {
+                const sv = { lat:HOME_LOC.lat, lng:HOME_LOC.lng, name:HOME_LOC.name, code:HOME_LOC.code };
+                HOME_LOC.lat=CURRENT_LOC.lat; HOME_LOC.lng=CURRENT_LOC.lng;
+                HOME_LOC.name=CURRENT_LOC.name; HOME_LOC.code=CURRENT_LOC.code||sv.code;
+                _orig(countryCode);
+                // Restore AFTER the inner 960ms setTimeout has captured fromLoc
+                setTimeout(() => { HOME_LOC.lat=sv.lat; HOME_LOC.lng=sv.lng; HOME_LOC.name=sv.name; HOME_LOC.code=sv.code; }, 1100);
+            } else { _orig(countryCode); }
+        };
+    }
+    setTimeout(wrap, 500);
+})();

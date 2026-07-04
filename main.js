@@ -176,12 +176,37 @@ function applyGeolocationSpoof(win, serverCode) {
         lat, lng, accuracy: coord.accuracy, city: coord.city, country: serverCode.toUpperCase(),
     });
 
-    // ── Layer 3: Windows Location Service registry override ──────
-    // Writes fake location to the Windows sensor simulator.
-    // Chrome/Edge on Windows reads from Google Location Services
-    // which is IP-based — so the exit IP country is the real fix.
-    // But this registry key acts as an additional layer for apps
-    // that read Windows Location directly.
+    // ── Layer 3: DISABLE Windows Location Service (lfsvc) ───────
+    // lfsvc is a TRIGGER-START service: merely `sc stop`-ping it
+    // (old approach) is not enough -- Windows silently restarts it
+    // the instant a browser's native WinRT Geolocator asks for a
+    // location, handing back the REAL WiFi-based position and
+    // bypassing every other spoof layer. Setting the start TYPE to
+    // "disabled" prevents the trigger from ever firing again, which
+    // forces Chrome/Edge to fall back to their own network-based
+    // (Google Geolocation API) provider instead.
+    try {
+        execSync('sc config lfsvc start= disabled', { windowsHide: true, stdio: 'pipe' });
+        execSync('sc stop lfsvc', { windowsHide: true, stdio: 'pipe' });
+        Logger.success('Windows Location Service disabled (start type + stopped)');
+    } catch(e) { Logger.debug('lfsvc disable: ' + e.message); }
+
+    // ── Browser geolocation policy: AUTO-ALLOW (not block!) ──────
+    // BUG FIX: this previously set DefaultGeolocationSetting=2
+    // ("block all geolocation"), which made Chrome/Edge refuse the
+    // permission entirely -- showing "User denied" / "doesn't have
+    // permission to use your location". That defeated the whole
+    // point of spoofing. Setting it to 1 ("allow") makes the browser
+    // auto-grant geolocation without a prompt, so our redirected
+    // www.googleapis.com fake server actually gets queried and its
+    // VPN-country coordinates get used.
+    try {
+        execSync(`reg add "HKLM\\SOFTWARE\\Policies\\Google\\Chrome" /v "DefaultGeolocationSetting" /t REG_DWORD /d 1 /f`, { windowsHide: true });
+        execSync(`reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge" /v "DefaultGeolocationSetting" /t REG_DWORD /d 1 /f`, { windowsHide: true });
+        Logger.debug('Browser geolocation policy set to AUTO-ALLOW');
+    } catch(e) { Logger.debug('geo policy: ' + e.message); }
+
+    // Windows Location registry override (belt-and-suspenders)
     try {
         const regKey = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Location';
         execSync(`reg add "${regKey}" /v "OverrideLatitude" /t REG_SZ /d "${lat.toFixed(6)}" /f`, { windowsHide: true });
@@ -204,6 +229,13 @@ function clearGeolocationSpoof(win) {
         const regKey = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Location';
         execSync(`reg delete "${regKey}" /v "OverrideLatitude" /f 2>nul`, { windowsHide: true });
         execSync(`reg delete "${regKey}" /v "OverrideLongitude" /f 2>nul`, { windowsHide: true });
+    } catch(e) {}
+    // Restore Windows Location Service to its normal (Manual/trigger-start)
+    // start type, then start it -- gives the user back normal Windows
+    // location functionality once disconnected from the VPN.
+    try {
+        execSync('sc config lfsvc start= demand', { windowsHide: true, stdio: 'pipe' });
+        execSync('sc start lfsvc', { windowsHide: true, stdio: 'pipe' });
     } catch(e) {}
     geoSpoofActive = false;
     Logger.info('GPS spoof cleared -- real location restored');
@@ -320,10 +352,15 @@ function runAdminApp() {
             // Remove proxy
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f`,
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "" /f`,
-            // Restore DNS: remove portproxy + clear global NameServer
+            // Restore DNS: clear per-adapter + global NameServer
             `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
-            `reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /f 2>nul`,
+            `for /f %%i in ('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces"') do reg delete "%%i" /v NameServer /f 2>nul`,
+            `reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v NameServer /f 2>nul`,
+            // Restart dnscache in case previous session stopped it
+            `net start dnscache 2>nul`,
             `ipconfig /flushdns`,
+            // Restore location access
+            `reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\location" /v Value /t REG_SZ /d "Allow" /f`,
             // Restore IPv6
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 0 /f`,
             `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Enable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
@@ -337,6 +374,21 @@ function runAdminApp() {
             fs.writeFileSync(bat, content, 'utf8');
             // Use cmd.exe with separate arg to handle spaces in path
             execSync(`cmd.exe /c "${bat}"`, { windowsHide: true, timeout: 15000 });
+            // Restore Location Service in case a previous session left it disabled
+            try {
+                execSync('sc config lfsvc start= demand', { windowsHide: true, stdio: 'pipe' });
+                execSync('sc start lfsvc', { windowsHide: true, stdio: 'pipe' });
+            } catch(e) {}
+            // Remove stale hosts file entries from previous session
+            const hostsPath = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+            try {
+                let hosts = fs.readFileSync(hostsPath, 'utf8');
+                if (hosts.includes('FreeProxy VPN -- location spoof block')) {
+                    hosts = hosts.replace(/\r?\n# FreeProxy VPN -- location spoof block[\s\S]*?# FreeProxy VPN end/g, '');
+                    fs.writeFileSync(hostsPath, hosts, 'utf8');
+                    Logger.debug('Startup: cleared stale hosts entries');
+                }
+            } catch(e) {}
             Logger.success('Startup cleanup complete');
         } catch(e) { Logger.error('Startup cleanup failed', { err: e.message }); }
     }
@@ -407,64 +459,109 @@ function runAdminApp() {
     //  IPv6 fix: registry + adapter binding disable (unchanged)
     // ════════════════════════════════════════════════════════
     async function applyLeakProtection() {
-        // ── DNS Leak Fix ──────────────────────────────────────────────
-        // ipleak DNS test resolves a unique subdomain through the OS DNS
-        // stack, NOT via SOCKS5 tunnel. So even with SOCKS5 proxy set,
-        // DNS can still leak to ISP.
+        // ════════════════════════════════════════════════════════
+        //  DNS LEAK FIX
+        //  Root cause: registry NameServer changes need a network
+        //  stack restart to take effect. Meanwhile browsers read
+        //  stale DHCP DNS → leak to Google 8.8.8.8 → shows India.
         //
-        // Fast fix (no PowerShell = no 15s startup delay):
-        //  1. netsh portproxy: 127.0.0.1:53 → 127.0.0.1:9053 (Tor DNS)
-        //  2. reg NameServer = 127.0.0.1 (global DNS fallback, instant)
-        //  3. ipconfig /flushdns (clear ISP cache)
+        //  Fix: netsh interface ipv4 set dnsserver TAKES EFFECT
+        //  IMMEDIATELY — no restart needed, no timing window.
+        //  We loop over all active interfaces using netsh and set
+        //  DNS to 127.0.0.1 (Tor's DNSPort 53).
+        //  Also flush dnscache immediately.
         //
-        // This routes ALL DNS queries through Tor's DNSPort 9053.
-        // ── IPv6 Leak Fix ─────────────────────────────────────────────
-        // SOCKS5 cannot carry IPv6. Disable at registry level (fast, 
-        // no PowerShell). The adapter-level binding command is skipped 
-        // because it requires slow PowerShell and can disrupt network.
-        // Registry DisabledComponents=0xFF is sufficient for leak prevention.
+        //  LOCATION SPOOF FIX (superseded -- see note below)
+        //  An EARLIER version of this function blocked
+        //  geolocation.googleapis.com/maps.googleapis.com/
+        //  www.googleapis.com/maps.google.com here in the hosts
+        //  file. That is now REMOVED: it was actively fighting the
+        //  real fix (lfsvc disabled at the service level -- see
+        //  applyGeolocationSpoof) by preventing the browser's real
+        //  network-geolocation fallback request from ever reaching
+        //  Google, which is what needs to travel through Tor for
+        //  correct IP-based location results. No hosts changes for
+        //  location are made here anymore.
+        // ════════════════════════════════════════════════════════
         Logger.info('Applying DNS + IPv6 leak protection...');
+
         const bat = getScriptPath('fp_leak_on.bat');
         const content = [
             '@echo off',
-            // ── DNS: portproxy 53 → 9053 (Tor's DNSPort) ──────────────
-            // Remove any old rule first, then add fresh
-            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
-            `netsh interface portproxy add v4tov4 listenport=53 listenaddress=127.0.0.1 connectport=9053 connectaddress=127.0.0.1`,
-            // ── DNS: global registry fallback (fast, no PowerShell) ────
-            `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /t REG_SZ /d "127.0.0.1" /f`,
-            // ── DNS: flush stale ISP entries ────────────────────────────
+            // ── DNS: Stop dnscache to free port 53 for Tor ────────────
+            `net stop dnscache /y 2>nul`,
+            `timeout /t 1 /nobreak >nul`,
+            // ── DNS: Set DNS via netsh (IMMEDIATE effect, no restart) ──
+            // Loop over all interfaces and set DNS to 127.0.0.1
+            `for /f "tokens=3*" %%A in ('netsh interface show interface ^| findstr /i "connected"') do (`,
+              // delete ALL existing DNS entries (incl. stale DHCP secondary)
+            // before setting the static one -- guards against a leftover
+            // secondary DNS answering some queries directly, which showed
+            // up as random unrelated countries (CA/UAE/FR) on ipleak's DNS test.
+            `    netsh interface ipv4 delete dnsserver "%%B" all 2>nul`,
+            `    netsh interface ipv4 set dnsserver "%%B" static 127.0.0.1 primary 2>nul`,
+            `    netsh interface ipv4 add dnsserver "%%B" 127.0.0.1 index=1 2>nul`,
+            `)`,
+            // Belt-and-suspenders: registry global NameServer
+            `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v NameServer /t REG_SZ /d "127.0.0.1" /f`,
             `ipconfig /flushdns`,
-            // ── IPv6: registry disable (reboot-persistent, fast) ────────
+            // ── Location: stop lfsvc (Windows Location Service) ──────────
+            // Do NOT deny CapabilityAccessManager — that causes Chrome PERMISSION_DENIED
+            // (shown as "User denied" on ipleak). Instead just stop lfsvc so Chrome
+            // can't get WiFi positioning. googleapis.com is already blocked in hosts →
+            // Chrome gets POSITION_UNAVAILABLE → ipleak falls back to IP-based geo →
+            // shows correct VPN country.
+`sc config lfsvc start= disabled 2>nul`,
+            `sc stop lfsvc 2>nul`,
+            // Flush DNS cache so hosts file changes take effect immediately
+            `ipconfig /flushdns`,
+            // ── IPv6 disable ───────────────────────────────────────────
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f`,
-            // ── IPv6 tunnels ─────────────────────────────────────────────
             `netsh interface teredo set state disabled`,
             `netsh interface isatap set state disabled`,
             `netsh interface 6to4 set state disabled`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.success('Leak protection ON -- DNS->127.0.0.1:53->9053->Tor, IPv6 disabled');
+        Logger.success('Leak protection ON -- DNS via Tor port 53, location APIs blocked, IPv6 disabled');
     }
 
     async function reverseLeakProtection() {
-        Logger.info('Reversing DNS + IPv6 leak protection...');
+        Logger.info('Reversing DNS + Location + IPv6 leak protection...');
+
+        // Remove hosts file entries
+        const hostsPath = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+        try {
+            let hosts = fs.readFileSync(hostsPath, 'utf8');
+            if (hosts.includes('FreeProxy VPN -- location spoof block')) {
+                // Remove everything between the FreeProxy markers
+                hosts = hosts.replace(/\r?\n# FreeProxy VPN -- location spoof block[\s\S]*?# FreeProxy VPN end/g, '');
+                fs.writeFileSync(hostsPath, hosts, 'utf8');
+                Logger.success('Hosts file: location API block removed');
+            }
+        } catch(e) { Logger.warn('Hosts file restore failed: ' + e.message); }
+
         const bat = getScriptPath('fp_leak_off.bat');
         const content = [
             '@echo off',
-            // ── DNS: remove portproxy ─────────────────────────────────
-            `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
-            // ── DNS: restore global NameServer to empty (use DHCP) ────
-            `reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /f 2>nul`,
+            // ── DNS: restore adapter DNS to DHCP (netsh, immediate) ───
+            `for /f "tokens=3*" %%A in ('netsh interface show interface ^| findstr /i "connected"') do (`,
+            `    netsh interface ipv4 set dnsserver "%%B" dhcp 2>nul`,
+            `)`,
+            `reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v NameServer /f 2>nul`,
+            // Restart dnscache
+            `net start dnscache 2>nul`,
             `ipconfig /flushdns`,
-            // ── IPv6: re-enable via registry ──────────────────────────
+            // ── Location: restart lfsvc ───────────────────────────────
+`sc config lfsvc start= demand 2>nul`,
+            `sc start lfsvc 2>nul`,
+            // ── IPv6: re-enable ────────────────────────────────────────
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 0 /f`,
-            // ── IPv6 tunnels: restore ──────────────────────────────────
             `netsh interface teredo set state default`,
             `netsh interface isatap set state default`,
             `netsh interface 6to4 set state default`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.success('Leak protection OFF -- DNS & IPv6 restored');
+        Logger.success('Leak protection OFF -- DNS & IPv6 & location restored');
     }
 
     async function killSwitchLeakLock() {
@@ -475,13 +572,17 @@ function runAdminApp() {
             // Dead proxy port -- blocks all internet traffic
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "socks=127.0.0.1:9999" /f`,
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f`,
-            // Keep DNS locked -- Tor is gone so DNS queries fail (no ISP leak)
-            `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v "NameServer" /t REG_SZ /d "127.0.0.1" /f`,
-            // Keep IPv6 disabled
+            // DNS locked -- dnscache stopped, Tor gone, so DNS fails safely
+            `net stop dnscache /y 2>nul`,
+            `for /f %%i in ('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces"') do reg add "%%i" /v NameServer /t REG_SZ /d "127.0.0.1" /f 2>nul`,
+            // lfsvc stopped — no WiFi geo leak, no permission-denied error
+`sc config lfsvc start= disabled 2>nul`,
+            `sc stop lfsvc 2>nul`,
+            // IPv6 disabled
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.warn('Kill Switch LOCKED -- internet blocked, DNS locked, IPv6 off');
+        Logger.warn('Kill Switch LOCKED -- internet blocked, DNS locked, location blocked, IPv6 off');
     }
 
     // ── Window creation ───────────────────────────────────
@@ -560,6 +661,15 @@ function runAdminApp() {
             ].join('\r\n'));
             await reverseLeakProtection();
         } catch(e) { Logger.error('Exit cleanup error', { err: e.message }); }
+        // Restore hosts file on exit
+        const hostsPathExit = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+        try {
+            let hosts = fs.readFileSync(hostsPathExit, 'utf8');
+            if (hosts.includes('FreeProxy VPN -- location spoof block')) {
+                hosts = hosts.replace(/\r?\n# FreeProxy VPN -- location spoof block[\s\S]*?# FreeProxy VPN end/g, '');
+                fs.writeFileSync(hostsPathExit, hosts, 'utf8');
+            }
+        } catch(e) {}
         Logger.info('Goodbye.');
         if (process.platform !== 'darwin') app.quit();
     });
@@ -663,7 +773,9 @@ function runAdminApp() {
         return new Promise(resolve => {
             const { serverCode, bypassList } = data;
             const SOCKS_PORT = 9050;
-            const DNS_PORT   = 9053;
+            // DNS_PORT = 53 (standard): dnscache is stopped before Tor starts,
+            // freeing port 53 for Tor to bind directly. This fixes UDP DNS leak.
+            const DNS_PORT   = 53;
             const wc = BrowserWindow.getAllWindows()[0]?.webContents;
             Logger.info('connect-vpn', { serverCode });
 
@@ -714,7 +826,7 @@ function runAdminApp() {
             function buildTorrc(useBridges) {
                 const lines = [
                     `SocksPort ${SOCKS_PORT}`,
-                    `DNSPort ${DNS_PORT}`,
+                    `DNSPort 127.0.0.1:${DNS_PORT}`,
                     `AutomapHostsOnResolve 1`,
                     `VirtualAddrNetworkIPv4 10.192.0.0/10`,
                     `ClientUseIPv4 1`,
@@ -730,8 +842,7 @@ function runAdminApp() {
                     `LongLivedPorts 9050`,          // SOCKS port gets sticky long-lived circuits
                     `CircuitBuildTimeout 60`,        // more time to find a good exit
                     `Log notice stderr`,
-                    // ControlPort for NEWNYM signal (country re-verification)
-                    `ControlPort 9051`,
+                    // No ControlPort — using tor restart instead of NEWNYM
                 ];
                 if (useBridges && hasLyrebird) {
                     lines.push(`UseBridges 1`);
@@ -814,7 +925,7 @@ function runAdminApp() {
 
                         // Verify actual exit IP country matches requested country
                         const { verified, actual } = await verifyAndFixExitCountry(
-                            serverCode, SOCKS_PORT, 9051
+                            serverCode, SOCKS_PORT
                         );
 
                         let finalCode = serverCode;
@@ -859,67 +970,71 @@ function runAdminApp() {
             // ════════════════════════════════════════════════
 
             // Get actual exit country via curl through SOCKS5
-            function getActualExitCountry(socksPort) {
-                return new Promise(resolveInner => {
+            // Query a single geo API via curl through SOCKS5
+            function queryGeoAPI(socksPort, url, parser) {
+                return new Promise(resolve => {
                     const curlExe = path.join(
                         process.env.SystemRoot || 'C:\\Windows',
                         'System32', 'curl.exe'
                     );
-                    if (!fs.existsSync(curlExe)) {
-                        Logger.debug('curl.exe not found -- skipping exit country check');
-                        resolveInner(null); return;
-                    }
+                    if (!fs.existsSync(curlExe)) { resolve(null); return; }
                     const proc = spawn(curlExe, [
                         '--socks5-hostname', `127.0.0.1:${socksPort}`,
-                        '--max-time', '12',
-                        '--silent', '--fail',
-                        'https://ipinfo.io/country'
+                        '--max-time', '10', '--silent', '--fail', url
                     ], { windowsHide: true, stdio: 'pipe' });
-
                     let out = '';
                     proc.stdout.on('data', d => out += d.toString());
                     proc.on('exit', () => {
-                        const cc = out.trim().toUpperCase();
-                        // ipinfo returns 2-letter ISO code
-                        resolveInner(cc.length === 2 ? cc : null);
+                        try { resolve(parser(out.trim())); } catch(e) { resolve(null); }
                     });
-                    proc.on('error', () => resolveInner(null));
-                    setTimeout(() => { try { proc.kill(); } catch(e) {} resolveInner(null); }, 14000);
+                    proc.on('error', () => resolve(null));
+                    setTimeout(() => { try { proc.kill(); } catch(e) {} resolve(null); }, 12000);
                 });
             }
 
-            // Ask Tor for a new circuit via ControlPort
-            function requestNewCircuit(ctrlPort) {
-                return new Promise(resolveInner => {
-                    const net = require('net');
-                    const sock = new net.Socket();
-                    let buf = '', authed = false;
+            // Multi-source majority vote — 3 different geoip databases
+            // Handles the case where one database classifies a relay differently.
+            // e.g. Italian relay hosted in a US datacenter → ipinfo says US,
+            // ipapi says IT → majority picks the actual registration country.
+            async function getActualExitCountry(socksPort) {
+                const [r1, r2, r3] = await Promise.allSettled([
+                    queryGeoAPI(socksPort, 'https://ipinfo.io/country',
+                        r => r.trim().toUpperCase().slice(0, 2)),
+                    queryGeoAPI(socksPort, 'https://api.country.is/ip',
+                        r => JSON.parse(r).country.toUpperCase().slice(0, 2)),
+                    queryGeoAPI(socksPort, 'https://ipapi.co/country_code/',
+                        r => r.trim().toUpperCase().slice(0, 2)),
+                ]);
 
-                    sock.connect(ctrlPort, '127.0.0.1', () => {
-                        sock.write('AUTHENTICATE ""');
-                    });
-                    sock.on('data', chunk => {
-                        buf += chunk.toString();
-                        if (!authed && buf.includes('250 OK')) {
-                            authed = true; buf = '';
-                            sock.write('SIGNAL NEWNYM');
-                        } else if (authed && buf.includes('250 OK')) {
-                            sock.destroy(); resolveInner(true);
-                        } else if (buf.includes('515') || buf.includes('551')) {
-                            sock.destroy(); resolveInner(false);
-                        }
-                    });
-                    sock.on('error', () => resolveInner(false));
-                    setTimeout(() => { try { sock.destroy(); } catch(e) {} resolveInner(false); }, 6000);
+                const votes = {};
+                [r1, r2, r3].forEach(r => {
+                    const cc = r.status === 'fulfilled' ? r.value : null;
+                    if (cc && /^[A-Z]{2}$/.test(cc)) {
+                        votes[cc] = (votes[cc] || 0) + 1;
+                        Logger.debug(`Geo source: ${cc}`);
+                    }
                 });
+
+                if (!Object.keys(votes).length) return null;
+                const winner = Object.entries(votes)
+                    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+                Logger.info(`Geo vote result: ${winner} (breakdown: ${JSON.stringify(votes)})`);
+                return winner;
             }
 
-            // Verify + retry if needed (up to 3 circuits)
-            async function verifyAndFixExitCountry(serverCode, socksPort, ctrlPort) {
+                        // Verify exit country — restart tor.exe if mismatch
+            // WHY restart not NEWNYM: Tor's bundled geoip may classify a relay
+            // differently than ipinfo.io. NEWNYM picks from the same pool.
+            // Restarting bootstraps a fresh relay set with better chance of match.
+            async function verifyAndFixExitCountry(serverCode, socksPort) {
                 const want = serverCode.toUpperCase();
+
                 for (let attempt = 1; attempt <= 3; attempt++) {
                     const got = await getActualExitCountry(socksPort);
-                    if (!got) return { verified: false, actual: null }; // curl unavailable
+                    if (!got) {
+                        Logger.debug('curl unavailable -- skipping exit country check');
+                        return { verified: false, actual: null };
+                    }
 
                     Logger.info(`Exit country check #${attempt}: want=${want}, got=${got}`);
                     if (got === want) {
@@ -928,13 +1043,40 @@ function runAdminApp() {
                     }
 
                     if (attempt < 3) {
-                        Logger.warn(`Exit mismatch (${got} != ${want}), requesting new circuit...`);
-                        const ok = await requestNewCircuit(ctrlPort);
-                        if (!ok) { Logger.warn('NEWNYM failed'); break; }
-                        // Wait for new circuit to establish
-                        await new Promise(r => setTimeout(r, 5000));
+                        Logger.warn(`Exit mismatch (${got} != ${want}), restarting Tor for new relay...`);
+                        // Kill + restart tor.exe with same torrc for a fresh relay set
+                        try { execSync('taskkill /F /IM tor.exe', { stdio: 'ignore', windowsHide: true }); } catch(e) {}
+                        // Delete lock + cached relay data so fresh consensus is fetched
+                        // Without this, Tor reuses same relay pool → same wrong exit
+                        const cacheFiles = [
+                            'lock', 'cached-certs', 'cached-microdesc-consensus',
+                            'cached-microdescs', 'cached-microdescs.new',
+                            'unverified-microdesc-consensus'
+                        ];
+                        cacheFiles.forEach(f => {
+                            [path.join(torData, f), path.join(torDir, 'data', f)]
+                                .forEach(fp => { try { if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch(e) {} });
+                        });
+                        await new Promise(r => setTimeout(r, 600));
+
+                        activeTorProc = spawn(torExe, ['-f', torrcPath], {
+                            cwd: torDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+                        });
+                        let rbuf = '';
+                        function rHandle(chunk) {
+                            rbuf += chunk.toString();
+                            const lines = rbuf.split('\n'); rbuf = lines.pop() || '';
+                            lines.forEach(l => { if (l.trim()) Logger.debug('TOR-R: ' + l.trim()); });
+                        }
+                        activeTorProc.stdout.on('data', rHandle);
+                        activeTorProc.stderr.on('data', rHandle);
+                        activeTorProc.on('exit', code => Logger.debug('tor restart exited', { code }));
+                        // Wait for full bootstrap (100%) via stderr events
+                        // rHandle already logs progress; we just wait for it
+                        await new Promise(r => setTimeout(r, 12000)); // 12s generous wait
                     }
                 }
+
                 const final = await getActualExitCountry(socksPort);
                 return { verified: final === want, actual: final };
             }
@@ -943,6 +1085,11 @@ function runAdminApp() {
                 killTor();
                 [path.join(torData, 'lock'), path.join(torDir, 'data', 'lock')]
                     .forEach(lf => { try { if (fs.existsSync(lf)) fs.unlinkSync(lf); } catch(e) {} });
+
+                // Stop Windows DNS Client service so Tor can bind to port 53 directly.
+                // dnscache normally holds port 53 -- if it's running, Tor can't bind.
+                // We restart it on disconnect via reverseLeakProtection().
+                try { execSync('net stop dnscache /y', { windowsHide: true, stdio: 'pipe' }); Logger.debug('dnscache stopped'); } catch(e) {}
 
                 fs.writeFileSync(torrcPath, buildTorrc(useBridges), 'utf8');
                 Logger.info('Spawning tor.exe', { useBridges, serverCode });
@@ -1078,4 +1225,383 @@ function runAdminApp() {
             ].join('\r\n')).then(() => { Logger.debug('Bypass updated', { fp }); resolve({ status: 'updated' }); });
         });
     });
+
+
+    // ADDITIVE: switch-vpn — keeps DNS locked, no reverseLeakProtection
+    ipcMain.handle('switch-vpn', async (event, data) => {
+        return new Promise(resolve => {
+            const { serverCode, bypassList = '', oldServerCode = '' } = data;
+            const SOCKS = 9050, DNS = 53;
+            const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+            Logger.info('switch-vpn', { from: oldServerCode, to: serverCode });
+            const sendSw = (p, m, s) => wc?.send('connection-progress',{ percent:p,message:m,status:s||'connecting',serverCode });
+            const te  = path.join(torDir, 'tor.exe');
+            const tpr = path.dirname(torDir);
+            const tdt = path.join(tpr, 'data');
+            const gip = path.join(tdt, 'geoip');
+            const g6  = path.join(tdt, 'geoip6');
+            const trc = getScriptPath('torrc');
+            if (!fs.existsSync(te)) return resolve({ status:'unavailable', serverCode });
+            const mkTorrc = cc => [
+                `SocksPort ${SOCKS}`, `DNSPort 127.0.0.1:${DNS}`,
+                'AutomapHostsOnResolve 1', 'VirtualAddrNetworkIPv4 10.192.0.0/10',
+                'ClientUseIPv4 1', 'ClientUseIPv6 0',
+                `DataDirectory "${tdt.replace(/\\/g,'/')}"`,
+                `GeoIPFile "${gip.replace(/\\/g,'/')}"`,
+                `GeoIPv6File "${g6.replace(/\\/g,'/')}"`,
+                `ExitNodes {${cc}}`, 'StrictNodes 1',
+                'MaxCircuitDirtiness 3600', 'NewCircuitPeriod 600',
+                'LongLivedPorts 9050', 'CircuitBuildTimeout 60', 'Log notice stderr',
+            ].join('\n');
+            const kill = () => {
+                try { execSync('taskkill /F /IM tor.exe /IM lyrebird.exe',{stdio:'ignore',windowsHide:true}); } catch(e){}
+                ['lock','cached-certs','cached-microdesc-consensus','cached-microdescs','cached-microdescs.new']
+                    .forEach(f => [path.join(tdt,f),path.join(torDir,'data',f)]
+                        .forEach(fp => { try { if(fs.existsSync(fp)) fs.unlinkSync(fp); } catch(e){} }));
+                try { execSync('net stop dnscache /y',{windowsHide:true,stdio:'pipe'}); } catch(e){}
+            };
+            let resolved = false;
+            const done = (status, code) => {
+                if (resolved) return; resolved = true;
+                appState.connected  = (status === 'connected' || status === 'reconnected');
+                appState.serverCode = code;
+                broadcastState();
+                // FIX: resolve() FIRST so renderer UI updates instantly.
+                // applyGeolocationSpoof() runs several synchronous
+                // PowerShell/registry calls (proxy policy, cert, hosts)
+                // that take a few seconds -- running it BEFORE resolve()
+                // left the await'ed IPC call pending that whole time,
+                // so the button stayed stuck on "Switching to X..."
+                // even after the connection had already succeeded.
+                resolve({ status, serverCode: code });
+                if (mainWindow && appState.connected) {
+                    setImmediate(() => applyGeolocationSpoof(mainWindow, code));
+                }
+            };
+            const runTor = (cc, onOK, onFail) => {
+                fs.writeFileSync(trc, mkTorrc(cc), 'utf8');
+                const pr = spawn(te,['-f',trc],{cwd:torDir,windowsHide:true,stdio:['ignore','pipe','pipe']});
+                let buf='', last=0, lat=Date.now(), ok=false;
+                const tick=setInterval(()=>{ if(Date.now()-lat>38000){clearInterval(tick);clearTimeout(mx); if(!ok){ok=true;try{pr.kill();}catch(e){}onFail();}} },1000);
+                const mx=setTimeout(()=>{if(!ok){ok=true;try{pr.kill();}catch(e){}onFail();}},90000);
+                const onD=d=>{
+                    buf+=d.toString(); const ls=buf.split('\n'); buf=ls.pop()||'';
+                    ls.forEach(l=>{
+                        const m=l.match(/Bootstrapped (\d+)%[^:]*:\s*(.*)/);
+                        if(!m)return; const p=parseInt(m[1]);
+                        if(p>last){last=p;lat=Date.now();sendSw(p,m[2].trim());}
+                        if(p>=100&&!ok){ok=true;clearInterval(tick);clearTimeout(mx);onOK();}
+                    });
+                };
+                pr.stdout.on('data',onD); pr.stderr.on('data',onD);
+                pr.on('exit',c2=>Logger.debug('sw tor exit',{code:c2}));
+            };
+            sendSw(5,`Switching to ${serverCode.toUpperCase()}…`);
+            kill();
+            setTimeout(()=>{
+                runTor(serverCode,
+                    () => done('connected', serverCode),
+                    () => {
+                        if (!oldServerCode || oldServerCode === serverCode)
+                            return done('unavailable', serverCode);
+                        Logger.warn('switch failed, reverting', {oldServerCode});
+                        sendSw(5,`Reverting to ${oldServerCode.toUpperCase()}…`);
+                        kill();
+                        setTimeout(()=>{
+                            runTor(oldServerCode,
+                                () => done('reconnected', oldServerCode),
+                                () => done('unavailable', serverCode)
+                            );
+                        }, 350);
+                    }
+                );
+            }, 350);
+        });
+    });
 }
+// ═══════════════════════════════════════════════════════════════════
+//  ADDITIVE FIX (v2) — corrects 2 remaining issues from last round
+//
+//  ISSUE A: Edge still shows real IP, Chrome works
+//  ROOT CAUSE: Windows WinINET caches the proxy decision per-process.
+//  Writing the registry key alone does NOT notify already-running
+//  browsers. Chrome happened to re-read it (likely opened/navigated
+//  after the write); Edge's WinINET cache never got invalidated.
+//  REAL FIX: call InternetSetOption(NULL, INTERNET_OPTION_SETTINGS_CHANGED)
+//  + INTERNET_OPTION_REFRESH via a tiny PowerShell P/Invoke — this is
+//  the official Win32 API to force ALL WinINET-based apps (Edge,
+//  Chrome, IE-mode, etc.) to immediately re-read the registry proxy,
+//  without needing to restart the browser.
+//  Also reinforced with: (1) netsh winhttp machine proxy, and
+//  (2) Chromium Enterprise policy registry (ProxySettings JSON)
+//  under HKLM for both Edge and Chrome — this is the policy channel
+//  Chromium browsers check FIRST, before user-level WinINET settings,
+//  so it guarantees Edge specifically obeys it.
+//
+//  ISSUE B: Google Maps shows no location at all
+//  ROOT CAUSE: previous version blocked 'geolocation.googleapis.com'
+//  in hosts — but that hostname does NOT exist / is never queried.
+//  Chrome's actual W3C Geolocation network-location-provider endpoint
+//  is:  https://www.googleapis.com/geolocation/v1/geolocate
+//  Blocking the wrong domain meant Chrome's real request still went
+//  out (now via Tor, with no responder) → no result → blank map.
+//  REAL FIX: redirect www.googleapis.com (the ACTUAL endpoint host)
+//  to 127.0.0.1, with a matching cert SAN, and serve the exact JSON
+//  shape Chrome expects from this endpoint.
+// ═══════════════════════════════════════════════════════════════════
+
+let _geoServer = null, _geoCertOK = false, _geoCoords = { lat: 0, lng: 0 };
+
+// ═══════════════════════════════════════════════════════════════════
+//  ADDITIVE FIX (v3) — replaces fragile inline `-Command "..."` calls
+//  with proper .ps1 SCRIPT FILES.
+//
+//  WHY: every previous failure in the log traced back to the SAME
+//  root cause -- nested double quotes inside an execSync -Command
+//  string get mangled by TWO layers of shell parsing (Node's
+//  execSync -> cmd.exe -> powershell.exe). Examples that failed:
+//    - [DllImport("wininet.dll")] -- the embedded "wininet.dll"
+//      quotes broke PowerShell's parser entirely (Add-Type compile
+//      error in the log).
+//    - reg add ... /d "{\"ProxyMode\":...}" -- cmd.exe does not
+//      treat \" as an escape; it just closes the quoted argument
+//      early, corrupting the whole command ("cannot find the file
+//      specified").
+//
+//  FIX: write the PowerShell code to a REAL .ps1 file on disk with
+//  fs.writeFileSync (no shell involved at all while writing), then
+//  invoke it with `-File "path"`. A .ps1 file can contain any
+//  quotes/braces literally -- zero escaping needed, zero ambiguity.
+//  This is the "more powerful than .bat" approach -- PowerShell
+//  script files handle JSON, P/Invoke, and certificate store
+//  operations natively, all the things .bat/cmd cannot do reliably.
+// ═══════════════════════════════════════════════════════════════════
+
+function geoFile(name) { return path.join(app.getPath('userData'), name); }
+
+function runPs1(content, name, timeoutMs = 20000) {
+    const p = geoFile(name);
+    fs.writeFileSync(p, content, 'utf8');
+    return execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${p}"`,
+        { windowsHide: true, timeout: timeoutMs }).toString();
+}
+
+async function startGeoSpoofHTTPS(lat, lng, city) {
+    await stopGeoSpoofHTTPS();
+    _geoCoords = { lat, lng };
+    const pfxPath = geoFile('geospoof.pfx');
+    const pfxPass = 'FP2024geo';
+
+    // ── Cert generation via .ps1 file (no quoting issues) ───────────
+    // Create in LocalMachine\My (supports private-key export reliably),
+    // export PFX, then separately import the PUBLIC cert into
+    // LocalMachine\Root for system-wide trust. This two-step My->Root
+    // pattern is the standard, documented way to get a trusted,
+    // exportable self-signed cert -- creating directly in \Root (the
+    // old approach) is unreliable on some Windows builds.
+    const certPs = [
+        "$ErrorActionPreference = 'Stop'",
+        "try {",
+        "    Get-ChildItem Cert:\\LocalMachine\\My,Cert:\\LocalMachine\\Root |",
+        "        Where-Object { $_.FriendlyName -eq 'FreeProxy GeoSpoof' } |",
+        "        Remove-Item -Force -ErrorAction SilentlyContinue",
+        "    $dn = @('www.googleapis.com','location.services.mozilla.com')",
+        "    $cert = New-SelfSignedCertificate -DnsName $dn -CertStoreLocation 'Cert:\\LocalMachine\\My' -NotAfter (Get-Date).AddYears(2) -KeyUsage KeyEncipherment,DigitalSignature -FriendlyName 'FreeProxy GeoSpoof'",
+        `    $pwd = ConvertTo-SecureString '${pfxPass}' -AsPlainText -Force`,
+        `    Export-PfxCertificate -Cert $cert -FilePath '${pfxPath}' -Password $pwd | Out-Null`,
+        `    $cerTmp = '${pfxPath}.cer'`,
+        "    Export-Certificate -Cert $cert -FilePath $cerTmp | Out-Null",
+        "    Import-Certificate -FilePath $cerTmp -CertStoreLocation 'Cert:\\LocalMachine\\Root' | Out-Null",
+        "    Remove-Item $cerTmp -Force -ErrorAction SilentlyContinue",
+        "    Write-Output 'CERT_OK'",
+        "} catch {",
+        "    Write-Output ('CERT_FAIL: ' + $_.Exception.Message)",
+        "}",
+    ].join("\r\n");
+
+    try {
+        const out = runPs1(certPs, 'fp_geocert.ps1', 20000);
+        if (out.includes('CERT_OK')) {
+            _geoCertOK = true;
+            Logger.success(`Geo HTTPS cert installed for www.googleapis.com (${city})`);
+        } else {
+            Logger.warn('Geo HTTPS cert: ' + out.trim().slice(0, 200));
+            return;
+        }
+    } catch(e) {
+        Logger.warn('Geo HTTPS cert: ' + e.message.split('\n')[0]);
+        return;
+    }
+    if (!fs.existsSync(pfxPath)) { Logger.warn('Geo HTTPS PFX missing'); return; }
+
+    const https = require('https');
+    _geoServer  = https.createServer(
+        { pfx: fs.readFileSync(pfxPath), passphrase: pfxPass },
+        (req, res) => {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Headers', '*');
+            if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+            const j = () => (Math.random() - 0.5) * 0.002;
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                location: { lat: _geoCoords.lat + j(), lng: _geoCoords.lng + j() },
+                accuracy: 25,
+            }));
+        }
+    );
+    _geoServer.listen(443, '127.0.0.1', () =>
+        Logger.success(`Geo HTTPS server live -> ${city} (www.googleapis.com intercepted)`));
+    _geoServer.on('error', e => Logger.warn('Geo HTTPS: ' + e.message));
+}
+
+async function stopGeoSpoofHTTPS() {
+    if (_geoServer) {
+        await new Promise(r => _geoServer.close(r)).catch(() => {});
+        _geoServer = null;
+    }
+    if (_geoCertOK) {
+        try {
+            runPs1(
+                "Get-ChildItem Cert:\\LocalMachine\\My,Cert:\\LocalMachine\\Root |\r\n" +
+                "    Where-Object { $_.FriendlyName -eq 'FreeProxy GeoSpoof' } |\r\n" +
+                "    Remove-Item -Force -ErrorAction SilentlyContinue",
+                'fp_geocert_clean.ps1', 8000
+            );
+            _geoCertOK = false;
+        } catch(e) {}
+    }
+}
+
+// ── FIX: force ALL browsers (Edge + Chrome) onto the proxy ─────────
+// Single consolidated .ps1 -- replaces 4 separate fragile execSync
+// calls (winhttp, P/Invoke refresh, 2x reg add) with one robust file.
+// Also disables DNS-prefetch / network-prediction here, which is a
+// REAL, documented Chrome/Edge leak vector: even with a SOCKS proxy
+// configured, Chromium's predictive prefetcher can fire raw OS-level
+// DNS lookups for hinted links, completely bypassing the proxy. That
+// is the most likely explanation for ipleak showing DNS results from
+// random unrelated countries (Canada/UAE/France) instead of the
+// connected exit country -- those were prefetch lookups going out
+// the OS resolver, not through Tor at all.
+// ═══════════════════════════════════════════════════════════════════
+//  FIX: Edge shows real IP while Chrome shows correct VPN IP
+//
+//  ROOT CAUSE: Microsoft Edge keeps a background process alive after
+//  its window is closed ("Startup boost" / efficiency mode). That
+//  background process's network stack reads the system proxy ONCE
+//  at its own startup and caches it -- registry/policy changes made
+//  AFTER that point are not picked up by the already-running process,
+//  even though our WinHTTP + Enterprise Policy + InternetSetOption
+//  refresh calls all succeed. Chrome does not keep this kind of
+//  persistent background process by default, so a normal Chrome
+//  window picks up the fresh proxy immediately -- which is exactly
+//  the asymmetry observed (Chrome correct, Edge always stale).
+//
+//  FIX: close all msedge.exe processes (graceful first, so any open
+//  tabs can be restored by Edge's own "continue where you left off"
+//  on next launch) right after applying/reverting the proxy. This
+//  guarantees the NEXT time Edge opens -- including its background
+//  Startup-boost instance -- it starts completely fresh and reads
+//  the current proxy configuration correctly.
+// ═══════════════════════════════════════════════════════════════════
+function restartEdgeForProxy() {
+    try {
+        execSync('taskkill /IM msedge.exe', { windowsHide: true, stdio: 'pipe' });
+        Logger.info('Edge closed to apply fresh proxy settings (will reopen normally on next launch)');
+    } catch(e) { /* Edge likely wasn't running -- nothing to do */ }
+    // Force-kill any straggler (e.g. a tab holding a "leave site?" prompt)
+    // that ignored the graceful close, after a short grace period.
+    setTimeout(() => {
+        try { execSync('taskkill /F /IM msedge.exe', { windowsHide: true, stdio: 'pipe' }); } catch(e) {}
+    }, 2000);
+}
+
+function forceAllBrowsersOntoProxy() {
+    const proxyJson = '{\\"ProxyMode\\":\\"fixed_servers\\",\\"ProxyServer\\":\\"socks5://127.0.0.1:9050\\",\\"ProxyBypassList\\":\\"localhost;127.0.0.1;<local>\\"}';
+    const ps = [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        "netsh winhttp set proxy proxy-server=`\"socks=127.0.0.1:9050`\" bypass-list=`\"localhost;127.0.0.1;<local>`\" | Out-Null",
+        "try {",
+        "    Add-Type -Namespace FP -Name Inet -MemberDefinition @'",
+        '[DllImport("wininet.dll")]',
+        "public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);",
+        "'@",
+        "    [FP.Inet]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null",
+        "    [FP.Inet]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null",
+        "} catch {}",
+        "New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge'  -Force | Out-Null",
+        "New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome'   -Force | Out-Null",
+        `Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge' -Name 'ProxySettings' -Value '${proxyJson.replace(/\\"/g, '"')}' -Type String -Force`,
+        `Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome'  -Name 'ProxySettings' -Value '${proxyJson.replace(/\\"/g, '"')}' -Type String -Force`,
+        "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge' -Name 'DnsPrefetchingEnabled'    -Value 0 -Type DWord -Force",
+        "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome'  -Name 'DnsPrefetchingEnabled'    -Value 0 -Type DWord -Force",
+        "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge' -Name 'NetworkPredictionOptions' -Value 2 -Type DWord -Force",
+        "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome'  -Name 'NetworkPredictionOptions' -Value 2 -Type DWord -Force",
+        "Write-Output 'PROXY_OK'",
+    ].join("\r\n");
+
+    try {
+        const out = runPs1(ps, 'fp_browserproxy.ps1', 15000);
+        Logger.success('Edge & Chrome forced onto SOCKS5 proxy + DNS-prefetch disabled (' + out.trim() + ')');
+    } catch(e) {
+        Logger.warn('Browser proxy script: ' + e.message.split('\n')[0]);
+    }
+    restartEdgeForProxy();
+}
+
+function restoreAllBrowsersProxy() {
+    const ps = [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        "netsh winhttp reset proxy | Out-Null",
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge' -Name 'ProxySettings' -ErrorAction SilentlyContinue",
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome'  -Name 'ProxySettings' -ErrorAction SilentlyContinue",
+        "try {",
+        "    Add-Type -Namespace FP -Name Inet2 -MemberDefinition @'",
+        '[DllImport("wininet.dll")]',
+        "public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);",
+        "'@",
+        "    [FP.Inet2]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null",
+        "    [FP.Inet2]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null",
+        "} catch {}",
+        "Write-Output 'RESTORE_OK'",
+    ].join("\r\n");
+
+    try {
+        runPs1(ps, 'fp_browserproxy_off.ps1', 10000);
+        Logger.info('Edge & Chrome proxy policy reverted');
+    } catch(e) { Logger.warn('Browser proxy restore: ' + e.message.split('\n')[0]); }
+    restartEdgeForProxy();
+}
+
+// ── Wrap applyGeolocationSpoof ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+//  FIX (v4): removed the www.googleapis.com hosts-redirect + local
+//  fake HTTPS server.
+//
+//  WHY: that redirect was actively COUNTERPRODUCTIVE. With lfsvc now
+//  properly DISABLED (see Layer 3 fix above), Chromium's native
+//  Windows location provider fails, so it falls back to its OWN
+//  network-based geolocation -- a real request to Google's real
+//  www.googleapis.com/geolocation/v1/geolocate. Google's API is
+//  documented to fall back to IP-based geolocation when no Wi-Fi/cell
+//  data is supplied, using the IP the request arrived FROM. Once that
+//  request travels through Tor (via the SOCKS5 proxy fix), Google's
+//  own servers see the Tor exit IP and return a location inside the
+//  connected VPN country automatically -- correct for both Chrome AND
+//  Edge, with no cert/hosts trickery needed. Redirecting the domain to
+//  a local fake server (the old approach) PREVENTED this real request
+//  from ever leaving the machine, which is why the geolocation map
+//  kept showing the real Dhaka location no matter what.
+// ═══════════════════════════════════════════════════════════════════
+const _origApplyGeo = applyGeolocationSpoof;
+applyGeolocationSpoof = function(win, sc) {
+    _origApplyGeo(win, sc);
+    forceAllBrowsersOntoProxy();
+};
+
+// ── Wrap clearGeolocationSpoof ────────────────────────────────────
+const _origClearGeo = clearGeolocationSpoof;
+clearGeolocationSpoof = function(win) {
+    _origClearGeo(win);
+    restoreAllBrowsersProxy();
+};

@@ -508,3 +508,98 @@ document.addEventListener('DOMContentLoaded', async () => {
     ipcRenderer.on('force-connect-ui',    ()=>{ if (!isAppConnected) connectButton.click(); });
     ipcRenderer.on('force-disconnect-ui', ()=>{ if (isAppConnected)  connectButton.click(); });
 });
+// ADDITIVE: country switch capture-phase interceptor (DNS stays locked)
+//
+// BUG FIX: previously called `updateUI(...)`, `stopTimer()` guarded by
+// `typeof updateUI === 'function'`. Those functions are declared INSIDE
+// the ORIGINAL `document.addEventListener('DOMContentLoaded', async () => {...})`
+// block further up this file -- they are local to THAT closure and are
+// NOT visible here (this is a second, separate DOMContentLoaded listener).
+// So `typeof updateUI` was always 'undefined' and the button text/class
+// never got reset after a successful switch -- it stayed stuck on
+// "Switching to X..." forever, even though the connection had actually
+// succeeded (confirmed by the globe overlay already showing "Secured &
+// Routed via X"). Fix: do the DOM updates directly ourselves here,
+// mirroring exactly what updateUI(true/false, ...) does.
+document.addEventListener('DOMContentLoaded', () => {
+    const _dl = document.getElementById('dropdownList');
+    if (!_dl) return;
+    _dl.addEventListener('click', async function(e) {
+        if (!isAppConnected) return;
+        const li = e.target.closest('li[data-value]');
+        if (!li) return;
+        const newCode = li.getAttribute('data-value');
+        if (!newCode || newCode === currentServer) return;
+        e.stopImmediatePropagation();
+        _dl.classList.remove('show');
+        const btn = document.getElementById('connectButton');
+        const st  = document.getElementById('selectedText');
+        const sp  = document.getElementById('statusPulse');
+        const stx = document.getElementById('statusText');
+        const bp  = document.getElementById('bypassInput');
+        const dl2 = document.getElementById('dropdownList');
+
+        function setFlag(code, name) {
+            if (st) st.innerHTML = `<img src="https://flagcdn.com/w20/${code.toLowerCase()}.png" style="width:20px;vertical-align:middle;margin-right:8px;border-radius:2px;"> ${name}`;
+        }
+        // Mirrors updateUI(connected, serverValue) -- done directly since
+        // the real updateUI() is out of scope for this listener.
+        function applyConnectedUI(serverValue) {
+            currentServer = serverValue;
+            let n = serverValue.toUpperCase();
+            try { n = regionNames.of(serverValue.toUpperCase()); } catch(_) {}
+            setFlag(serverValue, n);
+            if (dl2) dl2.querySelectorAll('li[data-value]').forEach(x =>
+                x.classList.toggle('active-server', x.getAttribute('data-value') === currentServer));
+            btn.textContent = 'Disconnect';
+            btn.classList.add('connected');
+            if (sp)  sp.className = 'status-pulse connected';
+            if (stx) stx.textContent = 'Protected 🛡️';
+            isAppConnected = true;
+            return n;
+        }
+        function applyDisconnectedUI() {
+            btn.textContent = 'Tap to Connect';
+            btn.classList.remove('connected');
+            if (sp)  sp.className = 'status-pulse disconnected';
+            if (stx) stx.textContent = 'Disconnected';
+            isAppConnected = false;
+        }
+
+        let cName = newCode.toUpperCase();
+        try { cName = regionNames.of(newCode.toUpperCase()); } catch(_) {}
+        setFlag(newCode, cName);
+        btn.textContent = `Switching to ${cName}…`; btn.disabled = true;
+        btn.classList.remove('connected');
+        if (sp) sp.className = 'status-pulse connecting';
+        if (stx) stx.textContent = 'Rerouting… 🔄';
+        window.flyToCountry?.(newCode);
+
+        let resp;
+        try {
+            resp = await ipcRenderer.invoke('switch-vpn', {
+                serverCode: newCode, bypassList: bp ? bp.value : '',
+                oldServerCode: currentServer,
+            });
+        } catch(err) { resp = { status: 'unavailable', serverCode: newCode }; }
+        btn.disabled = false;
+
+        if (resp && resp.status === 'connected') {
+            const finalName = applyConnectedUI(resp.serverCode || newCode);
+            localStorage.setItem('isConnected', 'true');
+            localStorage.setItem('activeServer', currentServer);
+            showToast(`✅ Switched to ${finalName}`, 'success', 4000);
+            window.landRocket?.();
+        } else if (resp && resp.status === 'reconnected') {
+            const prev = resp.serverCode || currentServer;
+            const prevName = applyConnectedUI(prev);
+            localStorage.setItem('isConnected', 'true');
+            localStorage.setItem('activeServer', prev);
+            showToast(`⚠️ Switch failed. Reverted to ${prevName}.`, 'warning', 5000);
+        } else {
+            applyDisconnectedUI();
+            localStorage.setItem('isConnected', 'false');
+            showToast(`❌ Switch failed. Please reconnect.`, 'error', 5000);
+        }
+    }, true);
+});
