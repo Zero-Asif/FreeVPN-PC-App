@@ -7,6 +7,28 @@ out/
 build/
 release/
 
+# Scratch directory used when splicing large edits into main.js
+# (writing straight to main.js hits EBADF while Electron holds it open)
+#
+# The one-shot splice/patch/diag scripts, the screenshots and the logs stay
+# out. The verification suite does NOT: .build/ is where every test in this
+# project lives, and a directory-wide ignore meant a fresh clone got an app
+# with no way to check itself -- no proof the globe still draws, that the
+# vendored bundles are the pinned ones, that the CSP still has no
+# 'unsafe-inline', or that the country tables have exactly one copy.
+# Note the pattern is `.build/*`, not `.build/`: git does not descend into an
+# ignored DIRECTORY, so a negation inside one can never match.
+.build/*
+!.build/test-*.js
+!.build/probe*.js
+!.build/audit-eol.js
+!.build/check-callsites.js
+!.build/verify-torrc.js
+# ...and the two files the suite itself requires: the one place allowed to
+# read main.js's data literals, and the harness test-geo-e2e.js loads.
+!.build/geo-from-main.js
+!.build/policy-apply.js
+
 # Editor directories and files
 .vscode/
 .idea/
@@ -24,6 +46,10 @@ Tor/data/cached-*
 Tor/data/lock
 Tor/data/state
 Tor/data/unverified-*
+# Tor's control-port password, written fresh on every start. main.js passes it
+# as CookieAuthFile, so anything holding it can drive the running engine --
+# SETCONF, SIGNAL NEWNYM, the works. Never a file to commit.
+Tor/data/control_auth_cookie
 Tor/tor/data/
 Tor/torrc_temp
 Tor/tor/torrc_temp

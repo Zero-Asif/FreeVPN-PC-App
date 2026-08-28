@@ -1,6 +1,0 @@
-SocksPort 9054 
-ExitNodes {fr} 
-StrictNodes 1 
-DataDirectory C:/Tor/tor/data/fr 
-GeoIPFile C:/Tor/tor/geoip 
-GeoIPv6File C:/Tor/tor/geoip6 

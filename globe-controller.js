@@ -18,8 +18,44 @@
 // ════════════════════════════════════════════════════════════════════
 
 let globe;
-let HOME_LOC    = { lat: 0,  lng: 0,  name: 'Detecting…', code: 'unknown' };
-let CURRENT_LOC = HOME_LOC;
+
+// ════════════════════════════════════════════════════════════════════
+//  WHERE THINGS ARE  --  three separate ideas, kept separate
+//
+//  HOME_LOC   the user's own position, from the lookup in the main process.
+//             `known` is false until something answers, and this is the only
+//             thing in the file that may set it true.
+//  ANCHOR     where the app currently IS on the globe: home while
+//             disconnected, the connected country while connected, and null
+//             when neither is known. Every flight departs from here, and
+//             ANCHOR moves only when a flight RESOLVES -- never when one
+//             starts. The old code assigned the destination optimistically
+//             the moment Connect was pressed, so a connect that failed had
+//             already forgotten where it came from.
+//  PENDING    the country a connect attempt is heading for, whether or not a
+//             rocket is being drawn for it. With the kill switch on and
+//             nothing connected there is no honest origin to launch from, so
+//             no rocket flies -- but the attempt still has to be able to land.
+//
+//  The rule this structure exists to keep: wherever the radar pulse ring is
+//  drawn, that is where the app genuinely is. Ring coordinates therefore come
+//  from main.js's GEO_COORDS -- the same table that decides what actually gets
+//  spoofed -- over IPC, and not from a second copy kept here. There WAS a
+//  second copy, and it had drifted: it was missing md, cy, cr and sc, so
+//  choosing Moldova drew the ring at 0,0 in the Gulf of Guinea while the app
+//  was correctly spoofing Chisinau.
+// ════════════════════════════════════════════════════════════════════
+let HOME_LOC = { lat: 0, lng: 0, name: 'your location', code: 'unknown', known: false };
+let HOME_WHY = 'pending';   // pending | ok | killswitch | connected | no-answer
+let ANCHOR   = null;        // { lat, lng, name, code, kind, placed } | null
+let PENDING  = null;        // { code, dest, outcome } while a connect attempt runs
+
+//  Where the light comes from. Shared by the scene's directional light and by
+//  the night-lights shader, which masks itself to the hemisphere facing away
+//  from exactly this vector -- if the two disagreed, city lights would burn
+//  in broad daylight. Offset from straight-behind-the-camera so the
+//  terminator is actually on screen without leaving the first view dark.
+const SUN_DIR = { x: 260, y: 140, z: 190 };
 
 // Rocket mesh (Three.js Group)
 let rocketMesh = null;
@@ -28,101 +64,57 @@ let rocketMesh = null;
 let FC = null; // FlightController object (see createFC)
 
 // ════════════════════════════════════════════════════════════════════
-//  COUNTRY COORDINATES  (precise capital / geographic centres)
+//  COUNTRY COORDINATES  --  main.js's GEO_COORDS, asked for once.
 // ════════════════════════════════════════════════════════════════════
-const countryCoords = {
-    'us': { lat: 38.8951,  lng: -77.0364,  name: 'United States'       },
-    'gb': { lat: 51.5074,  lng:  -0.1278,  name: 'United Kingdom'       },
-    'ca': { lat: 45.4215,  lng: -75.6919,  name: 'Canada'               },
-    'au': { lat: -35.2809, lng: 149.1300,  name: 'Australia'            },
-    'de': { lat: 52.5200,  lng:  13.4050,  name: 'Germany'              },
-    'fr': { lat: 48.8566,  lng:   2.3522,  name: 'France'               },
-    'nl': { lat: 52.3676,  lng:   4.9041,  name: 'Netherlands'          },
-    'it': { lat: 41.9028,  lng:  12.4964,  name: 'Italy'                },
-    'es': { lat: 40.4168,  lng:  -3.7038,  name: 'Spain'                },
-    'ch': { lat: 46.9481,  lng:   7.4474,  name: 'Switzerland'          },
-    'se': { lat: 59.3293,  lng:  18.0686,  name: 'Sweden'               },
-    'no': { lat: 59.9139,  lng:  10.7522,  name: 'Norway'               },
-    'dk': { lat: 55.6761,  lng:  12.5683,  name: 'Denmark'              },
-    'fi': { lat: 60.1699,  lng:  24.9384,  name: 'Finland'              },
-    'pl': { lat: 52.2297,  lng:  21.0122,  name: 'Poland'               },
-    'ro': { lat: 44.4268,  lng:  26.1025,  name: 'Romania'              },
-    'at': { lat: 48.2082,  lng:  16.3738,  name: 'Austria'              },
-    'be': { lat: 50.8503,  lng:   4.3517,  name: 'Belgium'              },
-    'cz': { lat: 50.0755,  lng:  14.4378,  name: 'Czech Republic'       },
-    'hu': { lat: 47.4979,  lng:  19.0402,  name: 'Hungary'              },
-    'pt': { lat: 38.7169,  lng:  -9.1399,  name: 'Portugal'             },
-    'gr': { lat: 37.9838,  lng:  23.7275,  name: 'Greece'               },
-    'ie': { lat: 53.3498,  lng:  -6.2603,  name: 'Ireland'              },
-    'lu': { lat: 49.6117,  lng:   6.1319,  name: 'Luxembourg'           },
-    'ru': { lat: 55.7558,  lng:  37.6173,  name: 'Russia'               },
-    'ua': { lat: 50.4501,  lng:  30.5234,  name: 'Ukraine'              },
-    'by': { lat: 53.9045,  lng:  27.5615,  name: 'Belarus'              },
-    'jp': { lat: 35.6762,  lng: 139.6503,  name: 'Japan'                },
-    'kr': { lat: 37.5665,  lng: 126.9780,  name: 'South Korea'          },
-    'cn': { lat: 39.9042,  lng: 116.4074,  name: 'China'                },
-    'sg': { lat:  1.3521,  lng: 103.8198,  name: 'Singapore'            },
-    'in': { lat: 28.6139,  lng:  77.2090,  name: 'India'                },
-    'bd': { lat: 23.8103,  lng:  90.4125,  name: 'Bangladesh'           },
-    'pk': { lat: 33.7294,  lng:  73.0931,  name: 'Pakistan'             },
-    'lk': { lat:  6.9271,  lng:  79.8612,  name: 'Sri Lanka'            },
-    'np': { lat: 27.7172,  lng:  85.3240,  name: 'Nepal'                },
-    'ae': { lat: 24.4539,  lng:  54.3773,  name: 'United Arab Emirates' },
-    'sa': { lat: 24.6877,  lng:  46.7219,  name: 'Saudi Arabia'         },
-    'qa': { lat: 25.2854,  lng:  51.5310,  name: 'Qatar'                },
-    'kw': { lat: 29.3759,  lng:  47.9774,  name: 'Kuwait'               },
-    'om': { lat: 23.5880,  lng:  58.3829,  name: 'Oman'                 },
-    'bh': { lat: 26.2235,  lng:  50.5876,  name: 'Bahrain'              },
-    'il': { lat: 31.7683,  lng:  35.2137,  name: 'Israel'               },
-    'tr': { lat: 39.9334,  lng:  32.8597,  name: 'Turkey'               },
-    'ir': { lat: 35.6892,  lng:  51.3890,  name: 'Iran'                 },
-    'iq': { lat: 33.3152,  lng:  44.3661,  name: 'Iraq'                 },
-    'jo': { lat: 31.9454,  lng:  35.9284,  name: 'Jordan'               },
-    'lb': { lat: 33.8886,  lng:  35.4955,  name: 'Lebanon'              },
-    'id': { lat: -6.2088,  lng: 106.8456,  name: 'Indonesia'            },
-    'my': { lat:  3.1390,  lng: 101.6869,  name: 'Malaysia'             },
-    'th': { lat: 13.7563,  lng: 100.5018,  name: 'Thailand'             },
-    'vn': { lat: 21.0285,  lng: 105.8542,  name: 'Vietnam'              },
-    'ph': { lat: 14.5995,  lng: 120.9842,  name: 'Philippines'          },
-    'tw': { lat: 25.0330,  lng: 121.5654,  name: 'Taiwan'               },
-    'hk': { lat: 22.3193,  lng: 114.1694,  name: 'Hong Kong'            },
-    'mm': { lat: 16.8661,  lng:  96.1951,  name: 'Myanmar'              },
-    'kh': { lat: 11.5564,  lng: 104.9282,  name: 'Cambodia'             },
-    'za': { lat: -25.7479, lng:  28.2293,  name: 'South Africa'         },
-    'eg': { lat: 30.0444,  lng:  31.2357,  name: 'Egypt'                },
-    'ng': { lat:  9.0579,  lng:   7.4951,  name: 'Nigeria'              },
-    'ke': { lat: -1.2921,  lng:  36.8219,  name: 'Kenya'                },
-    'gh': { lat:  5.6037,  lng:  -0.1870,  name: 'Ghana'                },
-    'et': { lat:  9.0320,  lng:  38.7469,  name: 'Ethiopia'             },
-    'tz': { lat: -6.7924,  lng:  39.2083,  name: 'Tanzania'             },
-    'ma': { lat: 33.9716,  lng:  -6.8498,  name: 'Morocco'              },
-    'dz': { lat: 36.7372,  lng:   3.0865,  name: 'Algeria'              },
-    'tn': { lat: 36.8190,  lng:  10.1658,  name: 'Tunisia'              },
-    'br': { lat: -15.7801, lng: -47.9292,  name: 'Brazil'               },
-    'ar': { lat: -34.6037, lng: -58.3816,  name: 'Argentina'            },
-    'mx': { lat: 19.4326,  lng: -99.1332,  name: 'Mexico'               },
-    'co': { lat:  4.7110,  lng: -74.0721,  name: 'Colombia'             },
-    'cl': { lat: -33.4489, lng: -70.6693,  name: 'Chile'                },
-    'pe': { lat: -12.0464, lng: -77.0428,  name: 'Peru'                 },
-    've': { lat: 10.4806,  lng: -66.9036,  name: 'Venezuela'            },
-    'ec': { lat: -0.1807,  lng: -78.4678,  name: 'Ecuador'              },
-    'bo': { lat: -16.5000, lng: -68.1500,  name: 'Bolivia'              },
-    'nz': { lat: -41.2865, lng: 174.7762,  name: 'New Zealand'          },
-    'is': { lat: 64.1355,  lng: -21.8954,  name: 'Iceland'              },
-    'sk': { lat: 48.1486,  lng:  17.1077,  name: 'Slovakia'             },
-    'hr': { lat: 45.8150,  lng:  15.9819,  name: 'Croatia'              },
-    'rs': { lat: 44.7866,  lng:  20.4489,  name: 'Serbia'               },
-    'bg': { lat: 42.6977,  lng:  23.3219,  name: 'Bulgaria'             },
-    'lt': { lat: 54.6872,  lng:  25.2797,  name: 'Lithuania'            },
-    'lv': { lat: 56.9460,  lng:  24.1059,  name: 'Latvia'               },
-    'ee': { lat: 59.4370,  lng:  24.7536,  name: 'Estonia'              },
-    'ge': { lat: 41.6938,  lng:  44.8015,  name: 'Georgia'              },
-    'az': { lat: 40.4093,  lng:  49.8671,  name: 'Azerbaijan'           },
-    'am': { lat: 40.1872,  lng:  44.5152,  name: 'Armenia'              },
-    'kz': { lat: 51.1801,  lng:  71.4460,  name: 'Kazakhstan'           },
-    'uz': { lat: 41.2995,  lng:  69.2401,  name: 'Uzbekistan'           },
-    'mn': { lat: 47.8864,  lng: 106.9057,  name: 'Mongolia'             },
-};
+//  NOT named ipcRenderer. index.html loads this file and renderer.js as two
+//  classic scripts, and classic scripts share ONE global lexical scope --
+//  renderer.js:1 already holds `const { ipcRenderer }`. A second top-level
+//  const of that name is a SyntaxError raised while parsing whichever file
+//  loads second, which would take the whole of renderer.js down with it.
+const ipc = require('electron').ipcRenderer;
+
+let GEO = null;
+async function loadGeo() {
+    if (GEO) return GEO;
+    try { GEO = (await ipc.invoke('get-geo-coords')) || null; }
+    catch (e) { GEO = null; }
+    return GEO;
+}
+//  Asked for at load rather than on the first Connect, so that by the time a
+//  flight needs coordinates they are already here and no animation has to wait
+//  on IPC in the middle of itself.
+loadGeo();
+
+//  Country names come from Intl, the way every other surface in this app
+//  spells them, so there is no second list of names to drift either.
+let _regionNames = null;
+function countryLabel(cc) {
+    const up = (cc || '').toUpperCase();
+    try {
+        if (!_regionNames) _regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
+        return _regionNames.of(up) || up;
+    } catch (e) { return up; }
+}
+
+//  `placed` is the honest bit: false means main.js has no coordinates for this
+//  country, so it is not spoofing a position there either -- spoofableOnly() in
+//  main.js already refuses to offer such a country in the list. An unplaced
+//  country still gets its name in the caption, because the tunnel really is out
+//  through it, but no ring is drawn for it and no rocket ever launches from it:
+//  there is no point on the globe that would be true.
+function destFor(cc) {
+    const k   = (cc || '').toLowerCase();
+    const g   = GEO && GEO[k];
+    const lat = g ? Number(g.lat) : NaN;
+    const lng = g ? Number(g.lng) : NaN;
+    return { lat, lng, code: k, name: countryLabel(k), kind: 'country',
+             placed: Number.isFinite(lat) && Number.isFinite(lng) };
+}
+
+function whenReady(fn) {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);
+    else fn();
+}
 
 // ════════════════════════════════════════════════════════════════════
 //  HELPERS
@@ -143,34 +135,190 @@ function setOverlay(text, color = '#00ffcc') {
     el.style.borderColor = color;
 }
 
+//  Whether the app actually knows where the user is. It cannot be guessed:
+//  the only source is the lookup in initUserLocation, and when that does not
+//  answer -- or is deliberately not made -- home stays unknown instead of
+//  becoming a fixed city.
+function homeIsKnown() { return !!(HOME_LOC && HOME_LOC.known); }
+
+//  Is the kill switch on RIGHT NOW. Read from the live checkbox rather than
+//  from a cached copy, because the browser extension can flip it too and
+//  renderer.js mirrors that straight into this same element.
+function killSwitchOn() {
+    const el = document.getElementById('killSwitchToggle');
+    if (el) return !!el.checked;
+    try { return localStorage.getItem('killSwitch') === 'true'; } catch (e) { return false; }
+}
+
+//  index.html loads this file BEFORE renderer.js, so this file's
+//  DOMContentLoaded listener is registered first and therefore runs first --
+//  before renderer.js has restored the toggle from localStorage. Read at that
+//  moment the checkbox is still the markup's default, unchecked, and a saved
+//  kill switch of ON would have looked OFF for exactly as long as it takes to
+//  decide whether to make an IP-geolocation lookup. So the same value is put
+//  into the same element from the same key here, a few lines earlier. Not a
+//  second source of truth: renderer.js overwrites it with the identical read.
+function restoreKillSwitchDisplay() {
+    const el = document.getElementById('killSwitchToggle');
+    if (!el) return;
+    try { el.checked = localStorage.getItem('killSwitch') === 'true'; } catch (e) {}
+}
+
+//  The two things that must never happen for an unknown home -- a caption
+//  naming a place, and a marker drawn at one -- both go through here.
+//
+//  When home is unknown the caption says WHICH of the two reasons it is,
+//  because they are not the same event. "Kill switch on" is the app doing
+//  exactly what it was told: no lookup was made, so no third party was handed
+//  this machine's address. "Did not answer" is a failure. Reporting the first
+//  as the second is how a kill switch that was working came to look broken.
+function showStandingBy() {
+    if (homeIsKnown()) { setOverlay(`Standing by in ${HOME_LOC.name} 🌐`, '#00ffcc'); return; }
+    if (HOME_WHY === 'killswitch')
+        setOverlay('Kill switch on — no location lookup was made 🛡️', '#00ffcc');
+    else setOverlay('Home location unavailable — the IP lookup did not answer 🌐', '#ffb020');
+}
+
+//  Caption and ring for wherever the app currently is, so that the end of
+//  every flight -- landed, blasted or disconnected -- says the same thing
+//  about the same place, in one function instead of four.
+function showAnchor() {
+    if (ANCHOR && ANCHOR.kind === 'country') {
+        //  Named either way -- the tunnel is genuinely out through there -- but
+        //  a ring is only drawn where there is a real position to draw it at.
+        if (ANCHOR.placed) setPulse(ANCHOR.lat, ANCHOR.lng, '#00ffcc');
+        else clearPulse();
+        setOverlay(`Secured & Routed via ${ANCHOR.name} 🛡️`, '#00ffcc');
+        return;
+    }
+    if (ANCHOR && homeIsKnown()) setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C');
+    else clearPulse();
+    showStandingBy();
+}
+
+function focusHome(ms = 2000, pulseAfter = 1000) {
+    if (!globe || !homeIsKnown()) return false;
+    globe.pointOfView({ lat: HOME_LOC.lat, lng: HOME_LOC.lng, altitude: 2.5 }, ms);
+    if (pulseAfter >= 0)
+        setTimeout(() => setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C'), pulseAfter);
+    return true;
+}
+
+//  Where a flight departs from. null means there is nowhere honest to launch
+//  from, and the caller then draws no rocket at all rather than one rising out
+//  of the middle of the Atlantic -- which is exactly what a launch from 0,0
+//  looked like on screen.
+function originLoc() {
+    if (ANCHOR && ANCHOR.placed) return ANCHOR;
+    if (homeIsKnown()) return { ...HOME_LOC, kind: 'home', placed: true };
+    return null;
+}
+
+//  A connect that resolved before any rocket could be built: there was no
+//  origin to launch from, or the answer came back inside the 960 ms the launch
+//  waits out. The app simply IS in that country now, so the ring goes there and
+//  the attempt is over.
+function settleWithoutFlight(dest) {
+    PENDING = null;
+    ANCHOR  = dest;
+    if (globe && dest.placed)
+        globe.pointOfView({ lat: dest.lat, lng: dest.lng, altitude: 1.8 }, 1800);
+    showAnchor();
+}
+
 // ════════════════════════════════════════════════════════════════════
-//  AUTO-DETECT USER LOCATION
+//  WHERE THE USER IS  (asked of the main process, never of this window)
+//
+//  This used to be a fetch() from here to freeipapi.com. That host now answers
+//  the path with a 302 to a subdomain; index.html's Content-Security-Policy is
+//  re-applied to a redirect target, and CSP host-sources do not match
+//  subdomains -- so the policy silently killed the lookup on every machine,
+//  and the globe correctly reported that it did not know where the user was.
+//  The lookup now runs in the main process across four independent providers
+//  (lib/home-location.js), which is also why no remote origin has to appear in
+//  this page's connect-src at all any more.
+//
+//  The main process refuses the question in two states, and says which: the
+//  kill switch is on -- an IP-geolocation lookup is precisely the kind of grab
+//  the kill switch promises not to allow -- or the tunnel is up, where the
+//  request would leave outside it carrying the real IP at the one moment the
+//  user is relying on it being hidden.
+//
+//  With the kill switch on the question is not even asked. Main would refuse it
+//  anyway, but main only learns the restored kill-switch value when renderer.js
+//  reports it, and this file runs first: for that one moment main would have
+//  answered honestly with a live lookup. Not asking closes the window.
 // ════════════════════════════════════════════════════════════════════
 async function initUserLocation() {
+    HOME_LOC = { lat: 0, lng: 0, name: 'your location', code: 'unknown', known: false };
+    if (killSwitchOn()) {
+        HOME_WHY = 'killswitch';
+        if (!PENDING && (!ANCHOR || ANCHOR.kind === 'home')) { ANCHOR = null; showAnchor(); }
+        return;
+    }
     setOverlay('Detecting location… 🌍', '#00ffcc');
     try {
-        const ctl = new AbortController();
-        const tid = setTimeout(() => ctl.abort(), 5000);
-        const res = await fetch('https://freeipapi.com/api/json', { signal: ctl.signal });
-        clearTimeout(tid);
-        if (!res.ok) throw new Error();
-        const d = await res.json();
-        HOME_LOC = {
-            lat:  parseFloat(d.latitude),
-            lng:  parseFloat(d.longitude),
-            name: `${d.cityName || 'Local'}, ${d.countryName || 'Region'}`,
-            code: (d.countryCode || 'unknown').toLowerCase()
-        };
-    } catch {
-        HOME_LOC = { lat: 23.8103, lng: 90.4125, name: 'Dhaka, Bangladesh', code: 'bd' };
+        const r = await ipc.invoke('get-home-location');
+        const d = r && r.loc;
+        const lat = d ? parseFloat(d.lat) : NaN;
+        const lng = d ? parseFloat(d.lng) : NaN;
+        //  An answer without usable coordinates is a lookup that failed: NaN
+        //  used to go straight into globe.pointOfView().
+        if (!r || !r.ok || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+            HOME_WHY = (r && r.reason) || 'no-answer';
+        } else {
+            HOME_WHY = 'ok';
+            HOME_LOC = {
+                lat, lng,
+                name: [d.city, d.country].filter(Boolean).join(', ') || 'your location',
+                code: (d.cc || 'unknown').toLowerCase(),
+                known: true
+            };
+        }
+    } catch (e) {
+        //  This used to become a hard-coded Dhaka, Bangladesh -- captioned,
+        //  pulsed and zoomed to exactly like a real reading, so a user
+        //  anywhere else was shown a home they were not in, and every connect
+        //  animation launched the rocket from it. A location is not something
+        //  this app can guess, so it now says that it does not know.
+        HOME_WHY = 'no-answer';
     }
-    CURRENT_LOC = HOME_LOC;
-    setOverlay(`Standing by in ${HOME_LOC.name} 🌐`, '#00ffcc');
-    if (globe) {
-        globe.pointOfView({ lat: HOME_LOC.lat, lng: HOME_LOC.lng, altitude: 2.5 }, 2000);
-        setTimeout(() => setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C'), 1000);
+    //  Only touch the anchor while nothing is connected. A lookup that
+    //  finishes late must not move a ring a landing has already placed.
+    if (!ANCHOR || ANCHOR.kind === 'home')
+        ANCHOR = homeIsKnown() ? { ...HOME_LOC, kind: 'home', placed: true } : null;
+    if (!PENDING && (!ANCHOR || ANCHOR.kind === 'home')) {
+        showAnchor();
+        focusHome();
     }
 }
+
+//  Asked again when the kill switch goes OFF: the first attempt was refused on
+//  purpose, and the ring the user expects to see is now allowed to exist.
+window.refreshHomeLocation = function() {
+    if (killSwitchOn()) {
+        HOME_WHY = 'killswitch';
+        HOME_LOC = { lat: 0, lng: 0, name: 'your location', code: 'unknown', known: false };
+        if (!PENDING && (!ANCHOR || ANCHOR.kind === 'home')) { ANCHOR = null; showAnchor(); }
+        return;
+    }
+    if (homeIsKnown() || PENDING) return;
+    initUserLocation();
+};
+
+//  Both routes that can flip the toggle: this window's own checkbox, and the
+//  browser extension, whose state renderer.js mirrors into that same element.
+//  The extension's value is read out of the message rather than off the DOM --
+//  renderer.js updates the checkbox in its own listener, and listener order is
+//  not a thing to depend on.
+whenReady(() => {
+    const el = document.getElementById('killSwitchToggle');
+    if (el) el.addEventListener('change', () => window.refreshHomeLocation());
+});
+ipc.on('sync-ui-state', (event, state) => {
+    if (state && typeof state.killSwitch === 'boolean')
+        setTimeout(() => window.refreshHomeLocation(), 0);
+});
 
 // ════════════════════════════════════════════════════════════════════
 //  🚀 ROCKET MESH BUILDER
@@ -266,37 +414,126 @@ function buildCurve(startLat, startLng, endLat, endLng) {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  TRAIL  (same curve → zero gap between trail tip and rocket tail)
-//  Fire gradient: dim brownish-orange at launch → bright at tail
+//  SMOKE TRAIL  --  what a rocket actually leaves behind it.
+//
+//  This was one THREE.Line: a single pixel wide, fire-orange, the full length
+//  of the arc, at full brightness from launch to landing. It read as a drawn
+//  line, because that is what it was. Watch a launch from the ground and what
+//  you see behind the vehicle is a broad yellowish-grey column that widens and
+//  goes ashen as it falls behind, and thins away to nothing a long way back.
+//
+//  So: a plume of soft puffs laid along the same curve the rocket flies -- the
+//  tip of the smoke therefore still meets the tail of the rocket exactly, which
+//  is why the old code shared the curve in the first place -- each puff pushed
+//  off the centre line so the column has width, and each ageing by how far the
+//  rocket has travelled since it was laid: growing, greying, fading out. The
+//  sprite is drawn here on a canvas, so this costs no network request and
+//  nothing new to vendor.
 // ════════════════════════════════════════════════════════════════════
-const TRAIL_SEG = 300;
+const TRAIL_SEG   = 300;    // curve subdivisions, kept for the landing maths
+const SMOKE_PUFFS = 900;    // three per segment: enough to read as a column
+const SMOKE_LIFE  = 0.42;   // in curve-t: how far back the plume still shows
+
+let _smokeTex = null;
+function smokeSprite() {
+    if (_smokeTex) return _smokeTex;
+    const G = window.THREE;
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    //  A soft round puff: solid core, nothing whatsoever at the rim, so
+    //  overlapping puffs build one continuous column instead of a bead chain.
+    const rg = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    rg.addColorStop(0.00, 'rgba(255,255,255,0.95)');
+    rg.addColorStop(0.35, 'rgba(255,255,255,0.42)');
+    rg.addColorStop(0.70, 'rgba(255,255,255,0.10)');
+    rg.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+    g.fillStyle = rg;
+    g.fillRect(0, 0, 128, 128);
+    _smokeTex = new G.CanvasTexture(c);
+    return _smokeTex;
+}
+
+const SMOKE_VERT = `
+attribute float aSize;
+attribute float aBirth;
+uniform float uHead;
+uniform float uLife;
+varying float vAge;
+void main() {
+    vAge = clamp((uHead - aBirth) / uLife, 0.0, 1.0);
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    //  Smoke expands as it is left behind; a puff at the nozzle is still tight.
+    gl_PointSize = aSize * (1.0 + vAge * 5.5) * (420.0 / max(-mv.z, 1.0));
+    gl_Position = projectionMatrix * mv;
+}`;
+
+const SMOKE_FRAG = `
+uniform sampler2D uTex;
+varying float vAge;
+void main() {
+    float m = texture2D(uTex, gl_PointCoord).a;
+    //  Hot and yellow at the nozzle, ash grey a moment later.
+    vec3 c = mix(vec3(1.00, 0.87, 0.55), vec3(0.60, 0.58, 0.55),
+                 smoothstep(0.0, 0.30, vAge));
+    float a = m * (1.0 - vAge) * 0.80;
+    if (a < 0.004) discard;
+    gl_FragColor = vec4(c, a);
+}`;
 
 function buildTrail(curve) {
-    const G   = window.THREE;
-    const pos = new Float32Array((TRAIL_SEG + 1) * 3);
-    const col = new Float32Array((TRAIL_SEG + 1) * 3);
+    const G     = window.THREE;
+    const pos   = new Float32Array(SMOKE_PUFFS * 3);
+    const size  = new Float32Array(SMOKE_PUFFS);
+    const birth = new Float32Array(SMOKE_PUFFS);
 
-    for (let i = 0; i <= TRAIL_SEG; i++) {
-        const pt = curve.getPoint(i / TRAIL_SEG);
-        pos[i*3] = pt.x; pos[i*3+1] = pt.y; pos[i*3+2] = pt.z;
-
-        // i=0 (launch point, oldest) → dim
-        // i=TRAIL_SEG (rocket tail, newest) → bright orange-white
-        const t = i / TRAIL_SEG;
-        col[i*3]   = 0.20 + t * 0.80; // R: 0.2 → 1.0
-        col[i*3+1] = 0.08 + t * 0.42; // G: 0.08 → 0.5  (fire orange)
-        col[i*3+2] = 0.00 + t * 0.10; // B: very low (no blue = fire)
+    //  Perpendicular jitter, so the plume is a column and not a hairline. Two
+    //  axes across the flight path are enough; which two does not matter.
+    const axis = new G.Vector3(), sideA = new G.Vector3(), sideB = new G.Vector3();
+    for (let i = 0; i < SMOKE_PUFFS; i++) {
+        const t  = i / (SMOKE_PUFFS - 1);
+        const pt = curve.getPoint(t);
+        const tg = curve.getTangent(Math.min(t, 0.9999)).normalize();
+        axis.set(0, 0, 1);
+        if (Math.abs(tg.dot(axis)) > 0.9) axis.set(0, 1, 0);
+        sideA.copy(tg).cross(axis).normalize();
+        sideB.copy(tg).cross(sideA).normalize();
+        const ang = Math.random() * Math.PI * 2;
+        const rad = (0.25 + Math.random() * 0.75) * 0.9;
+        const cx  = Math.cos(ang) * rad, cy = Math.sin(ang) * rad;
+        pos[i*3]     = pt.x + sideA.x * cx + sideB.x * cy;
+        pos[i*3 + 1] = pt.y + sideA.y * cx + sideB.y * cy;
+        pos[i*3 + 2] = pt.z + sideA.z * cx + sideB.z * cy;
+        size[i]  = 2.0 + Math.random() * 2.2;
+        birth[i] = t;
     }
 
-    const geo  = new G.BufferGeometry();
+    const geo = new G.BufferGeometry();
     geo.setAttribute('position', new G.BufferAttribute(pos, 3));
-    geo.setAttribute('color',    new G.BufferAttribute(col, 3));
+    geo.setAttribute('aSize',    new G.BufferAttribute(size, 1));
+    geo.setAttribute('aBirth',   new G.BufferAttribute(birth, 1));
     geo.setDrawRange(0, 0);
 
-    const mat  = new G.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.92 });
-    const line = new G.Line(geo, mat);
+    //  Normal blending, not additive: smoke is lit, it does not emit. Additive
+    //  is what made the old trail look like a laser rather than exhaust.
+    const mat = new G.ShaderMaterial({
+        uniforms: { uTex:  { value: smokeSprite() },
+                    uHead: { value: 0 },
+                    uLife: { value: SMOKE_LIFE } },
+        vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
+        transparent: true, depthWrite: false, depthTest: true,
+    });
+    const line = new G.Points(geo, mat);
     globe.scene().add(line);
     return { geo, mat, line };
+}
+
+//  One place advances the plume, so the head of the smoke and the position of
+//  the rocket can never disagree about where the rocket is.
+function advanceTrail(fc) {
+    if (!fc || !fc.trail) return;
+    fc.trail.geo.setDrawRange(0, Math.min(Math.floor(fc.t * SMOKE_PUFFS) + 6, SMOKE_PUFFS));
+    if (fc.trail.mat.uniforms) fc.trail.mat.uniforms.uHead.value = fc.t;
 }
 
 function disposeTrail(trail) {
@@ -437,7 +674,7 @@ function runContinuousFlight(fc) {
             : 1 - Math.pow(-2 * raw + 2, 2) / 2;
         fc.t = Math.min(fc.t, 0.92);
 
-        fc.trail.geo.setDrawRange(0, Math.floor(fc.t * TRAIL_SEG) + 2);
+        advanceTrail(fc);
         positionRocket(fc);
         requestAnimationFrame(frame);
     }
@@ -453,7 +690,7 @@ function runLanding(fc, fromT, landMs) {
         const prog  = Math.min((Date.now() - t0) / landMs, 1);
         const eased = 1 - Math.pow(1 - prog, 2); // ease-out quad
         fc.t = fromT + (1 - fromT) * eased;
-        if (fc.trail) fc.trail.geo.setDrawRange(0, Math.min(Math.floor(fc.t * TRAIL_SEG) + 2, TRAIL_SEG + 1));
+        advanceTrail(fc);
         positionRocket(fc);
 
         if (prog < 1) {
@@ -466,10 +703,10 @@ function runLanding(fc, fromT, landMs) {
             disposeTrail(fc.trail);
             fc.trail = null;
             FC = null;
-            CURRENT_LOC = fc.destInfo;
+            ANCHOR  = fc.destInfo;
+            PENDING = null;
             clearPulse();
-            setPulse(fc.destInfo.lat, fc.destInfo.lng, '#00ffcc');
-            setOverlay(`Secured & Routed via ${fc.destInfo.name} 🛡️`, '#00ffcc');
+            showAnchor();
         }
     }
     frame();
@@ -477,53 +714,96 @@ function runLanding(fc, fromT, landMs) {
 
 // ════════════════════════════════════════════════════════════════════
 //  PUBLIC API — called from renderer.js
+//
+//  THE FLIGHT RULES, gathered here because they are the whole point of the
+//  file and were previously spread across four functions and a monkey-patch:
+//
+//  * A flight departs from the ANCHOR -- where the app is now. Never from a
+//    hard-coded 0,0, which is open water off West Africa and is what the
+//    rocket used to climb out of whenever home was unknown.
+//  * No anchor means no origin, so no rocket is drawn at all. That is the
+//    kill-switch-on, nothing-connected case: the app was told not to let
+//    anything learn where this machine is, so it does not know either. The
+//    connect still runs, and on success the ring simply appears in the country
+//    that was reached.
+//  * ANCHOR moves when a flight RESOLVES, never when one starts. So a connect
+//    that fails still knows where it came from, and the ring goes back there
+//    rather than to wherever the attempt was aimed.
+//  * A switch always flies from the country the app was on to the country it
+//    is going to, kill switch or not: both ends are public exit countries and
+//    neither of them says anything about the user.
 // ════════════════════════════════════════════════════════════════════
 
-// 🚀 Start hover-flight  (connect button clicked)
+// 🚀 Start the flight  (connect button, or a country switch)
+//  Synchronous up to and including recording the attempt, because renderer.js
+//  can resolve one in the SAME tick it starts it: where the verified exit
+//  country differs from the one clicked it calls flyToCountry(exit) and then
+//  landRocket() back to back. An attempt not yet recorded is an attempt nothing
+//  can land, and the rocket would hang over the globe until the 90-second abort.
 window.flyToCountry = function(countryCode) {
-    if (!globe || !rocketMesh) return;
+    if (!globe) return;
+    const code = (countryCode || '').toLowerCase();
 
     // Cancel any in-progress flight
-    if (FC) { FC.cancelled = true; disposeTrail(FC.trail); rocketMesh.visible = false; FC = null; }
-    // Force-hide rocket in case it's stuck from a previous session
+    if (FC) { FC.cancelled = true; disposeTrail(FC.trail); FC = null; }
     if (rocketMesh) rocketMesh.visible = false;
     clearPulse();
     globe.arcsData([]);
 
-    const dest = countryCoords[countryCode.toLowerCase()]
-              || { lat: 0, lng: 0, name: countryCode.toUpperCase() };
+    const p = PENDING = { code, dest: null, outcome: null };
+    setOverlay(`Routing to ${countryLabel(code)}… 🛰️`, '#f1c40f');
 
-    // ── Optimistic CURRENT_LOC update ────────────────────────────
-    // Set destination as current BEFORE the flight starts.
-    // If the user disconnects mid-flight, backToHome() will fly FROM
-    // the destination (not from home), producing the correct animation.
-    CURRENT_LOC = dest;
+    const start = () => {
+        //  Overtaken by a disconnect or a newer switch while GEO was loading.
+        if (PENDING !== p) return;
+        p.dest = destFor(code);
+        //  Already resolved, before the coordinates got here: nothing flies,
+        //  the ring simply appears wherever the app now is.
+        if (p.outcome === 'land') return settleWithoutFlight(p.dest);
+        if (p.outcome === 'fail') { PENDING = null; showAnchor(); return; }
 
-    setOverlay(`Routing to ${dest.name}… 🛰️`, '#f1c40f');
-    globe.pointOfView({ altitude: 3.8 }, 900);
+        globe.pointOfView({ altitude: 3.8 }, 900);
+        //  Either the destination is a country main.js cannot place, or there
+        //  is nowhere honest to launch from -- the kill switch is on and
+        //  nothing is connected, so the app was told not to let anything learn
+        //  where this machine is and does not know either. The connect keeps
+        //  running; when it resolves the ring appears in the country reached.
+        const from = p.dest.placed ? originLoc() : null;
+        if (!from) return;
 
-    // Use a saved start location (before CURRENT_LOC was updated)
-    const fromLoc = HOME_LOC.name !== 'Detecting…' ? HOME_LOC : { lat: 0, lng: 0, name: 'Origin' };
-
-    setTimeout(() => {
-        // Build curve from actual origin (captured before optimistic update)
-        // We restore HOME_LOC as start since CURRENT_LOC is now = dest
-        const startLat = fromLoc.lat, startLng = fromLoc.lng;
-        const curve = buildCurve(startLat, startLng, dest.lat, dest.lng);
-        const trail = buildTrail(curve);
-        FC = createFC(curve, trail, dest);
-        runContinuousFlight(FC);
-
-        // Camera zooms out to see the full flight path
         setTimeout(() => {
-            if (FC && FC.state === 'flying') globe.pointOfView({ altitude: 2.8 }, 5000);
-        }, 1200);
-    }, 960);
+            //  Dropped if a disconnect or a second switch overtook this one.
+            if (PENDING !== p) return;
+            const curve = buildCurve(from.lat, from.lng, p.dest.lat, p.dest.lng);
+            const trail = buildTrail(curve);
+            FC = createFC(curve, trail, p.dest);
+            runContinuousFlight(FC);
+
+            // Camera zooms out to see the full flight path
+            setTimeout(() => {
+                if (FC && FC.state === 'flying') globe.pointOfView({ altitude: 2.8 }, 5000);
+            }, 1200);
+        }, 960);
+    };
+    if (GEO) start(); else loadGeo().then(start);
 };
 
-// ✅ Land rocket  (called when Tor bootstrap = 100%)
+// ✅ Reached the country  (Tor bootstrap = 100%)
 window.landRocket = function() {
-    if (!FC || FC.state === 'done' || FC.state === 'landing' || FC.state === 'exploding') return;
+    if (FC && (FC.state === 'done' || FC.state === 'landing' || FC.state === 'exploding')) return;
+
+    if (!FC) {
+        //  No rocket in the air. Either none was ever launched -- no honest
+        //  origin to launch from -- or the connect resolved inside the 960 ms a
+        //  launch waits out. Nothing to land: the app simply is in that country
+        //  now, and that is where the ring goes.
+        const p = PENDING;
+        if (!p) return;
+        //  Coordinates have not arrived yet. Recorded, so start() settles it.
+        if (!p.dest) { p.outcome = 'land'; return; }
+        settleWithoutFlight(p.dest);
+        return;
+    }
     const fromT = FC.t; // wherever rocket currently is on the curve
     FC.state    = 'landing';
     setOverlay(`Establishing secure tunnel… 🔐`, '#f1c40f');
@@ -533,9 +813,30 @@ window.landRocket = function() {
     runLanding(FC, fromT, 2000);
 };
 
-// 💥 Explode rocket  (called when Tor bootstrap fails)
-window.explodeRocket = function() {
-    if (!FC || FC.state === 'exploding' || FC.state === 'done') return;
+// 💥 Could not reach it  (Tor bootstrap failed) -- or the user cancelled
+//
+//  `overlay` exists because the blast now has two causes and they are not the
+//  same statement. A failed bootstrap really is "Server Unreachable". A cancel
+//  is the user's own decision, made in the country-unavailable dialog, and the
+//  relay may have been perfectly reachable -- so renderer.js passes the wording
+//  that matches what happened. The animation is identical either way: the
+//  rocket blasts where it is, in mid-air, still flying.
+window.explodeRocket = function ({
+    overlay = 'Connection Failed 💥  Server Unreachable',
+    color   = '#e74c3c',
+} = {}) {
+    if (!FC || FC.state === 'exploding' || FC.state === 'done') {
+        //  Nothing in the air to blast. Say what happened, then put the ring
+        //  back wherever the app still is -- which, for a first connect with
+        //  the kill switch on, is nowhere, and honestly stays nowhere.
+        setOverlay(overlay, color);
+        const p = PENDING;
+        if (p && !p.dest) { p.outcome = 'fail'; return; }
+        PENDING = null;
+        setTimeout(() => { if (!PENDING) showAnchor(); }, 1800);
+        return;
+    }
+    PENDING = null;
     const blastPos = FC.worldPos.clone();
     FC.cancelled   = true;
     FC.state       = 'exploding';
@@ -545,61 +846,62 @@ window.explodeRocket = function() {
     FC = null;
 
     createExplosionAt(blastPos);
-    setOverlay('Connection Failed 💥  Server Unreachable', '#e74c3c');
+    setOverlay(overlay, color);
 
-    // Camera zooms out → pans home → home pulse
+    //  The launch never moved ANCHOR, so it is still the country the app was
+    //  on, or home, or null. Camera returns to it and the ring comes back.
     globe.pointOfView({ altitude: 3.8 }, 800);
     setTimeout(() => {
-        globe.pointOfView({ lat: HOME_LOC.lat, lng: HOME_LOC.lng, altitude: 2.5 }, 2200);
-        setOverlay(`Returning to ${HOME_LOC.name}… 📡`, '#e74c3c');
-        setTimeout(() => {
-            CURRENT_LOC = HOME_LOC;
-            setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C');
-            setOverlay(`Standing by in ${HOME_LOC.name} 🌐`, '#00ffcc');
-        }, 2400);
+        const back = ANCHOR;
+        if (back) {
+            if (back.placed)
+                globe.pointOfView({ lat: back.lat, lng: back.lng, altitude: 2.5 }, 2200);
+            setOverlay(`Returning to ${back.name || HOME_LOC.name}… 📡`, color);
+        }
+        setTimeout(() => showAnchor(), 2400);
     }, 2200);
 };
 
 // 🏠 Back to home  (normal disconnect)
 window.backToHome = function() {
-    if (!globe || !rocketMesh) return;
-    // Cancel any in-progress flight and force-hide rocket
+    if (!globe) return;
     if (FC) { FC.cancelled = true; disposeTrail(FC.trail); FC = null; }
-    rocketMesh.visible = false;  // always hide, regardless of FC state
-    rocketMesh.position.set(0, 0, 0);
+    PENDING = null;
+    if (rocketMesh) { rocketMesh.visible = false; rocketMesh.position.set(0, 0, 0); }
     clearPulse();
     globe.arcsData([]);
     setOverlay(`Connection Dropped. Returning… 📡`, '#e74c3c');
     globe.pointOfView({ altitude: 3.8 }, 900);
 
-    // fromLoc = destination (where rocket just was / where VPN was connected)
-    // CURRENT_LOC was set optimistically in flyToCountry, so this is correct
-    // even if landing animation was never completed.
-    const fromLoc = { ...CURRENT_LOC };
+    const from = (ANCHOR && ANCHOR.kind === 'country' && ANCHOR.placed) ? ANCHOR : null;
+    const home = homeIsKnown() ? { ...HOME_LOC, kind: 'home', placed: true } : null;
 
-    // If fromLoc == HOME_LOC (connection failed before any flight), skip animation
-    if (Math.abs(fromLoc.lat - HOME_LOC.lat) < 0.1 && Math.abs(fromLoc.lng - HOME_LOC.lng) < 0.1) {
-        CURRENT_LOC = HOME_LOC;
-        setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C');
-        setOverlay(`Standing by in ${HOME_LOC.name} 🌐`, '#00ffcc');
-        globe.pointOfView({ lat: HOME_LOC.lat, lng: HOME_LOC.lng, altitude: 2.5 }, 1500);
+    //  Nothing to fly between: either the app was not on a country, or home is
+    //  not known -- and an unknown home is nowhere to fly TO. The old code
+    //  built a curve to 0,0 in that case and pulsed it as the user. When the
+    //  kill switch is on this is also the moment the ring correctly disappears:
+    //  the app is no longer in a country, and it was never told where the user
+    //  is, so there is no place left on the globe it can claim.
+    if (!from || !home) {
+        ANCHOR = home;
+        showAnchor();
+        focusHome(1500, -1);
         return;
     }
 
     setTimeout(() => {
-        const curve   = buildCurve(fromLoc.lat, fromLoc.lng, HOME_LOC.lat, HOME_LOC.lng);
-        const trail   = buildTrail(curve);
-        const fc      = createFC(curve, trail, HOME_LOC);
+        const curve = buildCurve(from.lat, from.lng, home.lat, home.lng);
+        const trail = buildTrail(curve);
+        const fc    = createFC(curve, trail, home);
         FC = fc;
-        const FLIGHT  = 3000;
-        const t0      = Date.now();
+        const FLIGHT = 3000;
+        const t0     = Date.now();
 
         function frame() {
             if (fc.cancelled || !rocketMesh) return;
-            const prog  = Math.min((Date.now() - t0) / FLIGHT, 1);
-            const eased = 1 - Math.pow(1 - prog, 2);
-            fc.t = eased;
-            fc.trail.geo.setDrawRange(0, Math.min(Math.floor(fc.t * TRAIL_SEG) + 2, TRAIL_SEG + 1));
+            const prog = Math.min((Date.now() - t0) / FLIGHT, 1);
+            fc.t = 1 - Math.pow(1 - prog, 2);
+            advanceTrail(fc);
             positionRocket(fc);
 
             if (prog < 1) {
@@ -611,13 +913,12 @@ window.backToHome = function() {
                 disposeTrail(fc.trail);
                 fc.trail = null;
                 FC = null;
-                CURRENT_LOC = HOME_LOC;
-                setPulse(HOME_LOC.lat, HOME_LOC.lng, '#FF416C');
-                setOverlay(`Standing by in ${HOME_LOC.name} 🌐`, '#00ffcc');
+                ANCHOR = home;
+                showAnchor();
             }
         }
         frame();
-        globe.pointOfView({ lat: HOME_LOC.lat, lng: HOME_LOC.lng, altitude: 2.5 }, 2400);
+        focusHome(2400, -1);   // guarded: never pans to 0,0 as though it were home
     }, 960);
 };
 
@@ -664,27 +965,52 @@ function buildGlobeUI() {
             .width(window.innerWidth - sidebarW).height(window.innerHeight)
             .backgroundColor('#090b14')
             .showAtmosphere(true).atmosphereColor('#3a82f7').atmosphereAltitude(0.18)
-            .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
-            .bumpImageUrl('https://unpkg.com/three-globe/example/img/earth-topology.png');
+            .globeImageUrl('vendor/earth-blue-marble.jpg')
+            .bumpImageUrl('vendor/earth-topology.png');
 
         globe.pointOfView({ lat: 20, lng: 20, altitude: 3.5 });
         globe.controls().autoRotate      = true;
         globe.controls().autoRotateSpeed = 0.25;
 
-        // Add lights for proper rocket shading
+        //  LIGHTING. Ambient used to be 0.55, which flattened the earth into a
+        //  poster: no terminator anywhere, so the night-lights layer had
+        //  nothing to sit on and had to glow over the daylit side to be seen at
+        //  all. Low ambient plus one strong directional light gives a real
+        //  day/night edge, and the city lights then appear only where they
+        //  would. No cloud layer is added, here or below.
         setTimeout(() => {
             if (!window.THREE) return;
             const scene = globe.scene();
-            scene.add(new window.THREE.AmbientLight(0xffffff, 0.55));
-            const dir = new window.THREE.DirectionalLight(0xffffff, 1.1);
-            dir.position.set(200, 200, 300);
+            scene.add(new window.THREE.AmbientLight(0xffffff, 0.28));
+            const dir = new window.THREE.DirectionalLight(0xffffff, 1.55);
+            dir.position.set(SUN_DIR.x, SUN_DIR.y, SUN_DIR.z);
             scene.add(dir);
+
+            //  Surface response. The topology bump map was being applied at
+            //  scale 1 on a sphere of radius 100, which is no relief at all;
+            //  and a dark, tight specular gives the oceans a sheen without
+            //  turning the continents into plastic.
+            try {
+                const gm = globe.globeMaterial();
+                if (gm) {
+                    if ('bumpScale' in gm) gm.bumpScale = 9;
+                    if (gm.specular && gm.specular.setHex) gm.specular.setHex(0x14202c);
+                    if ('shininess' in gm) gm.shininess = 24;
+                    gm.needsUpdate = true;
+                }
+            } catch (e) {}
+
             rocketMesh = build3DRocket();
             rocketMesh.visible = false;
             scene.add(rocketMesh);
         }, 650);
 
     } catch (err) { console.error('Globe init failed:', err); }
+
+    //  Before the lookup, never after: killSwitchOn() reads that checkbox, and
+    //  renderer.js has not restored it from localStorage at this point in the
+    //  DOMContentLoaded queue. See restoreKillSwitchDisplay().
+    restoreKillSwitchDisplay();
 
     initUserLocation();
 
@@ -702,7 +1028,36 @@ if (document.readyState === 'loading') {
 } else {
     buildGlobeUI();
 }
-// ADDITIVE: Globe visuals (stars + night lights, no clouds) + rocket origin fix
+//  The night-lights layer's shaders, out here so the enhance pass below reads
+//  as what it does rather than as two walls of GLSL.
+const NIGHT_VERT = `
+varying vec3 vNrm;
+varying vec2 vUv;
+void main() {
+    vUv  = uv;
+    vNrm = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const NIGHT_FRAG = `
+uniform sampler2D uNight;
+uniform vec3 uSun;
+uniform float uOpacity;
+varying vec3 vNrm;
+varying vec2 vUv;
+void main() {
+    //  1 well into the night side, 0 in daylight, soft across the terminator.
+    float night = smoothstep(0.12, -0.20, dot(normalize(vNrm), normalize(uSun)));
+    vec3 lit = texture2D(uNight, vUv).rgb;
+    //  Keyed to the texture's own brightness, so only places that are actually
+    //  lit are drawn and unlit land stays as dark as the sea beside it.
+    float lum = max(max(lit.r, lit.g), lit.b);
+    float a = night * uOpacity * lum;
+    if (a < 0.004) discard;
+    gl_FragColor = vec4(lit * 1.6, a);
+}`;
+
+// ADDITIVE: Globe visuals (stars + night lights, no clouds)
 (function enhanceGlobe() {
     function tryEnhance() {
         if (!globe || !window.THREE) { setTimeout(tryEnhance, 300); return; }
@@ -715,34 +1070,46 @@ if (document.readyState === 'loading') {
         }
         sg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
         scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color:0xffffff, size:0.7, sizeAttenuation:true, transparent:true, opacity:0.85 })));
-        // Night lights
-        const nm = new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0, blending:THREE.AdditiveBlending, depthWrite:false });
-        new THREE.TextureLoader().load('https://unpkg.com/three-globe/example/img/earth-night.jpg', tex => {
-            nm.map = tex; nm.needsUpdate = true;
-            scene.add(new THREE.Mesh(new THREE.SphereGeometry(R*1.001,64,64), nm));
-            const fi = setInterval(() => { if (nm.opacity < 0.38) nm.opacity += 0.004; else clearInterval(fi); }, 60);
+        //  NIGHT LIGHTS, masked to the night side.
+        //
+        //  This layer used to be a MeshBasicMaterial faded up to opacity 0.38
+        //  with additive blending across the WHOLE sphere, so Europe's cities
+        //  glowed at local noon. It is now a shader that keeps the lights on
+        //  the hemisphere facing away from SUN_DIR -- the same vector the
+        //  directional light uses, so the two cannot disagree -- with a soft
+        //  terminator. Still no clouds: none are wanted.
+        const nm = new THREE.ShaderMaterial({
+            uniforms: {
+                uNight:   { value: null },
+                uSun:     { value: new THREE.Vector3(SUN_DIR.x, SUN_DIR.y, SUN_DIR.z).normalize() },
+                uOpacity: { value: 0.0 },
+            },
+            vertexShader: NIGHT_VERT, fragmentShader: NIGHT_FRAG,
+            transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
         });
-        globe.atmosphereColor('#3a8eff').atmosphereAltitude(0.20);
+        new THREE.TextureLoader().load('vendor/earth-night.jpg', tex => {
+            //  Assigned to .map as well as to the uniform. The shader reads the
+            //  uniform; .map is where anything auditing this scene for the
+            //  textures it loaded can still find the same object.
+            nm.map = tex;
+            nm.uniforms.uNight.value = tex;
+            nm.needsUpdate = true;
+            scene.add(new THREE.Mesh(new THREE.SphereGeometry(R*1.001,64,64), nm));
+            const fi = setInterval(() => {
+                if (nm.uniforms.uOpacity.value < 0.94) nm.uniforms.uOpacity.value += 0.012;
+                else clearInterval(fi);
+            }, 60);
+        });
+        globe.atmosphereColor('#4d8ffb').atmosphereAltitude(0.22);
     }
     setTimeout(tryEnhance, 1800);
 })();
 
-// Rocket launches from CURRENT_LOC (connected country) during switch
-(function fixRocketOrigin() {
-    function wrap() {
-        const _orig = window.flyToCountry;
-        if (typeof _orig !== 'function') { setTimeout(wrap, 400); return; }
-        window.flyToCountry = function(countryCode) {
-            const diff = Math.abs(CURRENT_LOC.lat - HOME_LOC.lat) > 0.5 || Math.abs(CURRENT_LOC.lng - HOME_LOC.lng) > 0.5;
-            if (diff) {
-                const sv = { lat:HOME_LOC.lat, lng:HOME_LOC.lng, name:HOME_LOC.name, code:HOME_LOC.code };
-                HOME_LOC.lat=CURRENT_LOC.lat; HOME_LOC.lng=CURRENT_LOC.lng;
-                HOME_LOC.name=CURRENT_LOC.name; HOME_LOC.code=CURRENT_LOC.code||sv.code;
-                _orig(countryCode);
-                // Restore AFTER the inner 960ms setTimeout has captured fromLoc
-                setTimeout(() => { HOME_LOC.lat=sv.lat; HOME_LOC.lng=sv.lng; HOME_LOC.name=sv.name; HOME_LOC.code=sv.code; }, 1100);
-            } else { _orig(countryCode); }
-        };
-    }
-    setTimeout(wrap, 500);
-})();
+//  fixRocketOrigin() used to live here: a monkey-patch that swapped HOME_LOC's
+//  coordinates for CURRENT_LOC's for 1100 ms so that a country switch would
+//  launch from the connected country instead of from home. It copied lat, lng,
+//  name and code -- but not `known` -- so with an unknown home homeIsKnown()
+//  stayed false, flyToCountry fell back to { lat: 0, lng: 0 }, and the rocket
+//  climbed out of the open Atlantic. flyToCountry now departs from the ANCHOR,
+//  which IS the connected country during a switch, so there is nothing left
+//  here to patch and no second copy of the origin rule to keep in step.

@@ -1,0 +1,62 @@
+#  Every checkout of this repository has to reproduce the tree that was tested,
+#  on any machine. Without this file it does not: core.autocrlf is true on the
+#  machine this is developed on, so git rewrites endings on the way in AND out,
+#  and `git add lib/` says so out loud -- "LF will be replaced by CRLF the next
+#  time Git touches it". Three things here break when that happens.
+
+#  1. The default. Every text blob in this repository is stored LF (measured:
+#     38 of 38), and every file added since the vendoring work is LF on disk
+#     too, so LF is what a checkout must produce. `text=auto` rather than a
+#     bare `text` on purpose -- eleven tracked files are binaries (tor.exe,
+#     lyrebird.exe, VC_redist.x64.exe, five PNGs, two JPGs and a BMP) and an
+#     unconditional `text` would run eol conversion over tor.exe.
+*                       text=auto eol=lf
+
+#  2. The five documents that predate this work are CRLF in the working tree,
+#     and .build/audit-eol.js asserts exactly that -- that each file is
+#     internally consistent and that these five are still CRLF. They are stored
+#     LF like everything else; `eol=crlf` is what puts them back on disk as
+#     CRLF, so a fresh clone passes that audit instead of failing it on the
+#     first run, on Windows and on Linux alike. Editing them with a
+#     single-line anchor and a multi-line replacement is only safe because the
+#     file really is all-CRLF, so this is not cosmetic.
+#
+#     There were six. globe.html was the v1 globe -- one inline <script> and a
+#     second copy of the country table -- and nothing loaded it; it is deleted,
+#     not merely unlisted, so no future edit can wire it back in.
+main.js                 text eol=crlf
+renderer.js             text eol=crlf
+globe-controller.js     text eol=crlf
+index.html              text eol=crlf
+style.css               text eol=crlf
+#  Written CRLF to match the document that loads it twice.
+vendor-umd-shim.js      text eol=crlf
+#  The NSIS installer's licence page (package.json -> build.nsis.license) loads
+#  this file into a Windows text control, and those break lines on CRLF -- an
+#  LF-only licence risks rendering as one endless line on the page every user
+#  has to scroll past before installing, and CRLF costs nothing here.
+#
+#  The file was named LICENSE until the config and the tree were reconciled.
+#  build.nsis.license has always said "LICENSE.txt", and a custom licence path
+#  that resolves to nothing is not skipped: app-builder-lib's getResource()
+#  throws InvalidConfigurationError, "cannot find specified resource". So
+#  `npm run dist` could not have produced an installer at all.
+LICENSE.txt             text eol=crlf
+
+#  3. The five vendored assets are pinned by SHA-256 in .build/test-vendor.js.
+#     They are the only <script> sources index.html loads besides the app's own
+#     files, in a window that runs with nodeIntegration on and contextIsolation
+#     off -- so that pin is the thing standing between a swapped or
+#     CDN-refreshed bundle and arbitrary code with require() on the user's PC.
+#     One eol rewrite on checkout changes those bytes, and a clean clone would
+#     then fail its own vendor check with the correct file on disk. `binary`
+#     (= -text -diff) also stops a review tool trying to render a 600 KB
+#     single-line bundle as a diff.
+vendor/*.min.js         binary
+vendor/*.jpg            binary
+vendor/*.png            binary
+
+#  The Tor bundle ships as-is. geoip/geoip6 are plain text that tor reads with
+#  either ending, but they are 3 MB of upstream data with a signature history,
+#  so nothing in here is normalised either way.
+Tor/**                  -text

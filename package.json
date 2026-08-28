@@ -38,15 +38,31 @@
       "main.js",
       "renderer.js",
       "globe-controller.js",
+      "vendor-umd-shim.js",
       "index.html",
       "style.css",
       "icon.png",
-      "Tor/**/*"
+      "lib/**/*",
+      "vendor/**/*",
+      "Tor/**/*",
+      "!Tor/data/cached-*",
+      "!Tor/data/lock",
+      "!Tor/data/state",
+      "!Tor/data/unverified-*",
+      "!Tor/data/control_auth_cookie",
+      "!Tor/tor/data/**",
+      "!Tor/torrc_temp",
+      "!Tor/tor/torrc_temp"
     ],
     "extraResources": [
       {
-        "from": "vc_redist.x64.exe",
+        "from": "VC_redist.x64.exe",
         "to": "vc_redist.x64.exe",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "Extension",
+        "to": "Extension",
         "filter": ["**/*"]
       }
     ],
@@ -65,9 +81,6 @@
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
-      "installerIcon": "icon.png",
-      "uninstallerIcon": "icon.png",
-      "installerHeaderIcon": "icon.png",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "FreeProxy VPN",

@@ -483,6 +483,127 @@ input:checked + .slider::before { transform: translateX(16px); }
 }
 .log-open-btn:hover { background: rgba(80,49,178,0.35); }
 
+/* ── Ask dialog ───────────────────────────────────────────────
+   The three-option question ("no exit node in that country") and the
+   "still trying" card, both built by renderer.js from what main.js sent.
+   Deliberately the log modal's shell -- same #0f1117 box, same radius,
+   same shadow -- so a question does not look like it came from a
+   different program than the window it interrupts.                     */
+#ask-modal {
+    display: none;
+    position: fixed; inset: 0; z-index: 99999;
+    background: rgba(0,0,0,0.62); backdrop-filter: blur(4px);
+    align-items: center; justify-content: center; padding: 22px;
+}
+#ask-modal.open { display: flex; }
+
+/*  variant 'live': not a modal. The wait it belongs to can run for minutes
+    and nothing is connected during it, so the progress bar, the globe and the
+    rocket all have to stay visible and the card sits out of their way.  */
+#ask-modal.live {
+    background: none; backdrop-filter: none;
+    align-items: flex-end; justify-content: center;
+    padding: 0 22px 22px; pointer-events: none;
+}
+#ask-modal.live .ask-box { width: 440px; pointer-events: auto; }
+#ask-modal.live .ask-heading p { font-size: 0.73rem; }
+
+.ask-box {
+    background: #0f1117; border-radius: 14px;
+    width: 540px; max-width: 94vw; max-height: 88vh; overflow-y: auto;
+    border: 1px solid rgba(124,58,237,0.30);
+    box-shadow: 0 22px 64px rgba(0,0,0,0.62);
+    padding: 17px 17px 12px;
+    animation: ask-in 0.22s cubic-bezier(0.16,1,0.3,1) both;
+    scrollbar-width: thin; scrollbar-color: #334155 transparent;
+}
+@keyframes ask-in {
+    from { opacity: 0; transform: translateY(12px) scale(0.985); }
+    to   { opacity: 1; transform: none; }
+}
+
+.ask-head { display: flex; gap: 11px; align-items: flex-start; }
+/*  The flag itself is written in by renderer.js with getFlagImg(), the same
+    call the dropdown and the header use -- one flag renderer, one look. `zoom`
+    rather than `transform: scale()` on purpose: zoom grows the layout box too,
+    so the heading beside it is not overlapped.  */
+.ask-flag { flex: none; margin-top: 2px; zoom: 1.45; }
+.ask-heading { flex: 1; min-width: 0; }
+.ask-heading h4 {
+    margin: 0 0 5px; font-size: 0.95rem; font-weight: 700; color: #e9edf6;
+    line-height: 1.35;
+}
+.ask-heading p {
+    margin: 0; font-size: 0.76rem; line-height: 1.6; color: #94a3b8;
+}
+
+/*  Carries what an earlier round of the SAME question already tried, so
+    "let the app choose" is never offered twice as though it were untried. */
+.ask-note {
+    display: none; margin: 11px 0 0;
+    background: rgba(245,158,11,0.09); border: 1px solid rgba(245,158,11,0.28);
+    border-left: 3px solid #f59e0b; border-radius: 8px;
+    padding: 8px 10px; font-size: 0.72rem; line-height: 1.55; color: #fcd9a0;
+}
+.ask-note.show { display: block; }
+
+.ask-options { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.ask-opt {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: rgba(255,255,255,0.035); border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 11px; padding: 10px 12px; font-family: inherit;
+    transition: background 0.16s, border-color 0.16s, transform 0.16s;
+}
+.ask-opt:hover:not(:disabled) {
+    background: rgba(124,58,237,0.14); border-color: rgba(124,58,237,0.55);
+    transform: translateY(-1px);
+}
+.ask-opt:focus-visible { outline: 2px solid #7c3aed; outline-offset: 2px; }
+.ask-opt:disabled { opacity: 0.45; cursor: default; transform: none; }
+.ask-opt .ask-opt-label {
+    display: block; font-size: 0.8rem; font-weight: 650; color: #e9edf6;
+    line-height: 1.4;
+}
+.ask-opt .ask-opt-hint {
+    display: block; margin-top: 3px; font-size: 0.7rem; line-height: 1.5;
+    color: #7d8aa5;
+}
+/*  The recommended-looking one is the one the app can act on immediately;
+    cancel is drawn as the destructive choice it is, because it takes the
+    tunnel down and this PC goes back to its own connection.  */
+.ask-opt.primary { background: rgba(80,49,178,0.20); border-color: rgba(124,58,237,0.42); }
+.ask-opt.primary .ask-opt-label { color: #c9b8ff; }
+.ask-opt.danger:hover:not(:disabled) {
+    background: rgba(239,68,68,0.14); border-color: rgba(239,68,68,0.5);
+}
+.ask-opt.danger .ask-opt-label { color: #fca5a5; }
+
+.ask-foot {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 12px; padding-top: 9px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    font-size: 0.68rem; line-height: 1.5; color: #5f6b85;
+}
+/*  Three dots, not a spinner: the app really is still working while a live
+    card is up (re-reading the relay list, re-testing relays), and this is
+    the only moving thing in the card that says so.  */
+.ask-dots { display: none; gap: 3px; flex: none; }
+.ask-dots.show { display: inline-flex; }
+.ask-dots i {
+    width: 4px; height: 4px; border-radius: 50%; background: #7c3aed;
+    animation: ask-dot 1.05s ease-in-out infinite;
+}
+.ask-dots i:nth-child(2) { animation-delay: 0.16s; }
+.ask-dots i:nth-child(3) { animation-delay: 0.32s; }
+@keyframes ask-dot {
+    0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+    40%           { opacity: 1;    transform: translateY(-3px); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .ask-box { animation: none; }
+    .ask-dots i { animation: none; opacity: 0.7; }
+}
+
 /* ── Scrollbar global ─────────────────────────────────────── */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-thumb { background: #d0d5e8; border-radius: 5px; }

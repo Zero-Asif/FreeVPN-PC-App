@@ -2,6 +2,30 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <!--  This document runs with nodeIntegration and contextIsolation off, so
+          "what may load here" is the same question as "what may run as Node on
+          this PC". Everything it needs is packaged, so nothing off the machine
+          may load at all -- the vendored globe cannot be quietly swapped back
+          for a CDN copy, because a remote tag now fails instead of executing.
+          file: is listed because a file:// document does not match 'self' in
+          Chromium. script-src no longer grants 'unsafe-inline': this window has
+          full Node access and renderer.js builds toast and server-list HTML
+          with innerHTML, so an inline script was one injection away from
+          require('child_process'). The two UMD shim blocks moved out to
+          vendor-umd-shim.js and every onclick= became addEventListener, which
+          leaves 'unsafe-inline' needed for style attributes only.
+          connect-src now names no host at all: the IP-geolocation lookup that
+          used to run in this window runs in the main process instead
+          (lib/home-location.js), so nothing here talks off the machine.  -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'none';
+        script-src  'self' file:;
+        style-src   'self' 'unsafe-inline' file:;
+        img-src     'self' data: blob: file:;
+        font-src    'self' data: file:;
+        connect-src 'self' file: data: blob:;
+        base-uri 'none'; object-src 'none'; frame-src 'none';
+        worker-src 'none'; form-action 'none'; media-src 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FreeProxy VPN</title>
     <link rel="stylesheet" href="style.css">
@@ -101,8 +125,8 @@
 
                     <!-- Bottom actions -->
                     <div class="bottom-actions">
-                        <a href="#" class="verify-btn"
-                            onclick="require('electron').shell.openExternal('https://ipleak.net/'); return false;">
+                        <a href="#" class="verify-btn" id="verifyPrivacyBtn"
+                            data-external="https://ipleak.net/">
                             🔍 Verify Privacy
                         </a>
                         <button class="log-btn" id="openLogBtn">
@@ -118,7 +142,7 @@
         <!-- Panel Footer -->
         <div class="panel-footer">
             <p>FreeProxy VPN · Open Source · 100% Free<br>
-               Built with <a href="#" onclick="require('electron').shell.openExternal('https://www.torproject.org'); return false;">Tor Network</a></p>
+               Built with <a href="#" id="torLinkBtn" data-external="https://www.torproject.org">Tor Network</a></p>
         </div>
 
     </div><!-- /.left-panel -->
@@ -155,24 +179,59 @@
     </div>
 </div>
 
+<!-- ══════════════ ASK DIALOG ══════════════
+     The app used to substitute a different country by itself when the one the
+     user picked had no exit relay. It asks now, and this is where the question
+     appears. main.js sends it over IPC as 'ask-user'; renderer.js fills in the
+     title, the body, the optional note and ONE BUTTON PER OPTION the question
+     carried, and sends the chosen option id back as 'ask-user-answer'.
+
+     Empty on purpose: every string in here comes from main.js at the moment it
+     asks, so nothing is written twice and the window can never show a question
+     that differs from the one the engine is actually waiting on.
+
+     Two shapes, both driven off ask.variant:
+       * choice -- a real modal. Nothing is connected while it is up, so there
+         is nothing behind it worth seeing, and it has no dismiss: the options
+         themselves include cancelling, and a backdrop click that resolved the
+         question would be the app deciding for the user again.
+       * live   -- the "still trying" card. That wait runs for minutes, so it
+         is anchored to the bottom and leaves the progress bar, the globe and
+         the rocket visible behind it.
+     ══════════════════════════════════════════════ -->
+<div id="ask-modal">
+    <div class="ask-box">
+        <div class="ask-head">
+            <span class="ask-flag" id="ask-flag"></span>
+            <div class="ask-heading">
+                <h4 id="ask-title"></h4>
+                <p id="ask-body"></p>
+            </div>
+        </div>
+        <div class="ask-note" id="ask-note"></div>
+        <div class="ask-options" id="ask-options"></div>
+        <div class="ask-foot">
+            <span class="ask-dots" id="ask-dots"><i></i><i></i><i></i></span>
+            <span id="ask-foot-text"></span>
+        </div>
+    </div>
+</div>
+
 <!-- ══════════════ SCRIPTS ══════════════ -->
-<script>
-    // Electron / Node module isolation for Three.js & Globe.gl
-    var nodeModule  = typeof module  !== 'undefined' ? module  : undefined;
-    var nodeExports = typeof exports !== 'undefined' ? exports : undefined;
-    if (typeof module  !== 'undefined') module  = undefined;
-    if (typeof exports !== 'undefined') exports = undefined;
-    window.exports = {};
-</script>
+<!--  The UMD shim, loaded twice: once here to hide Node's module/exports
+      pair so both bundles take their browser-global branch, once after them
+      to put it back. External, not inline, because script-src in this window
+      no longer grants 'unsafe-inline' -- see the head comment.  -->
+<script src="vendor-umd-shim.js"></script>
 
-<script src="https://unpkg.com/three@0.147.0/build/three.min.js"></script>
-<script src="https://unpkg.com/globe.gl@2.27.2/dist/globe.gl.min.js"></script>
+<!--  Local copies, not a CDN: this document runs with nodeIntegration, so a
+      remote <script> here would be arbitrary code with full Node access to
+      the user's PC, fetched over whatever network they are on. Pinned in
+      vendor/ and hash-checked by .build/test-vendor.js.  -->
+<script src="vendor/three.min.js"></script>
+<script src="vendor/globe.gl.min.js"></script>
 
-<script>
-    if (nodeModule)  module  = nodeModule;
-    if (nodeExports) exports = nodeExports;
-    delete window.exports;
-</script>
+<script src="vendor-umd-shim.js"></script>
 
 <script src="globe-controller.js"></script>
 <script src="renderer.js"></script>

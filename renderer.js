@@ -1,7 +1,8 @@
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, shell } = require('electron');
 const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
 
 let currentServer     = 'us';
+
 let isAppConnected    = false;
 let fastData          = null;
 let isLoading         = true;
@@ -14,12 +15,97 @@ let timerInterval = null, connectedAt = null;
 // Geolocation spoof — store real implementation
 let _realGeolocation = null;
 
+// ══════════════════════════════════════════════════════════════════
+//  Report the country the traffic ACTUALLY exits from.
+//
+//  main.js verifies every exit against ipleak.net and friends before
+//  claiming a country, and returns:
+//      serverCode -- where the traffic demonstrably comes out
+//      requested  -- what was asked for
+//      verified   -- whether an external database confirmed it
+//      dnsViaTor  -- whether DNS is going through Tor as well
+//  The UI used to ignore all four and print the clicked country, which
+//  is how it came to say "Connected via Luxembourg" while ipleak.net
+//  showed a Swiss exit IP. This resolves the reply into what to show.
+// ══════════════════════════════════════════════════════════════════
+function ccName(code) {
+    if (!code) return '';
+    try { return regionNames.of(code.toUpperCase()); } catch (e) { return code.toUpperCase(); }
+}
+
+function resolveExit(resp, fallbackCode) {
+    const asked = (resp && resp.requested) || fallbackCode;
+    const code  = (resp && resp.serverCode) || asked;
+    return {
+        asked,
+        code,
+        name:      ccName(code),
+        askedName: ccName(asked),
+        moved:     !!(code && asked && code !== asked),
+        unverified: resp ? resp.verified === false : false,
+        dnsLeaky:  resp ? resp.dnsViaTor === false : false,
+    };
+}
+
+//  One place that decides what the user is told after a successful
+//  connect or switch, so all three code paths stay consistent.
+function announceExit(x, verb) {
+    const Verb = verb.charAt(0).toUpperCase() + verb.slice(1);
+
+    //  ONE toast, carrying every caveat that applies. showToast()
+    //  suppresses a second warning while the first is still visible, so
+    //  splitting these would silently drop the DNS notice.
+    const dnsNote = x.dnsLeaky
+        ? '<br><small>DNS port 53 was already in use, so only browser lookups go through Tor -- ' +
+          'other applications will use the system resolver.</small>'
+        : '';
+
+    if (x.moved) {
+        showToast('<strong>' + x.askedName + '</strong> had no confirmed exit right now, so you are ' +
+                  verb + ' via <strong>' + x.name + '</strong> instead. That is the country your ' +
+                  'IP and location will show.' + dnsNote, 'warning', 9000);
+    } else if (x.unverified) {
+        showToast(Verb + ' via <strong>' + x.name + '</strong>, but the exit country could not be ' +
+                  'double-checked -- no geolocation service answered through Tor. ' +
+                  'Worth confirming at ipleak.net.' + dnsNote, 'warning', 9000);
+    } else if (x.dnsLeaky) {
+        showToast(Verb + ' via <strong>' + x.name + '</strong>. DNS port 53 was already in use, so ' +
+                  'only browser lookups go through Tor -- other applications will use the ' +
+                  'system resolver.', 'warning', 9000);
+    } else {
+        showToast('<strong>' + Verb + '!</strong> Routed via ' + x.name + '. IP, DNS &amp; GPS hidden.',
+                  'success', 6000);
+    }
+}
+
 // ════════════════════════════════════════════════════════════
 //  UTILITY
 // ════════════════════════════════════════════════════════════
+//  The REAL flag, from vendor/flags/<cc>.svg -- a file that ships inside the
+//  app, not a request. It used to be an <img> from flagcdn.com: one request per
+//  country to a third party that was thereby told which country this user was
+//  about to connect to, over the user's real IP, before the tunnel existed.
+//  That is why it was removed. The files restore the flags without restoring
+//  the request; see vendor/flags/README.txt.
+//
+//  The drawn two-letter badge is still painted UNDERNEATH, with the same
+//  deterministic hue the extension popup uses, and the flag is layered over
+//  it. So this needs no list of which flags exist and no error handler: if a
+//  file is missing or unreadable the <img> draws nothing (alt="" keeps
+//  Chromium from showing a broken-image icon) and the old badge shows through.
+//  Windows Chrome has no flag-emoji glyphs, so the badge is also the only
+//  fallback that can render at all.
 function getFlagImg(code) {
-    return `<img src="https://flagcdn.com/w20/${code.toLowerCase()}.png" alt="${code}"
-        style="width:20px;vertical-align:middle;margin-right:8px;border-radius:2px;box-shadow:0 0 2px rgba(0,0,0,0.25);">`;
+    const u  = (code || '??').toUpperCase();
+    //  Only ever a two-letter code goes into the src. Country codes reach this
+    //  function from the live relay index, which is off the network.
+    const cc = /^[a-z]{2}$/i.test(code || '') ? String(code).toLowerCase() : '';
+    let h = 0;
+    for (let i = 0; i < u.length; i++) h = (h * 131 + u.charCodeAt(i)) % 360;
+    const img = cc
+        ? `<img src="vendor/flags/${cc}.svg" alt="" draggable="false" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;">`
+        : '';
+    return `<span title="${u}" style="position:relative;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;width:22px;height:15px;margin-right:8px;border-radius:3px;flex:none;font-size:8px;font-weight:700;letter-spacing:.3px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18),0 1px 2px rgba(0,0,0,.3);background:linear-gradient(135deg,hsl(${h} 60% 44%),hsl(${(h + 38) % 360} 64% 28%));">${u}${img}</span>`;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -121,6 +207,36 @@ ipcRenderer.on('geo-spoof-off', () => {
     showToast('📍 Location restored to your real position.', 'info', 3500);
 });
 
+// ── One-time browser setup ──────────────────────────────────
+//  Chrome and Brave refuse every automatic extension-install route an app
+//  has on Windows: Chrome ignores --load-extension outright, and both drop
+//  a self-hosted force-install entry during policy validation. So those
+//  two need one manual "Load unpacked" -- the same reason every commercial
+//  VPN ships its browser extension through the Chrome Web Store.
+//
+//  Saying nothing would leave the user looking at a map with the wrong
+//  city and no way to know why, so it is surfaced here and not only in the
+//  log. Shown once per app run, and only while the extension is genuinely
+//  absent -- main.js re-checks on every connect, so it stops appearing by
+//  itself once the folder has been loaded.
+let _geoExtNoticeFor = null;
+function openGeoExtFolder() {
+    ipcRenderer.invoke('open-geo-ext-folder').catch(() => {});
+}
+ipcRenderer.on('geo-ext-setup', (event, { browsers, auto, dir }) => {
+    const who = (browsers || []).join(' and ');
+    if (!who || _geoExtNoticeFor === who) return;
+    _geoExtNoticeFor = who;
+    showToast(
+        `📍 <strong>${who}</strong>: one-time setup needed before location spoofing works there.<br>` +
+        '<a href="#" class="toast-action" data-action="open-geo-ext-folder" ' +
+        'style="color:inherit;text-decoration:underline;cursor:pointer">' +
+        'Open the setup folder</a> and follow HOW-TO-ENABLE.txt. ' +
+        ((auto || []).length ? `This app and ${auto.join(' and ')} are already covered.` : 'This app itself is already covered.'),
+        'info', 30000);
+    console.log('[FreeProxy] location spoofer needs a manual load in ' + who + ' -- ' + dir);
+});
+
 // ════════════════════════════════════════════════════════════
 //  ⏱ CONNECTION TIMER
 // ════════════════════════════════════════════════════════════
@@ -164,10 +280,14 @@ function showProgress(percent, message, status) {
         slow:        'linear-gradient(90deg,#d97706,#f59e0b)',
         unavailable: 'linear-gradient(90deg,#dc2626,#ef4444)',
         connected:   'linear-gradient(90deg,#16a34a,#22c55e)',
+        //  Cancelled is a DECISION, not a failure -- the user chose it from the
+        //  country-unavailable dialog. Slate, not red: nothing went wrong.
+        cancelled:   'linear-gradient(90deg,#475569,#64748b)',
     };
     if (fill) fill.style.background = gradients[status] || gradients.connecting;
     if (label) {
-        const labels = { connecting:`${percent}%`, slow:`${percent}% — Slow`, unavailable:'Failed', connected:'100% ✓' };
+        const labels = { connecting:`${percent}%`, slow:`${percent}% — Slow`,
+                         unavailable:'Failed', connected:'100% ✓', cancelled:'Cancelled' };
         label.textContent = labels[status] || `${percent}%`;
     }
 }
@@ -185,9 +305,33 @@ function hideProgress(delayMs = 0) {
 // ════════════════════════════════════════════════════════════
 //  🔔 TOAST NOTIFICATIONS
 // ════════════════════════════════════════════════════════════
+//  A toast body is built with innerHTML, and this window has full Node access,
+//  so index.html's script-src no longer grants 'unsafe-inline' -- which means
+//  the close button's old onclick="this.parentElement.remove()" and the setup
+//  link's onclick="return openGeoExtFolder()" would both be refused by the
+//  policy now. One delegated listener on the container replaces both: it is
+//  attached lazily on the first toast, so it does not depend on where in the
+//  load order this file happens to be, and once only.
+let _toastWired = false;
+function wireToastClicks(container) {
+    if (_toastWired) return;
+    _toastWired = true;
+    container.addEventListener('click', e => {
+        const link = e.target.closest('.toast-action');
+        if (link) {
+            e.preventDefault();
+            if (link.dataset.action === 'open-geo-ext-folder') openGeoExtFolder();
+            return;
+        }
+        const close = e.target.closest('.toast-close');
+        if (close) close.closest('.toast')?.remove();
+    });
+}
+
 function showToast(message, type = 'info', durationMs = 5000) {
     const container = document.getElementById('toast-container');
     if (!container) return;
+    wireToastClicks(container);
     if (type === 'warning' && container.querySelector('.toast-warning')) return;
     const icons = { info:'ℹ️', warning:'⚠️', error:'❌', success:'✅' };
     const toast = document.createElement('div');
@@ -195,7 +339,7 @@ function showToast(message, type = 'info', durationMs = 5000) {
     toast.innerHTML = `
         <span class="toast-icon">${icons[type]||'ℹ️'}</span>
         <span class="toast-msg">${message}</span>
-        <button class="toast-close" onclick="this.parentElement.remove()">×</button>`;
+        <button class="toast-close" type="button">×</button>`;
     container.appendChild(toast);
     setTimeout(() => {
         if (!toast.parentElement) return;
@@ -242,9 +386,131 @@ async function refreshLogContent(level = 'ALL') {
 }
 
 // ════════════════════════════════════════════════════════════
+//  ❓ THE ASK DIALOG
+//
+//  main.js no longer picks a country for the user when the one they chose
+//  has no reachable exit relay. It stops and asks, over IPC:
+//
+//      ask-user        { id, variant, cc, title, body, note?,
+//                        options: [{ id, label, hint? }] }
+//      ask-user-close  { id }                -- take it down, it was answered
+//                                               somewhere else or it resolved
+//                                               itself
+//      ask-user-answer { id, answer }        -- sent back from here
+//
+//  Everything on screen comes from that record. This file invents no option,
+//  no wording and no default: `answer` is only ever one of the ids main.js
+//  offered, and main.js validates it again on arrival.
+//
+//  Built with createElement, not innerHTML -- index.html's CSP has no
+//  'unsafe-inline' for scripts, so an inline onclick would be refused, and
+//  this window runs with Node integration, which is exactly the window where
+//  assembling markup out of strings is worth avoiding.
+//
+//  There is NO dismiss. Backdrop clicks and Escape do nothing on purpose:
+//  the engine is blocked on this answer, cancelling is itself one of the
+//  options, and treating "clicked outside" as an answer would be the app
+//  deciding for the user again -- the exact behaviour being removed.
+// ════════════════════════════════════════════════════════════
+let askShownId = null;
+
+function closeAskDialog(id) {
+    //  Only the question actually on screen. A stale close for a question that
+    //  was already replaced must not blank the current one.
+    if (id && askShownId && id !== askShownId) return;
+    askShownId = null;
+    document.getElementById('ask-modal')?.classList.remove('open');
+}
+
+function openAskDialog(ask) {
+    const modal = document.getElementById('ask-modal');
+    if (!modal || !ask || !ask.id) return;
+    const titleEl = document.getElementById('ask-title');
+    const bodyEl  = document.getElementById('ask-body');
+    const noteEl  = document.getElementById('ask-note');
+    const flagEl  = document.getElementById('ask-flag');
+    const optsEl  = document.getElementById('ask-options');
+    const footEl  = document.getElementById('ask-foot-text');
+    const dotsEl  = document.getElementById('ask-dots');
+    if (!titleEl || !optsEl) return;
+
+    askShownId = ask.id;
+    const live = ask.variant === 'live';
+    modal.classList.toggle('live', live);
+
+    //  getFlagImg() returns markup, and it is this file's own -- the country
+    //  code inside it is checked against /^[a-z]{2}$/ before it reaches a src.
+    flagEl.innerHTML = ask.cc ? getFlagImg(ask.cc) : '';
+    flagEl.style.display = ask.cc ? '' : 'none';
+
+    titleEl.textContent = ask.title || '';
+    bodyEl.textContent  = ask.body || '';
+    noteEl.textContent  = ask.note || '';
+    noteEl.classList.toggle('show', !!ask.note);
+
+    optsEl.textContent = '';
+    (ask.options || []).forEach((opt, i) => {
+        if (!opt || !opt.id) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ask-opt' +
+            (i === 0 && !live ? ' primary' : '') +
+            (/^(cancel|stop)$/.test(opt.id) ? ' danger' : '');
+        btn.dataset.answer = opt.id;
+
+        const label = document.createElement('span');
+        label.className = 'ask-opt-label';
+        label.textContent = opt.label || opt.id;
+        btn.appendChild(label);
+
+        if (opt.hint) {
+            const hint = document.createElement('span');
+            hint.className = 'ask-opt-hint';
+            hint.textContent = opt.hint;
+            btn.appendChild(hint);
+        }
+        optsEl.appendChild(btn);
+    });
+
+    //  A live card IS the app still working; a choice is the app waiting.
+    dotsEl.classList.toggle('show', live);
+    footEl.textContent = live
+        ? 'Nothing is connected while this runs.'
+        : 'Nothing is connected right now, and no country has been chosen for you.';
+
+    modal.classList.add('open');
+    //  Keyboard first: the wait/cancel decision must be reachable without a
+    //  mouse, and focus has to leave the Connect button, which is disabled.
+    optsEl.querySelector('.ask-opt')?.focus();
+}
+
+//  One delegated listener for every option button of every question, attached
+//  once. The buttons are disabled the instant one is pressed: the answer is
+//  already on its way to main.js and a second click would race the close.
+function wireAskDialog() {
+    const optsEl = document.getElementById('ask-options');
+    if (!optsEl) return;
+    optsEl.addEventListener('click', e => {
+        const btn = e.target.closest('.ask-opt');
+        if (!btn || btn.disabled || !askShownId) return;
+        const id = askShownId;
+        optsEl.querySelectorAll('.ask-opt').forEach(b => { b.disabled = true; });
+        ipcRenderer.send('ask-user-answer', { id, answer: btn.dataset.answer });
+        //  main.js answers with ask-user-close, and a 'wait' answer replaces
+        //  this dialog with the live card in the same breath. Closing here as
+        //  well keeps the window responsive if that message is slow, and
+        //  closeAskDialog() is id-checked so it cannot swallow the next one.
+        closeAskDialog(id);
+    });
+}
+
+ipcRenderer.on('ask-user',       (event, ask) => openAskDialog(ask));
+ipcRenderer.on('ask-user-close', (event, d)   => closeAskDialog(d && d.id));
+
+// ════════════════════════════════════════════════════════════
 //  📡 CONNECTION PROGRESS  (IPC from main.js)
 // ════════════════════════════════════════════════════════════
-ipcRenderer.on('connection-progress', (event, { percent, message, status }) => {
+ipcRenderer.on('connection-progress', (event, { percent, message, status, kept }) => {
     showProgress(percent, message, status);
     if (status === 'slow')
         showToast(`⚠️ <strong>Server is slow.</strong> Connection still in progress…`, 'warning', 9000);
@@ -253,6 +519,17 @@ ipcRenderer.on('connection-progress', (event, { percent, message, status }) => {
         else if (status === 'unavailable') {
             rocketActionTaken=true; window.explodeRocket?.();
             showToast(`❌ <strong>Server unavailable.</strong> Please choose a faster country.`, 'error', 7000);
+        }
+        //  The user's own words for cancelling: the rocket blasts in mid-air,
+        //  still flying, and no country is connected.
+        //
+        //  `kept` is the one exception and it comes from main.js, which is the
+        //  only place that knows: a cancelled SWITCH that never touched the
+        //  running tunnel leaves the old country carrying traffic. Blowing up
+        //  that rocket would be a picture of a dead tunnel that is still alive.
+        else if (status === 'cancelled' && !kept) {
+            rocketActionTaken=true;
+            window.explodeRocket?.({ overlay: 'Cancelled 💥  No country connected' });
         }
     }
 });
@@ -270,15 +547,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     const selectedText     = document.getElementById('selectedText');
     const bypassInput      = document.getElementById('bypassInput');
 
+    //  The country-unavailable / still-trying dialog. Wired here rather than at
+    //  load time so #ask-options is guaranteed to exist; the question itself can
+    //  arrive at any moment after this.
+    wireAskDialog();
+    //  And if one is ALREADY waiting -- this window reloaded while it was up, or
+    //  started slower than the engine asked -- put it straight back on screen.
+    ipcRenderer.invoke('get-pending-ask').then(a => { if (a) openAskDialog(a); }).catch(() => {});
+
     // Log modal
-    document.getElementById('openLogBtn')?.addEventListener('click', openLogModal);
-    document.getElementById('closeLogBtn')?.addEventListener('click', () => document.getElementById('log-modal')?.classList.remove('open'));
+    document.getElementById('openLogBtn')?.addEventListener('click', openLogModal);    document.getElementById('closeLogBtn')?.addEventListener('click', () => document.getElementById('log-modal')?.classList.remove('open'));
     document.getElementById('log-modal')?.addEventListener('click', e => { if (e.target===e.currentTarget) e.currentTarget.classList.remove('open'); });
     document.getElementById('logFilter')?.addEventListener('change', async e => {
         await refreshLogContent(e.target.value);
         document.getElementById('log-content').scrollTop = document.getElementById('log-content').scrollHeight;
     });
     document.getElementById('openLogFileBtn')?.addEventListener('click', () => ipcRenderer.invoke('open-log-folder'));
+
+    //  Both of these were onclick="require('electron').shell.openExternal(...)"
+    //  attributes in index.html, which script-src without 'unsafe-inline' now
+    //  refuses. The destination stays in the markup as data-external and href
+    //  stays "#", so no click can navigate THIS window -- a page that loaded
+    //  here would run with Node integration. https only, and never the URL of
+    //  anything the app fetched: these two are static markup.
+    document.querySelectorAll('a[data-external]').forEach(a =>
+        a.addEventListener('click', e => {
+            e.preventDefault();
+            const url = a.dataset.external || '';
+            if (/^https:\/\//.test(url)) shell.openExternal(url).catch(() => {});
+        }));
 
     // Close dropdown outside
     document.addEventListener('click', e => {
@@ -327,10 +624,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             try { name = regionNames.of(code.toUpperCase()); } catch(e) {}
             const mbps = bandwidth / 1_000_000;
             let cls, label;
+            //  The band below is real -- exit count and bandwidth, both from the
+            //  live relay index. The label used to be a random millisecond figure
+            //  nobody had timed, re-rolled on every refresh; it is now the count
+            //  the band was decided by, the same number the extension popup shows.
+            const exits = count === 1 ? '1 exit' : `${count} exits`;
             if (isAppConnected && currentServer===code) { cls='status-fast'; label='Connected ✓'; }
-            else if (count>200 || mbps>50)  { cls='status-fast'; label=`${Math.floor(70+Math.random()*50)} ms`; }
-            else if (count>50  || mbps>10)  { cls='status-busy'; label=`${Math.floor(160+Math.random()*70)} ms`; }
-            else                             { cls='status-slow'; label=`${Math.floor(290+Math.random()*100)} ms`; }
+            else if (count>200 || mbps>50)  { cls='status-fast'; label=exits; }
+            else if (count>50  || mbps>10)  { cls='status-busy'; label=exits; }
+            else                             { cls='status-slow'; label=exits; }
             const badge = (fastData && code===fastData.best) ? `<span class="fastest-badge">BEST</span>` : '';
             const existing = dropdownList.querySelector(`li[data-value="${code}"]`);
             if (existing) {
@@ -376,10 +678,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             connectButton.disabled=false;
             if (response.status==='connected') {
+                const x = resolveExit(response, currentServer);
                 localStorage.setItem('isConnected', 'true');
-                updateUI(true, currentServer);
-                showProgress(100, `Switched & Secured via ${cName} 🛡️`, 'connected');
+                localStorage.setItem('activeServer', x.code);
+                updateUI(true, x.code);
+                if (x.moved) window.flyToCountry?.(x.code);
+                showProgress(100, `Switched & Secured via ${x.name} 🛡️`, 'connected');
+                announceExit(x, 'switched');
                 hideProgress(2500); fetchAndRenderCountries();
+            } else if (response.status==='cancelled') {
+                //  Reached only when this path ran the switch itself, which the
+                //  capture-phase interceptor at the bottom of this file normally
+                //  takes over. Either way a cancel is a decision, not a failure,
+                //  and it is never reported as one. This branch tore the tunnel
+                //  down before connecting, so `kept` can only be false here.
+                localStorage.setItem('isConnected', 'false');
+                updateUI(false, currentServer);
+                showToast('Switch <strong>cancelled</strong> — no country is connected.',
+                          'info', 6000);
+                hideProgress(3000); fetchAndRenderCountries();
             } else {
                 localStorage.setItem('isConnected', 'false');
                 updateUI(false, currentServer);
@@ -421,6 +738,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const savedKillSwitch = localStorage.getItem('killSwitch')    === 'true';
     updateUI(savedState, savedServer);
     killSwitchToggle.checked = savedKillSwitch;
+    //  Tell main what was restored. Without this the kill switch could read ON
+    //  in this window while main -- and the extension popup, and the globe's
+    //  decision about whether it may make an IP lookup at all -- still had it
+    //  off. State only: report-killswitch touches nothing on the machine.
+    ipcRenderer.invoke('report-killswitch', savedKillSwitch).catch(() => {});
     selectedServer.addEventListener('click', () => dropdownList.classList.toggle('show'));
 
     // ════════════════════════════════════════════════════════
@@ -462,13 +784,34 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         connectButton.disabled=false;
         if (response.status==='connected') {
+            //  Show where the tunnel really came out, not what was clicked.
+            const x = resolveExit(response, currentServer);
             localStorage.setItem('isConnected','true');
-            updateUI(true, currentServer);
+            localStorage.setItem('activeServer', x.code);
+            updateUI(true, x.code);
+            if (x.moved) window.flyToCountry?.(x.code);
             if (!rocketActionTaken) { rocketActionTaken=true; window.landRocket?.(); }
-            showProgress(100, `Connected via ${cName} 🛡️`, 'connected');
+            showProgress(100, `Connected via ${x.name} 🛡️`, 'connected');
             hideProgress(2800);
-            showToast(`✅ <strong>Connected!</strong> Routed via ${cName}. IP & GPS hidden.`, 'success', 6000);
+            announceExit(x, 'connected');
             fetchAndRenderCountries();
+        } else if (response.status==='cancelled') {
+            //  The user chose "do not connect at all" in the country-unavailable
+            //  dialog. Not a failure and it is not reported as one: no country
+            //  is connected, main.js has already put this PC back the way it was
+            //  found, and the rocket has blasted in mid-air from the 'cancelled'
+            //  progress record above.
+            localStorage.setItem('isConnected','false');
+            updateUI(false, currentServer);
+            if (!rocketActionTaken) {
+                rocketActionTaken=true;
+                window.explodeRocket?.({ overlay: 'Cancelled 💥  No country connected' });
+            }
+            showToast('Connection <strong>cancelled</strong> — no country is connected. ' +
+                      'This PC is back on its own internet connection' +
+                      (killSwitchToggle.checked ? ', unless the Kill Switch is still blocking it.' : '.'),
+                      'info', 6000);
+            hideProgress(3200); fetchAndRenderCountries();
         } else {
             localStorage.setItem('isConnected','false');
             updateUI(false, currentServer);
@@ -507,6 +850,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('force-connect-ui',    ()=>{ if (!isAppConnected) connectButton.click(); });
     ipcRenderer.on('force-disconnect-ui', ()=>{ if (isAppConnected)  connectButton.click(); });
+
+    //  A country change asked for by the browser extension. main.js only
+    //  sends this while a tunnel is up -- a disconnected app is re-labelled
+    //  there and needs no circuit work -- and it is routed through a real
+    //  click so the switch runs exactly as it does for the app's own
+    //  dropdown, including the revert if the new country has no usable exit.
+    ipcRenderer.on('force-switch-ui', (event, code) => {
+        if (!code || code === currentServer) return;
+        let li = dropdownList.querySelector(`li[data-value="${code}"]`);
+        if (!li) {
+            //  The popup can choose a country before the first relay fetch has
+            //  rendered the list. Both switch paths key off a real <li>, so add
+            //  the one the next refresh would have added anyway; that refresh
+            //  fills in its label or removes it again.
+            li = document.createElement('li');
+            li.setAttribute('data-value', code);
+            li.innerHTML = '<span style="display:flex;align-items:center;"></span>' +
+                           '<span class="server-status"></span>';
+            dropdownList.appendChild(li);
+        }
+        li.click();
+    });
 });
 // ADDITIVE: country switch capture-phase interceptor (DNS stays locked)
 //
@@ -540,7 +905,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const dl2 = document.getElementById('dropdownList');
 
         function setFlag(code, name) {
-            if (st) st.innerHTML = `<img src="https://flagcdn.com/w20/${code.toLowerCase()}.png" style="width:20px;vertical-align:middle;margin-right:8px;border-radius:2px;"> ${name}`;
+            if (st) st.innerHTML = getFlagImg(code) + ' ' + name;
         }
         // Mirrors updateUI(connected, serverValue) -- done directly since
         // the real updateUI() is out of scope for this listener.
@@ -585,21 +950,65 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.disabled = false;
 
         if (resp && resp.status === 'connected') {
-            const finalName = applyConnectedUI(resp.serverCode || newCode);
+            //  resp.serverCode is the VERIFIED exit country, which can
+            //  differ from newCode when no relay in the requested country
+            //  passed the geolocation check.
+            const x = resolveExit(resp, newCode);
+            const finalName = applyConnectedUI(x.code);
             localStorage.setItem('isConnected', 'true');
             localStorage.setItem('activeServer', currentServer);
-            showToast(`✅ Switched to ${finalName}`, 'success', 4000);
+            showProgress(100, `Switched & Secured via ${finalName} 🛡️`, 'connected');
+            hideProgress(2500);
+            announceExit(x, 'switched');
+            if (x.moved) window.flyToCountry?.(x.code);
             window.landRocket?.();
-        } else if (resp && resp.status === 'reconnected') {
-            const prev = resp.serverCode || currentServer;
+        } else if (resp && resp.status === 'cancelled') {
+            //  Cancelled from the country-unavailable dialog. `kept` is decided
+            //  in main.js and it is the whole difference here: a switch that was
+            //  cancelled BEFORE the running tunnel was touched leaves the old
+            //  country carrying traffic, and this window must go back to saying
+            //  so rather than showing a disconnected app that is in fact still
+            //  routed. Nothing about a cancel is reported as a failure.
+            if (resp.kept) {
+                const prev     = resp.serverCode || currentServer;
+                const prevName = applyConnectedUI(prev);
+                localStorage.setItem('isConnected', 'true');
+                localStorage.setItem('activeServer', prev);
+                showProgress(100, `Cancelled — still connected via ${prevName} 🛡️`, 'cancelled');
+                hideProgress(2600);
+                showToast(`Switch <strong>cancelled</strong>. You are still connected via ` +
+                          `<strong>${prevName}</strong> — nothing was changed.`, 'info', 6000);
+                //  The rocket was on its way to a country nobody is going to
+                //  now, so it blasts where it is. The launch never moved the
+                //  anchor, so the ring returns to the country still in use.
+                window.explodeRocket?.({ overlay: 'Switch cancelled 💥  Still connected' });
+            } else {
+                applyDisconnectedUI();
+                localStorage.setItem('isConnected', 'false');
+                hideProgress(3200);
+                showToast('Switch <strong>cancelled</strong> — no country is connected. ' +
+                          'This PC is back on its own internet connection.', 'info', 6000);
+                window.explodeRocket?.({ overlay: 'Cancelled 💥  No country connected' });
+            }
+        } else if (resp && resp.status === 'reconnected') {            const prev = resp.serverCode || currentServer;
             const prevName = applyConnectedUI(prev);
             localStorage.setItem('isConnected', 'true');
             localStorage.setItem('activeServer', prev);
+            showProgress(100, `Reverted to ${prevName} 🛡️`, 'connected');
+            hideProgress(2500);
             showToast(`⚠️ Switch failed. Reverted to ${prevName}.`, 'warning', 5000);
+            // The switch failed and the tunnel is back up through the country
+            // it was already on, so the rocket heading for the country that
+            // could not be reached blasts where it is, and the ring returns to
+            // the globe's anchor -- which a launch never moves, and which is
+            // therefore still that same old country.
+            window.explodeRocket?.();
         } else {
             applyDisconnectedUI();
             localStorage.setItem('isConnected', 'false');
+            hideProgress(300);
             showToast(`❌ Switch failed. Please reconnect.`, 'error', 5000);
+            window.explodeRocket?.();
         }
     }, true);
 });
