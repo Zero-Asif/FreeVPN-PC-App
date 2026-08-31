@@ -217,6 +217,51 @@
     </div>
 </div>
 
+<!-- ══════════════ THE ONE RESTART ══════════════
+     Shown at most once, and only when Windows itself deferred part of the
+     install to the next boot -- lib/installer-tasks.js writes the marker on
+     evidence (PendingFileRenameOperations naming our own files, exit code
+     3010 from the bundled VC++ runtime, or NSIS's reboot flag) and main.js's
+     pendingRestart() deletes it the moment os.uptime() proves the machine has
+     booted since. A clean install defers nothing, so this card never appears
+     on one: Chromium policy, the system proxy and the firewall rules are all
+     applied live.
+
+     It exists so the app has ONE place to interrupt the user, at the start,
+     instead of closing their browsers every time they connect or switch
+     country. "Later" is a real answer -- the marker is cleared and the card
+     does not come back.
+
+     The reason lines are filled in from the installer's own `why` strings, so
+     this card can never claim more than actually happened.
+   ══════════════════════════════════════════════ -->
+<div id="restart-modal">
+    <div class="restart-box">
+        <div class="restart-head">
+            <span class="restart-glyph">⟳</span>
+            <div class="restart-heading">
+                <h4>One restart finishes the setup</h4>
+                <p>Windows could not replace a file that was in use, so it scheduled the
+                   rest of this installation for the next time your PC starts.</p>
+            </div>
+        </div>
+        <ul class="restart-why" id="restart-why"></ul>
+        <p class="restart-note">Everything else is already active — the tunnel, the kill
+           switch, split tunnelling and the browser location shield all work right now.
+           This app will not ask again, and it never closes your browsers.</p>
+        <div class="restart-options">
+            <button type="button" class="restart-opt primary" id="restart-now">
+                <span class="restart-opt-label">Restart now</span>
+                <span class="restart-opt-hint">Windows will ask you to save open work first</span>
+            </button>
+            <button type="button" class="restart-opt" id="restart-later">
+                <span class="restart-opt-label">Later</span>
+                <span class="restart-opt-hint">Finishes at your next restart, whenever that is</span>
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- ══════════════ SCRIPTS ══════════════ -->
 <!--  The UMD shim, loaded twice: once here to hide Node's module/exports
       pair so both bundles take their browser-global branch, once after them

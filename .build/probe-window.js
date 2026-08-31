@@ -93,6 +93,14 @@ let homeAsks = 0, geoAsks = 0, folderAsks = 0;
 let pendingAsk = null;
 const askAnswers = [];
 
+//  The one-restart card. main.js is not running here, so these three channels
+//  are served from this process -- which is also what makes the probe safe:
+//  clicking "Restart now" reaches the stub below and NOTHING asks Windows to
+//  reboot. `restartReply` is what get-pending-restart answers, and it starts as
+//  "nothing pending", which is what a clean install really produces.
+let restartReply = { pending: false, why: [] };
+let restartAsks = 0, dismissAsks = 0, rebootAsks = 0;
+
 app.whenReady().then(async () => {
     session.defaultSession.webRequest.onBeforeRequest((d, cb) => {
         if (/^(file|devtools|blob|data|chrome-extension):/.test(d.url)) return cb({});
@@ -121,6 +129,14 @@ app.whenReady().then(async () => {
     //  The two ends of the ask channel, with main.js's own names and shapes.
     ipcMain.handle('get-pending-ask', async () => pendingAsk);
     ipcMain.on('ask-user-answer', (e, d) => { askAnswers.push(d); });
+    //  The one-restart card's three channels. `restart-windows` is a COUNTER and
+    //  nothing else: the real handler in main.js runs `shutdown /r`, and a probe
+    //  that rebooted the machine to prove a button works would be indefensible.
+    //  It answers { ok: false } so the renderer's own failure path is what gets
+    //  exercised -- the branch that puts the buttons back and says so.
+    ipcMain.handle('get-pending-restart', async () => { restartAsks++; return restartReply; });
+    ipcMain.handle('dismiss-pending-restart', async () => { dismissAsks++; return { ok: true }; });
+    ipcMain.handle('restart-windows', async () => { rebootAsks++; return { ok: false, err: 'probe' }; });
 
     //  The same options as main.js:981 -- nodeIntegration on, contextIsolation
     //  off. Probing a safer window than the app ships would prove nothing.
@@ -233,6 +249,61 @@ app.whenReady().then(async () => {
     pendingAsk = null;
     homeAsks = homeWas; geoAsks = geoWas;
 
+    //  ── the one restart ─────────────────────────────────────────────
+    //  Everything about this card is a claim made to the user in a modal they
+    //  cannot ignore, so two opposite things both have to be true and neither
+    //  can be read off the source:
+    //
+    //    1. With nothing pending -- the clean install, which is what this
+    //       machine actually reports -- the page still ASKS, and then shows
+    //       NOTHING. A card that appeared here would be a false statement.
+    //    2. With something pending, the card comes up, and the reasons on it are
+    //       the strings the installer wrote, in order, as text.
+    //
+    //  And then it has to be answerable. "Later" is the answer that matters:
+    //  it must clear the marker in the main process, not merely hide the box,
+    //  because a card that came back tomorrow is the nagging this whole design
+    //  was meant to avoid.
+    const R = { askedClean: restartAsks, cleanCard: await win.webContents
+                    .executeJavaScript(RESTART_READ, true) };
+
+    const WHY = [
+        '2 file(s) belonging to FreeProxy VPN were in use during the install, so ' +
+        'Windows scheduled them to be replaced at the next restart.',
+        'Windows reported that a component this installer set up -- the Visual C++ ' +
+        'runtime, or a file that was in use -- finishes installing at the next restart.',
+    ];
+    const openCard = async () => {
+        restartReply = { pending: true, at: Date.now(), why: WHY };
+        const done = new Promise(r => win.webContents.once('did-finish-load', r));
+        win.webContents.reload();
+        await done;
+        await new Promise(r => setTimeout(r, 900));
+        return win.webContents.executeJavaScript(RESTART_READ, true);
+    };
+
+    const rWas = restartAsks;
+    R.up = await openCard();
+    R.asked = restartAsks - rWas;
+
+    //  Later, on the card as it actually came up.
+    R.laterClick = await win.webContents.executeJavaScript(RESTART_CLICK('restart-later'), true);
+    await new Promise(r => setTimeout(r, 350));
+    R.afterLater = await win.webContents.executeJavaScript(RESTART_READ, true);
+    R.dismissed = dismissAsks;
+
+    //  Restart now, on a fresh card, against a stub that REFUSES. The buttons
+    //  have to come back and the user has to be told -- a modal whose primary
+    //  action silently did nothing is the worst outcome this card can have.
+    R.up2 = await openCard();
+    R.nowClick = await win.webContents.executeJavaScript(RESTART_CLICK('restart-now'), true);
+    await new Promise(r => setTimeout(r, 500));
+    R.afterNow = await win.webContents.executeJavaScript(RESTART_READ, true);
+    R.reboots = rebootAsks;
+
+    restartReply = { pending: false, why: [] };
+    homeAsks = homeWas; geoAsks = geoWas;
+
     //  Leave nothing behind. This window's localStorage is the same file://
     //  origin the real app uses, so a probe run that left killSwitch=true set
     //  would hand the next launch of the actual app a kill switch the user
@@ -241,7 +312,7 @@ app.whenReady().then(async () => {
     if (MODE === 'killswitch')
         await win.webContents.executeJavaScript("localStorage.removeItem('killSwitch')", true)
             .catch(() => {});
-    report(probe, shot, clicks, A);
+    report(probe, shot, clicks, A, R);
     win.destroy();
     app.exit(fail ? 1 : 0);
 }).catch(err => {
@@ -471,7 +542,68 @@ const ASK_CLICK = id => `(() => {
     out.afterMore = state();
     return out;
 })()`;
-function report(p, shot, k, a) {
+//  ── the one restart ─────────────────────────────────────────────────
+//  Read the same way ASK_READ reads the dialog: computed display, the measured
+//  box, the text that is really in the nodes, where focus went, and what a
+//  click at the middle of the globe would hit -- a card that says the setup is
+//  unfinished and then lets the globe be dragged behind it is not a decision.
+//  The toasts are read too, because the refusal path's only visible output is
+//  one, and a modal whose primary button failed in silence is the failure this
+//  probe exists to catch.
+const RESTART_READ = `(() => {
+    const m = document.getElementById('restart-modal');
+    if (!m) return { missing: true };
+    const cs  = getComputedStyle(m);
+    const box = m.querySelector('.restart-box');
+    const br  = box ? box.getBoundingClientRect() : { width: 0, height: 0 };
+    const a   = document.activeElement;
+    const gc  = document.getElementById('ultimate-globe-container');
+    const gr  = gc ? gc.getBoundingClientRect() : null;
+    const hit = gr ? document.elementFromPoint(gr.left + gr.width / 2,
+                                              gr.top + gr.height / 2) : null;
+    const btn = id => {
+        const b = document.getElementById(id);
+        if (!b) return null;
+        const lab = b.querySelector('.restart-opt-label');
+        const hint = b.querySelector('.restart-opt-hint');
+        return { type: b.type, cls: b.className, disabled: !!b.disabled,
+                 label: lab ? lab.textContent : null,
+                 hint: hint ? hint.textContent : null };
+    };
+    return {
+        open: m.classList.contains('open'),
+        display: cs.display,
+        boxW: Math.round(br.width), boxH: Math.round(br.height),
+        heading: (m.querySelector('.restart-heading h4') || {}).textContent || '',
+        why: [...document.querySelectorAll('#restart-why li')].map(li => li.textContent),
+        whyHtml: (document.getElementById('restart-why') || {}).innerHTML || '',
+        note: (m.querySelector('.restart-note') || {}).textContent || '',
+        now: btn('restart-now'), later: btn('restart-later'),
+        focus: a ? (a.id || a.tagName) : null,
+        hitCentre: hit ? (hit.id || hit.className || hit.tagName) : null,
+        hitInModal: !!(hit && m.contains(hit)),
+        toasts: [...document.querySelectorAll('#toast-container .toast')]
+                    .map(t => (t.textContent || '').slice(0, 120)),
+    };
+})()`;
+
+//  A real click, on the LABEL inside the button -- the listener is on the button
+//  itself here, so the event has to bubble out of the span the way a finger's
+//  does. Clicked twice on purpose: a second press while the first is in flight
+//  must not send a second answer.
+const RESTART_CLICK = id => `(() => {
+    const b = document.getElementById('${id}');
+    if (!b) return { found: false };
+    const lab = b.querySelector('.restart-opt-label') || b;
+    lab.click();
+    const out = { found: true,
+                  disabledAfter: [!!document.getElementById('restart-now').disabled,
+                                  !!document.getElementById('restart-later').disabled],
+                  open: document.getElementById('restart-modal').classList.contains('open') };
+    lab.click();
+    return out;
+})()`;
+function report(p, shot, k, a, r) {
     console.log('── the window loaded at all ──');
     ok(!failed, 'no load failure and no renderer crash', failed);
     ok(p.three === '147', 'three.js in the real renderer is revision 147', String(p.three));
@@ -724,6 +856,84 @@ function report(p, shot, k, a) {
            back.open + ' / ' + back.title);
         ok((back.opts || []).length === 1 && back.opts[0].id === 'stop',
            'with its option intact after the reload', JSON.stringify(back.opts));
+    }
+
+    console.log('\n── the one restart, shown only on evidence and answerable ──');
+    {
+        //  Two opposite things both have to be true here. On the machine as it
+        //  is -- nothing deferred -- the page must ASK and then show NOTHING,
+        //  because a card claiming the install is unfinished when it is not is
+        //  the one kind of lie a dialog cannot take back. And when Windows
+        //  really did defer something, the card must come up carrying the
+        //  installer's own sentences and be answerable in one click.
+        const clean = r.cleanCard || {}, up = r.up || {}, up2 = r.up2 || {};
+        const L = r.laterClick || {}, N = r.nowClick || {};
+        const afterL = r.afterLater || {}, afterN = r.afterNow || {};
+        const WHY = (r.up || {}).why || [];
+
+        ok(!clean.missing, 'the card exists in the shipped window', JSON.stringify(clean.missing));
+        ok(r.askedClean > 0, 'every load asks the main process whether a restart is pending',
+           String(r.askedClean));
+        ok(clean.open === false && clean.display === 'none' && (clean.why || []).length === 0,
+           'nothing pending -> nothing is shown and nothing is claimed',
+           clean.open + ' / ' + clean.display + ' / ' + JSON.stringify(clean.why));
+
+        ok(r.asked === 1, 'asked exactly once per load, not once per repaint', String(r.asked));
+        ok(up.open === true && up.display === 'flex',
+           'when Windows really deferred something the card comes up',
+           up.open + ' / ' + up.display);
+        ok(up.boxW > 380 && up.boxH > 200, 'with a measured box, not a zero-size node',
+           up.boxW + 'x' + up.boxH);
+        ok(up.heading === 'One restart finishes the setup',
+           'headed as ONE restart -- not a policy of restarting', up.heading);
+        ok(WHY.length === 2 && /were in use during the install/.test(WHY[0]) &&
+           /Visual C\+\+/.test(WHY[1]),
+           'listing the installer\'s own reasons, in the installer\'s order',
+           JSON.stringify(WHY));
+        ok(!/<(?!\/?li>)/.test(String(up.whyHtml)),
+           'each written as text in a plain <li> -- a reason can never inject markup',
+           String(up.whyHtml).slice(0, 120));
+        ok(/not ask again/i.test(up.note) && /never closes your browsers/i.test(up.note),
+           'and the note promises both things this design exists for',
+           up.note.replace(/\s+/g, ' ').slice(0, 110));
+        ok(up.now && up.now.type === 'button' && /primary/.test(up.now.cls) &&
+           up.now.label === 'Restart now' && up.now.disabled === false,
+           'Restart now leads, as a <button type=button>, live', JSON.stringify(up.now));
+        ok(up.later && up.later.label === 'Later' && up.later.disabled === false &&
+           !/primary|danger/.test(up.later.cls),
+           'Later is a real answer, styled as neither the recommendation nor a danger',
+           JSON.stringify(up.later));
+        ok(/next restart/i.test(String(up.later && up.later.hint)),
+           'and says what happens if it is taken', String(up.later && up.later.hint));
+        ok(up.focus === 'restart-now',
+           'focus is already on a button, so the card is answerable without a mouse',
+           String(up.focus));
+        ok(up.hitInModal === true,
+           'the card covers the globe -- a decision, not a banner', String(up.hitCentre));
+
+        ok(L.found === true, 'the Later button is really there to be clicked', JSON.stringify(L));
+        ok((L.disabledAfter || []).every(Boolean),
+           'the instant it is pressed both buttons go disabled', JSON.stringify(L.disabledAfter));
+        ok(afterL.open === false, 'the card comes off the screen', String(afterL.open));
+        ok(r.dismissed === 1,
+           'and the MAIN process was told exactly once to clear the marker -- pressed twice, ' +
+           'dismissed once', String(r.dismissed));
+        ok((afterL.toasts || []).some(t => /not ask again/i.test(t)),
+           'the user is told it will not be asked again', JSON.stringify(afterL.toasts));
+
+        ok(up2.open === true, 'a card put back for the Restart now half', String(up2.open));
+        ok(N.found === true && r.reboots === 1,
+           'Restart now reaches the main process once -- and in this probe that is a ' +
+           'counter, so nothing rebooted', N.found + ' / ' + r.reboots);
+        ok(afterN.now && afterN.now.disabled === false &&
+           afterN.now.label === 'Restart now',
+           'when Windows refuses, the button comes back rather than staying dead',
+           JSON.stringify(afterN.now));
+        ok((afterN.toasts || []).some(t => /would not start the restart/i.test(t)),
+           'and the refusal is said out loud instead of failing in silence',
+           JSON.stringify(afterN.toasts));
+        ok(afterN.open === false,
+           'the card closes either way -- it is asked once and never nags', String(afterN.open));
     }
 
     console.log('\n── what the page printed ──');

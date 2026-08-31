@@ -325,11 +325,19 @@ console.log('\n── the only thing still leaving the machine, and why ──')
     //  and called it clean. Comments stripped first, for the same reason the
     //  renderer scan strips them -- globe-controller.js still carries a note
     //  saying which host it used to talk to and why it no longer does.
+    //
+    //  XML namespace declarations are stripped too, and only those: an xmlns is
+    //  a name, not an address. Nothing resolves it and nothing fetches it. The
+    //  Task Scheduler XML lib/installer-tasks.js writes has to carry
+    //  schemas.microsoft.com/windows/2004/02/mit/task verbatim or schtasks
+    //  rejects the file, and reading that as an outbound request would leave
+    //  this check permanently red -- which is how a check stops being read.
     const SCAN = ['main.js', 'renderer.js', 'globe-controller.js',
                   'lib/installer-tasks.js', 'lib/home-location.js', 'lib/socks-fetch.js'];
     const hits = [];
     for (const f of SCAN)
         for (const m of read(f).replace(/^\s*\/\/.*$/gm, '')
+                               .replace(/xmlns(:[\w.-]+)?=\\?"[^"\\]*\\?"/g, 'xmlns=""')
                                .matchAll(/['"`]https?:\/\/([^/'"`\s$]+)/g))
             hits.push({ f, host: m[1] });
 

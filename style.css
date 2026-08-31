@@ -604,6 +604,107 @@ input:checked + .slider::before { transform: translateX(16px); }
     .ask-dots i { animation: none; opacity: 0.7; }
 }
 
+/* ── The one restart ─────────────────────────────────────────
+   Same #0f1117 shell as the log modal and the ask dialog, because it is the
+   same program talking -- but amber rather than violet, since this is the one
+   card in the app that reports something Windows deferred rather than
+   something the app is doing.
+
+   Shown at most once per install, and only on real evidence from Windows.
+   Everything about it is deliberately calm: nothing is broken, the tunnel
+   already works, and this is the ONLY interruption the app is allowed -- it
+   replaced closing the user's browsers on every connect and country switch. */
+#restart-modal {
+    display: none;
+    position: fixed; inset: 0; z-index: 99999;
+    background: rgba(0,0,0,0.62); backdrop-filter: blur(4px);
+    align-items: center; justify-content: center; padding: 22px;
+}
+#restart-modal.open { display: flex; }
+
+.restart-box {
+    background: #0f1117; border-radius: 14px;
+    width: 540px; max-width: 94vw; max-height: 88vh; overflow-y: auto;
+    border: 1px solid rgba(245,158,11,0.30);
+    box-shadow: 0 22px 64px rgba(0,0,0,0.62);
+    padding: 17px 17px 14px;
+    animation: ask-in 0.22s cubic-bezier(0.16,1,0.3,1) both;
+    scrollbar-width: thin; scrollbar-color: #334155 transparent;
+}
+
+.restart-head { display: flex; gap: 12px; align-items: flex-start; }
+/*  One slow rotation, not a spinner: nothing is in progress here, the glyph
+    only says which kind of card this is.  */
+.restart-glyph {
+    flex: none; margin-top: 1px;
+    width: 30px; height: 30px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(245,158,11,0.13); border: 1px solid rgba(245,158,11,0.32);
+    color: #fbbf24; font-size: 0.95rem; line-height: 1;
+    animation: restart-turn 9s linear infinite;
+}
+@keyframes restart-turn { to { transform: rotate(360deg); } }
+.restart-heading { flex: 1; min-width: 0; }
+.restart-heading h4 {
+    margin: 0 0 5px; font-size: 0.95rem; font-weight: 700; color: #e9edf6;
+    line-height: 1.35;
+}
+.restart-heading p {
+    margin: 0; font-size: 0.76rem; line-height: 1.6; color: #94a3b8;
+}
+
+/*  The installer's own words for what Windows put off. renderer.js writes
+    these in with textContent -- they are read back out of a file, so they are
+    never treated as markup.  */
+.restart-why {
+    list-style: none; margin: 12px 0 0; padding: 9px 11px;
+    background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.26);
+    border-left: 3px solid #f59e0b; border-radius: 8px;
+}
+.restart-why li {
+    font-size: 0.72rem; line-height: 1.6; color: #fcd9a0;
+    padding-left: 13px; position: relative;
+}
+.restart-why li + li { margin-top: 6px; }
+.restart-why li::before {
+    content: '›'; position: absolute; left: 0; top: 0; color: #f59e0b;
+}
+
+.restart-note {
+    margin: 11px 0 0; font-size: 0.72rem; line-height: 1.6; color: #7d8aa5;
+}
+
+.restart-options { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.restart-opt {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: rgba(255,255,255,0.035); border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 11px; padding: 10px 12px; font-family: inherit;
+    transition: background 0.16s, border-color 0.16s, transform 0.16s;
+}
+.restart-opt:hover:not(:disabled) {
+    background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.5);
+    transform: translateY(-1px);
+}
+.restart-opt:focus-visible { outline: 2px solid #f59e0b; outline-offset: 2px; }
+.restart-opt:disabled { opacity: 0.45; cursor: default; transform: none; }
+.restart-opt .restart-opt-label {
+    display: block; font-size: 0.8rem; font-weight: 650; color: #e9edf6;
+    line-height: 1.4;
+}
+.restart-opt .restart-opt-hint {
+    display: block; margin-top: 3px; font-size: 0.7rem; line-height: 1.5;
+    color: #7d8aa5;
+}
+.restart-opt.primary {
+    background: rgba(245,158,11,0.16); border-color: rgba(245,158,11,0.40);
+}
+.restart-opt.primary .restart-opt-label { color: #fcd34d; }
+
+@media (prefers-reduced-motion: reduce) {
+    .restart-box { animation: none; }
+    .restart-glyph { animation: none; }
+}
+
 /* ── Scrollbar global ─────────────────────────────────────── */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-thumb { background: #d0d5e8; border-radius: 5px; }

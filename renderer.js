@@ -208,34 +208,171 @@ ipcRenderer.on('geo-spoof-off', () => {
 });
 
 // ── One-time browser setup ──────────────────────────────────
-//  Chrome and Brave refuse every automatic extension-install route an app
-//  has on Windows: Chrome ignores --load-extension outright, and both drop
-//  a self-hosted force-install entry during policy validation. So those
-//  two need one manual "Load unpacked" -- the same reason every commercial
-//  VPN ships its browser extension through the Chrome Web Store.
+//  Two different one-time asks, and they must not be worded the same way.
 //
-//  Saying nothing would leave the user looking at a map with the wrong
-//  city and no way to know why, so it is surfaced here and not only in the
-//  log. Shown once per app run, and only while the extension is genuinely
-//  absent -- main.js re-checks on every connect, so it stops appearing by
-//  itself once the folder has been loaded.
+//  MEASURED: with the app's delivery helper serving the package the browser
+//  policies name, Edge installs the spoofer by itself and runs it. Chrome and
+//  Brave DOWNLOAD and unpack the same package unattended, then keep it switched
+//  off -- Chromium disables anything an installer offered until the user
+//  accepts it once (disable_reasons 8192, EXTERNAL_EXTENSION), and the record
+//  holding that bit is signed with the profile's own key, so nothing the app
+//  writes can flip it. That is one switch, not a setup.
+//
+//  Only if delivery never happened at all is the old "Load unpacked" route the
+//  answer, so that text is now the fallback rather than the headline.
+//
+//  Saying nothing would leave the user looking at a map with the wrong city
+//  and no way to know why, so it is surfaced here and not only in the log.
+//  Shown once per app run, and only while the extension is genuinely not
+//  running -- main.js re-checks on every connect, so it stops appearing by
+//  itself once the switch is on.
 let _geoExtNoticeFor = null;
 function openGeoExtFolder() {
     ipcRenderer.invoke('open-geo-ext-folder').catch(() => {});
 }
-ipcRenderer.on('geo-ext-setup', (event, { browsers, auto, dir }) => {
-    const who = (browsers || []).join(' and ');
-    if (!who || _geoExtNoticeFor === who) return;
-    _geoExtNoticeFor = who;
-    showToast(
-        `📍 <strong>${who}</strong>: one-time setup needed before location spoofing works there.<br>` +
-        '<a href="#" class="toast-action" data-action="open-geo-ext-folder" ' +
-        'style="color:inherit;text-decoration:underline;cursor:pointer">' +
-        'Open the setup folder</a> and follow HOW-TO-ENABLE.txt. ' +
-        ((auto || []).length ? `This app and ${auto.join(' and ')} are already covered.` : 'This app itself is already covered.'),
-        'info', 30000);
-    console.log('[FreeProxy] location spoofer needs a manual load in ' + who + ' -- ' + dir);
+ipcRenderer.on('geo-ext-setup', (event, { browsers, enable, restart, auto, dir }) => {
+    const manualWho  = (browsers || []).join(' and ');
+    const enableWho  = (enable || []).join(' and ');
+    const restartWho = (restart || []).join(' and ');
+    const key = `enable:${enableWho}|restart:${restartWho}|manual:${manualWho}`;
+    if ((!manualWho && !enableWho && !restartWho) || _geoExtNoticeFor === key) return;
+    _geoExtNoticeFor = key;
+
+    const covered = (auto || []).length
+        ? `This app and ${auto.join(' and ')} are already covered.`
+        : 'This app itself is already covered.';
+    const folder = '<a href="#" class="toast-action" data-action="open-geo-ext-folder" ' +
+                   'style="color:inherit;text-decoration:underline;cursor:pointer">' +
+                   'Open the setup folder</a>';
+
+    //  The one-click case leads, because it is the one that will actually be
+    //  showing: the download already succeeded and the wording must not send
+    //  the user hunting for a folder they do not need.
+    if (enableWho) {
+        showToast(
+            `📍 <strong>${enableWho}</strong>: the location spoofer is already downloaded ` +
+            'there — it just needs its switch turned ON, once.<br>' +
+            'Open the extensions page in that browser, find "FreeProxy VPN Extension" ' +
+            `and enable it. ${covered}`,
+            'info', 30000);
+        console.log('[FreeProxy] location spoofer is installed but disabled in ' +
+                    enableWho + ' -- one switch on the extensions page');
+    }
+    //  No folder link here, deliberately. This browser is already set up; it was
+    //  simply open when that happened, and a browser picks the entry offering it
+    //  an extension up at its next start, or on its own within about two hours.
+    //  Offering "Open the setup folder" would be inviting work it does by itself.
+    if (restartWho) {
+        showToast(
+            `📍 <strong>${restartWho}</strong>: already set up — close and reopen ` +
+            `${(restart || []).length > 1 ? 'them' : 'it'} to have the location spoofer ` +
+            'now.<br>' +
+            'It was open while this app registered the extension. Reopening brings it ' +
+            `straight away; left alone it arrives within about two hours. ${covered}`,
+            'info', 30000);
+        console.log('[FreeProxy] location spoofer is armed for ' + restartWho +
+                    " -- it arrives at that browser's next start, or within ~2 h");
+    }
+    if (manualWho) {
+        showToast(
+            `📍 <strong>${manualWho}</strong>: one-time setup needed before location spoofing works there.<br>` +
+            `${folder} and follow HOW-TO-ENABLE.txt. ${covered}`,
+            'info', 30000);
+        console.log('[FreeProxy] location spoofer needs a manual load in ' + manualWho + ' -- ' + dir);
+    }
 });
+
+// ── The one restart ────────────────────────────────────────
+//  This card is the whole reason the app stopped closing browsers. Every job
+//  that genuinely needs a restart happens at INSTALL time; if Windows deferred
+//  any part of it to the next boot, the user is told once, here, and then never
+//  interrupted again -- which is how IDM and the commercial VPNs handle it.
+//
+//  Nothing on this card is decided in the renderer:
+//
+//   * Whether to show it at all comes from main.js's pendingRestart(), which
+//     reads a marker lib/installer-tasks.js writes ONLY on evidence from
+//     Windows (a pending file rename naming our own files, exit code 3010 from
+//     the bundled VC++ runtime, NSIS's reboot flag). A clean install defers
+//     nothing, so this card normally never appears.
+//   * The reason lines are the installer's own strings, written in with
+//     textContent -- they come out of a file, so they are never markup.
+//
+//  Asked once per launch, on load, and not again: a card that appeared while
+//  the user was mid-connect would be the interruption being removed. "Later"
+//  clears the marker for good -- what Windows deferred still completes at
+//  whatever restart happens next, which is the user's business, not the app's.
+//
+//  `restartDecided` is the same latch #ask-options relies on (askShownId), and
+//  for the same reason: the click arrives on the <span> INSIDE the button, and a
+//  disabled ancestor does not stop a dispatched click from bubbling past it. So
+//  `disabled` is what the user sees, and this flag is what actually makes the
+//  answer happen once -- two presses must not ask Windows to reboot twice.
+let restartDecided = false;
+
+function closeRestartCard() {
+    document.getElementById('restart-modal')?.classList.remove('open');
+}
+
+async function checkPendingRestart() {
+    const modal = document.getElementById('restart-modal');
+    const list  = document.getElementById('restart-why');
+    const now   = document.getElementById('restart-now');
+    const later = document.getElementById('restart-later');
+    if (!modal || !list || !now || !later) return;
+
+    let info;
+    try { info = await ipcRenderer.invoke('get-pending-restart'); }
+    catch (e) { return; }
+    if (!info || !info.pending || !Array.isArray(info.why) || !info.why.length) return;
+
+    list.textContent = '';
+    info.why.forEach(line => {
+        const li = document.createElement('li');
+        li.textContent = String(line);
+        list.appendChild(li);
+    });
+
+    restartDecided = false;
+    now.addEventListener('click', () => {
+        if (restartDecided) return;
+        restartDecided = true;
+        now.disabled = later.disabled = true;
+        now.querySelector('.restart-opt-label').textContent = 'Restarting…';
+        ipcRenderer.invoke('restart-windows').then(r => {
+            //  Windows refused or the call failed: the card has to give the
+            //  buttons back rather than sit there looking like it worked, and
+            //  the latch has to come off with them or Later would be dead too.
+            if (r && r.ok) return;
+            restartDecided = false;
+            now.disabled = later.disabled = false;
+            now.querySelector('.restart-opt-label').textContent = 'Restart now';
+            showToast('⚠️ Windows would not start the restart. You can restart from the ' +
+                      'Start menu whenever it suits you — nothing else is waiting.',
+                      'warning', 9000);
+            closeRestartCard();
+        }).catch(() => {
+            restartDecided = false;
+            now.disabled = later.disabled = false;
+        });
+    }, { once: false });
+
+    later.addEventListener('click', () => {
+        if (restartDecided) return;
+        restartDecided = true;
+        now.disabled = later.disabled = true;
+        ipcRenderer.invoke('dismiss-pending-restart').catch(() => {});
+        closeRestartCard();
+        showToast('👍 Noted — it finishes at your next restart. This app will not ask again.',
+                  'info', 6000);
+    });
+
+    modal.classList.add('open');
+    now.focus();
+    console.log('[FreeProxy] one restart is pending: ' + info.why.join(' | '));
+}
+
+document.addEventListener('DOMContentLoaded', () => { checkPendingRestart(); });
 
 // ════════════════════════════════════════════════════════════
 //  ⏱ CONNECTION TIMER

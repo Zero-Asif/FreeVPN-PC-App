@@ -40,6 +40,95 @@ let globalState = { connected: false, server: 'us', killSwitch: false, bypassLis
                     appRunning: false, busy: false, progress: null, ask: null };
 
 
+// ── "A new extension was installed" -- the announcement ─────────────
+//  WHY THIS IS HERE AT ALL
+//  This extension does not arrive from a store. The desktop app's installer
+//  writes an ExtensionInstallForcelist policy, and the browser picks it up on
+//  its next start -- so without this block the user's browser simply grows an
+//  extension one day with nobody saying so. That is exactly the moment IDM
+//  puts its "integration module was added" page on screen, and it is the
+//  behaviour being copied here.
+//
+//  TIMING. A policy-installed extension is installed by the browser during
+//  startup, so onInstalled fires while the browser is opening -- which is why
+//  the user sees this "the moment they open the browser" rather than at some
+//  later point of our choosing. Nothing is scheduled or delayed.
+//
+//  ONCE, EVER, PER PROFILE. The flag lives in chrome.storage.local, not in a
+//  variable: a service worker is torn down after ~30 s idle, so anything held
+//  in memory would re-announce on the next wake. It also covers the case that
+//  would otherwise be intolerable -- Brave and Edge are given this extension
+//  with --load-extension in some setups, and that re-runs the install every
+//  single browser start, so an unguarded onInstalled would open a tab every
+//  morning forever.
+//
+//  WHAT IT DOES NOT DO. It does not claim the VPN is on. welcome.html asks
+//  background.js for the live state and says "not running" when that is the
+//  truth; see welcome.js.
+const WELCOME_PAGE = 'welcome.html';
+const WELCOME_FLAG = 'welcomeShownAt';
+
+function badgeNew() {
+    //  The badge is the part that survives the user closing the tab straight
+    //  away: something on the toolbar still says "there is something new
+    //  here". welcome.js clears it via WELCOME_SEEN.
+    try {
+        chrome.action.setBadgeText({ text: 'NEW' });
+        chrome.action.setBadgeBackgroundColor({ color: '#7c3aed' });
+    } catch (e) {}
+}
+
+function clearBadge() {
+    try { chrome.action.setBadgeText({ text: '' }); } catch (e) {}
+}
+
+function notifyInstalled() {
+    //  Best-effort: notifications can be switched off for the whole browser,
+    //  and on Windows they can be suppressed by Focus Assist. The tab and the
+    //  badge are the parts that do not depend on that, so a failure here is
+    //  swallowed rather than retried.
+    try {
+        chrome.notifications.create('fp-installed', {
+            type: 'basic',
+            iconUrl: chrome.runtime.getURL('icon.png'),
+            title: 'FreeProxy VPN extension installed',
+            message: 'This browser can now be routed through FreeProxy VPN, and ' +
+                     'websites will be told the country you connect to instead of ' +
+                     'your real location.',
+            priority: 2,
+        }, () => void chrome.runtime.lastError);
+    } catch (e) {}
+}
+
+//  Opened active on purpose. A tab that appears behind the ones being restored
+//  is a tab nobody reads, and the whole point is that the user is TOLD.
+function announceOnce(force) {
+    chrome.storage.local.get([WELCOME_FLAG], got => {
+        if (!force && got && got[WELCOME_FLAG]) return;
+        chrome.storage.local.set({ [WELCOME_FLAG]: new Date().toISOString() });
+        badgeNew();
+        notifyInstalled();
+        try {
+            chrome.tabs.create({ url: chrome.runtime.getURL(WELCOME_PAGE), active: true });
+        } catch (e) {}
+    });
+}
+
+chrome.runtime.onInstalled.addListener(details => {
+    //  'install' is a first install into this profile. 'update' is a version
+    //  bump -- lib/geo-ext.js bumps the 4th version component whenever the
+    //  packaged files really change, so an update happens on ordinary app
+    //  upgrades and must NOT re-announce; it is not news to the user.
+    if (details && details.reason === 'install') announceOnce(false);
+});
+
+//  The safety net for a first install the user could not have seen: the
+//  browser installed the extension, the worker was torn down before the tab
+//  could be created (a slow startup, a profile that opens with twenty tabs),
+//  or the policy landed while a browser window was closing. The flag makes
+//  this a no-op in every normal case.
+chrome.runtime.onStartup.addListener(() => announceOnce(false));
+
 // ── Proxy ───────────────────────────────────────────────────────────
 function setBrowserProxy(enabled, bypassList) {
     if (!enabled) {
@@ -254,6 +343,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     //  the popup: they would sit in front of "app not running" for up to half
     //  a minute. An open popup is a reason to retry now.
     if (msg.type === "WAKE") {
+        //  Either surface that sends WAKE -- the popup or welcome.html -- is a
+        //  surface the user is looking at, so the unread marker has served its
+        //  purpose. Idempotent, which is why it can sit in a 1.2 s poll.
+        clearBadge();
         const dead = !socket || socket.readyState === WebSocket.CLOSING ||
                      socket.readyState === WebSocket.CLOSED;
         if (dead) {
@@ -262,6 +355,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             connectToDesktop();
         }
         sendResponse({ state: globalState });
+        return true;
+    }
+    //  welcome.html has been read, so the unread marker comes off. Kept in the
+    //  worker rather than done from the page because chrome.action belongs to
+    //  the extension, not to a tab, and the page may be closed a frame later.
+    if (msg.type === "WELCOME_SEEN") {
+        clearBadge();
+        sendResponse({ ok: true });
         return true;
     }
     if (msg.type === "SEND_COMMAND") {

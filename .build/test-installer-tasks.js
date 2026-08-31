@@ -29,7 +29,7 @@ const crypto = require('crypto');
 const { execSync } = require('child_process');
 
 const tasks = require('../lib/installer-tasks');
-const { POLICY_KEYS, FORCELIST } = require('../lib/geo-ext');
+const { POLICY_KEYS, FORCELIST, ALLOWLIST, EXT_SETTINGS, regWriteSz } = require('../lib/geo-ext');
 const { FW_RULE } = require('../lib/geo-spoof');
 
 const TEST_ROOT = 'HKCU\\SOFTWARE\\FreeProxyTasksTest';
@@ -149,6 +149,121 @@ console.log('\n── sweepForcelists(): nothing there ──');
     ok(n === 0, 'absent keys are not an error', String(n));
 }
 
+console.log('\n── ourLoopbackIds(): what may be called ours, and what may not ──');
+//  Route 4 is the reason this exists. An ExtensionInstallAllowlist slot holds a
+//  BARE id -- no update_url, no path, nothing in its shape that says who wrote
+//  it -- so a workplace allowing one extension by id writes a byte-identical
+//  value. The only honest proof is that the SAME id is served from this
+//  machine's own loopback somewhere else, and these two functions are that
+//  proof and the sweep that acts on it.
+const OUR_ID = OURS.split(';')[0];
+const FOREIGN_ID = FOREIGN.split(';')[0];
+const ALIEN_ID = 'mmhnilciaeffiogonfcmcgcilkdliobc';   // our exact shape, served nowhere
+const AKEY = POLICY_KEYS.edge + '\\' + ALLOWLIST;
+{
+    sh(`reg delete "${TEST_ROOT}" /f`);
+    sh(`reg add "${KEY}" /v "1" /t REG_SZ /d "${FOREIGN}" /f`);
+    let proven = tasks.ourLoopbackIds();
+    ok(!proven.has(FOREIGN_ID), 'a Web-Store-served id is not proof of anything of ours',
+       JSON.stringify([...proven]));
+
+    sh(`reg add "${KEY}" /v "2" /t REG_SZ /d "${OURS}" /f`);
+    proven = tasks.ourLoopbackIds();
+    ok(proven.has(OUR_ID), 'route 1: a loopback-served forcelist entry proves the id');
+    ok(!proven.has(ALIEN_ID), 'an id of our shape that nothing here serves is not proved');
+
+    //  Route 2, on its own: the forcelist slot removed, the dictionary left.
+    sh(`reg delete "${KEY}" /v "2" /f`);
+    regWriteSz(POLICY_KEYS.edge, EXT_SETTINGS, JSON.stringify({
+        [OUR_ID]: { installation_mode: 'force_installed',
+                    update_url: 'http://127.0.0.1:8081/updates.xml' },
+        [ALIEN_ID]: { installation_mode: 'force_installed',
+                      update_url: 'https://clients2.google.com/service/update2/crx' },
+    }));
+    proven = tasks.ourLoopbackIds();
+    ok(proven.has(OUR_ID), 'route 2: a loopback update_url in ExtensionSettings proves it too');
+    ok(!proven.has(ALIEN_ID),
+       'and the store-served id sitting beside it in the same dictionary is not ours');
+    sh(`reg delete "${POLICY_KEYS.edge}" /v ${EXT_SETTINGS} /f`);
+
+    ok(tasks.ourLoopbackIds({ alsoId: STORE_ID }).has(STORE_ID),
+       'a configured Web Store id is ours by definition');
+}
+
+console.log('\n── sweepAllowlist(): only what is proved, only if we emptied it ──');
+{
+    sh(`reg delete "${TEST_ROOT}" /f`);
+    sh(`reg add "${KEY}" /v "1" /t REG_SZ /d "${OURS}" /f`);       // the proof
+    sh(`reg add "${AKEY}" /v "1" /t REG_SZ /d "${OUR_ID}" /f`);
+    sh(`reg add "${AKEY}" /v "2" /t REG_SZ /d "${FOREIGN_ID}" /f`);
+    sh(`reg add "${AKEY}" /v "3" /t REG_SZ /d "${ALIEN_ID}" /f`);
+
+    const n = tasks.sweepAllowlist(log, tasks.ourLoopbackIds());
+    const v = values(AKEY);
+    ok(n === 1, 'exactly one slot removed', String(n));
+    ok(v && v['1'] === undefined, 'the proved id is gone');
+    ok(v && v['2'] === FOREIGN_ID, "a workplace's allowed id survives", JSON.stringify(v));
+    ok(v && v['3'] === ALIEN_ID,
+       'an id of our exact shape that this machine serves NOWHERE survives too',
+       JSON.stringify(v));
+    ok(values(AKEY) !== null, 'and a subkey with entries left in it is kept');
+
+    ok(tasks.sweepAllowlist(log, new Set()) === 0, 'no proof, no deletions');
+    ok(tasks.sweepAllowlist(log, undefined) === 0, 'and a missing proof set is not an error');
+}
+
+console.log('\n── sweepAllowlist(): the subkey, and the (Default) artifact ──');
+{
+    sh(`reg delete "${TEST_ROOT}" /f`);
+    sh(`reg add "${KEY}" /v "1" /t REG_SZ /d "${OURS}" /f`);
+    //  Key-only `reg add` on purpose: it leaves a (Default) value behind, and
+    //  counting that as an occupant is what makes the subkey immortal.
+    sh(`reg add "${AKEY}" /f`);
+    sh(`reg add "${AKEY}" /v "1" /t REG_SZ /d "${OUR_ID}" /f`);
+    const n = tasks.sweepAllowlist(log, tasks.ourLoopbackIds());
+    ok(n === 1, 'our only allowlist slot removed', String(n));
+    ok(values(AKEY) === null, 'the emptied subkey is deleted despite (Default)');
+    ok(values(POLICY_KEYS.edge) !== null, 'the policy key above it is left alone');
+}
+
+console.log('\n── sweepForcelists() end to end: the proof is read before it is destroyed ──');
+{
+    //  The ordering bug this guards: sweepForcelists() deletes the loopback
+    //  forcelist entry, which is the ONLY thing that proves which allowlist id
+    //  is ours. Gather afterwards and route 4 is unsweepable forever.
+    sh(`reg delete "${TEST_ROOT}" /f`);
+    sh(`reg add "${KEY}" /v "1" /t REG_SZ /d "${OURS}" /f`);
+    sh(`reg add "${KEY}" /v "2" /t REG_SZ /d "${FOREIGN}" /f`);
+    sh(`reg add "${AKEY}" /v "1" /t REG_SZ /d "${OUR_ID}" /f`);
+    sh(`reg add "${AKEY}" /v "2" /t REG_SZ /d "${FOREIGN_ID}" /f`);
+    warns.length = 0;
+    const n = tasks.sweepForcelists(log);
+    ok(n === 2, 'the return count carries both halves -- forcelist slot and allowlist slot',
+       String(n));
+    ok((values(KEY) || {})['1'] === undefined, 'our forcelist entry is gone');
+    ok((values(AKEY) || {})['1'] === undefined,
+       'and so is our allowlist entry, proved by the entry that was just deleted',
+       JSON.stringify(values(AKEY)));
+    ok((values(KEY) || {})['2'] === FOREIGN, 'the workplace forcelist entry survives');
+    ok((values(AKEY) || {})['2'] === FOREIGN_ID, 'the workplace allowlist entry survives',
+       JSON.stringify(values(AKEY)));
+}
+
+console.log('\n── legacyOnly must leave route 4 alone at setup time ──');
+{
+    //  Setup runs the sweep and then install() writes a fresh entry. Taking the
+    //  allowlist permission away here would strip the browser's licence to keep
+    //  an extension it is about to be handed again.
+    sh(`reg delete "${TEST_ROOT}" /f`);
+    sh(`reg add "${KEY}" /v "1" /t REG_SZ /d "${OURS}" /f`);
+    sh(`reg add "${AKEY}" /v "1" /t REG_SZ /d "${OUR_ID}" /f`);
+    tasks.sweepForcelists(log, { legacyOnly: true });
+    ok((values(AKEY) || {})['1'] === OUR_ID, 'our allowlist entry is still there',
+       JSON.stringify(values(AKEY)));
+    ok((values(KEY) || {})['1'] === OURS, 'and so is the entry install() will overwrite');
+    sh(`reg delete "${TEST_ROOT}" /f`);
+}
+
 console.log('\n── sweepTemp(): real files in the real TEMP ──');
 {
     const names = ['vpn_elevate.ps1', 'vc_redist.x64.exe', 'fp_uninstall_net.bat'];
@@ -190,8 +305,42 @@ console.log('\n── the two sweeps that reconfigure the machine: source level 
     const srcText = fs.readFileSync(path.join(__dirname, '..', 'lib', 'installer-tasks.js'), 'utf8');
     ok(tasks.FW_RULES.includes(FW_RULE),
        'FW_RULES carries the lfsvc shield rule name from lib/geo-spoof.js');
-    ok(tasks.FW_RULES.length === 5, 'all five rules the app can create are listed',
-       JSON.stringify(tasks.FW_RULES));
+    //  A COUNT WAS THE WRONG ASSERTION. This read `=== 5` and went red the day
+    //  a sixth rule was added correctly -- a test that has to be edited every
+    //  time the code improves teaches people to edit the test. What actually
+    //  matters is the property: every rule name this project CREATES anywhere
+    //  is listed here, because a rule that is created and not listed stays in
+    //  the firewall after uninstall forever.
+    {
+        const roots = ['main.js', 'installer.nsh', path.join('lib', 'geo-spoof.js'),
+                       path.join('lib', 'installer-tasks.js'), path.join('lib', 'geo-ext.js')];
+        const created = new Set();
+        for (const rel of roots) {
+            const f = path.join(__dirname, '..', rel);
+            if (!fs.existsSync(f)) continue;
+            const text = fs.readFileSync(f, 'utf8');
+            //  `netsh advfirewall firewall add rule name="FreeProxy ..."` in any
+            //  quoting style this project uses, including the escaped-quote form
+            //  installer.nsh needs.
+            const re = /add\s+rule\s+name=\\?["']([^"'\\]+)\\?["']/gi;
+            let m;
+            while ((m = re.exec(text))) created.add(m[1]);
+            //  A name can be a template hole -- `name="${DNS_LOCK_RULES.dns}"`.
+            //  The hole itself proves nothing, so it is replaced by what the
+            //  table behind it actually holds; that IS the created name, and it
+            //  is the thing that has to be in FW_RULES.
+            const tbl = /^\s*(?:dns|dot|[a-z0-9_]+):\s*'(FreeProxy [^']+)'/gim;
+            while ((m = tbl.exec(text))) created.add(m[1]);
+        }
+        for (const n of [...created]) if (n.includes('${')) created.delete(n);
+        ok(created.size > 0, 'the sweep test found the rules this project creates',
+           JSON.stringify([...created]));
+        const missing = [...created].filter(n => !tasks.FW_RULES.includes(n));
+        ok(missing.length === 0,
+           'every firewall rule this project creates is listed in FW_RULES',
+           missing.length ? 'not listed: ' + JSON.stringify(missing)
+                          : JSON.stringify(tasks.FW_RULES));
+    }
     for (const r of tasks.FW_RULES) {
         ok(srcText.includes(`delete rule name="${r}"`) ||
            srcText.includes('FW_RULES.map') || srcText.includes('of FW_RULES'),

@@ -87,12 +87,15 @@ console.log('\n── static: the fake force-install is gone ──');
 {
     //  The whole reason this file was rewritten. The id may appear only as
     //  prose in the header and as the signature the sweep MATCHES ON -- never
-    //  as something written to a forcelist.
+    //  as something written to a forcelist. The signature is now built in two
+    //  steps in the generated PowerShell ($fid, then $fake = $fid + ';'), so
+    //  both halves of that assignment are the allowed form.
     const fake = tasks.LEGACY_FAKE_ID;
     const hits = lines
         .map((l, i) => [i + 1, l])
         .filter(([, l]) => l.includes(fake))
-        .filter(([, l]) => !/^\s*;/.test(l) && !/\$\$fake\s*=/.test(l));
+        .filter(([, l]) => !/^\s*;/.test(l) &&
+                           !/\$\$fake\s*=/.test(l) && !/\$\$fid\s*=/.test(l));
     ok(!hits.length, 'legacy id appears only in comments and in the match signature',
        JSON.stringify(hits));
     ok(!/WriteRegStr[^\n]*ExtensionInstallForcelist/i.test(src),
@@ -104,8 +107,13 @@ console.log('\n── static: the fake force-install is gone ──');
 }
 
 console.log('\n── static: the exe does the real work ──');
-ok(/ExecWait '"\$INSTDIR\\FreeProxy VPN\.exe" --fp-setup' \$0/.test(src),
-   'customInstall runs --fp-setup and captures the exit code');
+//  $4 rather than nothing after the flag: customInstall appends Windows' own
+//  pending-reboot verdict (` --fp-reboot-pending`) so --fp-setup can decide
+//  whether to leave a restart marker. .build/test-restart-marker.js owns that
+//  behaviour; what matters here is that the exe is what runs, and that $0
+//  catches its exit code so the installer can branch on it.
+ok(/ExecWait '"\$INSTDIR\\FreeProxy VPN\.exe" --fp-setup\$4' \$0/.test(src),
+   'customInstall runs --fp-setup (with the reboot flag) and captures the exit code');
 ok(/ExecWait '"\$INSTDIR\\FreeProxy VPN\.exe" --fp-teardown' \$0/.test(src),
    'customUnInstall runs --fp-teardown and captures the exit code');
 ok(/\$\{If\} \$\{FileExists\} "\$INSTDIR\\FreeProxy VPN\.exe"/.test(src),
@@ -150,8 +158,27 @@ ok(/RMDir \/r "C:\\ProgramData\\freeproxy-vpn"/.test(src),
    'the real state directory is deleted (userData override in main.js)');
 ok(/RMDir \/r "\$LOCALAPPDATA\\FreeProxy VPN"/.test(src),
    'the log/Tor tree is deleted');
-ok(!/MB_YESNO/.test(src),
-   'no "keep your data?" prompt -- deleting what it created was the requirement');
+//  The requirement was "delete what you created", so there must be no prompt
+//  offering to KEEP any of it. It is not a ban on MB_YESNO as such: the
+//  uninstaller now asks one question, and it asks it only on exit code 11 --
+//  restart to finish evicting the extension from browsers that are open. So the
+//  test is what each MB_YESNO is ABOUT, which is what the requirement was about.
+{
+    //  Real statements only -- two of the MB_YESNO mentions in this file are
+    //  comments explaining why the one question is asked the way it is.
+    const asks = (src.match(/MessageBox\s+MB_YESNO[\s\S]{0,1500}?IDNO/g) || [])
+        .map(s => s.replace(/\$\\r|\$\\n/g, ' '));
+    const keepish = asks.filter(a => /\b(keep|retain|preserve)\b/i.test(a) ||
+                                     /remove all|your data|settings\?/i.test(a));
+    ok(keepish.length === 0,
+       'no "keep your data?" prompt -- deleting what it created was the requirement',
+       keepish.join(' || ').slice(0, 200));
+    ok(asks.length === 1 && /Restart this PC now/.test(asks[0]),
+       'the one question it does ask is the restart that finishes the revert',
+       `${asks.length} MB_YESNO statement(s)`);
+    ok(/\$\{IfNot\} \$\{Silent\}[\s\S]{0,120}\$5 == 11/.test(src),
+       'and it is asked only when teardown really found a browser open, never in /S');
+}
 ok(/taskkill \/F \/IM "FreeProxy VPN\.exe"/.test(src) &&
    src.indexOf('taskkill /F /IM "FreeProxy VPN.exe"') < src.indexOf('taskkill /F /IM tor.exe'),
    'the app is killed before tor.exe, so it cannot rewrite the proxy on the way out');
@@ -233,7 +260,12 @@ ok(values(EDGE) && Object.keys(values(EDGE)).length === 3, 'hive staged: 3 Edge 
 ok(values(WIN) && values(WIN).ProxySettings === 'keep-me', 'hive staged: Windows branch');
 
 {
-    const sweepSrc = scripts.sweep.replace("'HKLM:\\Software\\Policies'", `'${PS_ROOT}'`);
+    //  EVERY occurrence, not the first: the sweep walks that root more than once
+    //  now (one pass per policy shape), and a single .replace() left the second
+    //  loop pointed at the real hive -- which the guard below caught, correctly,
+    //  by refusing to run at all.
+    const ROOT = "'HKLM:\\Software\\Policies'";
+    const sweepSrc = scripts.sweep.split(ROOT).join(`'${PS_ROOT}'`);
     //  Hard stop, not a failed assertion: running the real thing against real
     //  policy would be the exact outage this test exists to prevent.
     if (sweepSrc === scripts.sweep || /HKLM/i.test(sweepSrc)) {
@@ -241,6 +273,8 @@ ok(values(WIN) && values(WIN).ProxySettings === 'keep-me', 'hive staged: Windows
         sh(`reg delete "${TEST_HIVE}" /f`);
         process.exit(3);
     }
+    ok(scripts.sweep.split(ROOT).length - 1 >= 1,
+       `every walk of the policy root was redirected (${scripts.sweep.split(ROOT).length - 1})`);
     const f = path.join(TMP, 'sweep-sandboxed.ps1');
     fs.writeFileSync(f, sweepSrc, 'utf8');
     const out = sh(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${f}"`);

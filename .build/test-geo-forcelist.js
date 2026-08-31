@@ -152,7 +152,36 @@ const USER_2 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://clients2.google.com/ser
     ok(values(KEY)['1'] === USER_2, 'foreign entry survives the startup sweep too',
        JSON.stringify(values(KEY)));
 
-    ext.host.stop();
+    console.log('── route 4: the allowlist, written and reverted by the journal ──');
+    //  What this proves, and it is the whole reason route 4 exists: the entry
+    //  that keeps a browser from disabling what route 3 delivered is written for
+    //  every policy-capable browser that is really here, and taken out again by
+    //  the journal -- never by shape, because a bare id has no shape of ours.
+    const { ALLOWLIST } = geoExtMod;
+    const browsersMod = require('../lib/browsers');
+    const present = browsersMod.detectChromium().map(b => b.id)
+        .filter(id => POLICY_KEYS[id]);
+    sh(`reg delete "${TEST_ROOT}" /f`);
+    ext.install();
+    for (const id of present) {
+        const ak = POLICY_KEYS[id] + '\\' + ALLOWLIST;
+        const v = values(ak);
+        ok(Object.values(v).includes(prepared.id),
+           `${id}: our id is in the allowlist`, JSON.stringify(v));
+    }
+    ok(present.length > 0, 'at least one Chromium is installed, so this ran at all',
+       present.join(', '));
+
+    //  A workplace allowlist next to ours, in the same subkey.
+    const AK = POLICY_KEYS[present[0]] + '\\' + ALLOWLIST;
+    sh(`reg add "${AK}" /v "9" /t REG_SZ /d "${USER_2.split(';')[0]}" /f`);
+    ext.restore();
+    ok(!Object.values(values(AK)).includes(prepared.id),
+       'restore() removed our slot', JSON.stringify(values(AK)));
+    ok(Object.values(values(AK)).includes(USER_2.split(';')[0]),
+       "the workplace's allowed id survives", JSON.stringify(values(AK)));
+    sh(`reg delete "${AK}" /f`);
+
     sh(`reg delete "${TEST_ROOT}" /f`);
     ok(sh(`reg query "${TEST_ROOT}"`) === null, 'test hive removed');
     try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}

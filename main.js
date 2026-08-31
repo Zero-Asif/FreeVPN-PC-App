@@ -51,11 +51,27 @@ const Logger = (() => {
         write('INFO', `FreeProxy VPN started -- PID ${process.pid}`);
         write('INFO', `Platform: ${os.type()} ${os.release()} | Arch: ${os.arch()}`);
         write('INFO', `Electron: ${process.versions.electron}  Node: ${process.versions.node}`);
+        //  Every stamp below is UTC, because toISOString() is. Windows itself is
+        //  not: schtasks, Event Viewer and file mtimes all print local time. On a
+        //  machine that is not on UTC those two clocks are read side by side
+        //  during exactly the diagnosis this log exists for -- "the boot task and
+        //  the logon task started two seconds apart" is a cross-clock claim -- so
+        //  the offset is stated once, here, rather than left to be inferred.
+        write('INFO', `Timestamps below are UTC. This machine is ${tzOffsetStr()} ` +
+                      `(local time now ${new Date().toLocaleString()})`);
         write('INFO', '======================================');
     }
 
     function dateStr() { return new Date().toISOString().slice(0, 10); }
     function timeStr() { return new Date().toISOString().replace('T', ' ').slice(0, 23); }
+
+    //  "UTC+06:00" / "UTC-04:30". getTimezoneOffset() is minutes to ADD to local
+    //  to get UTC, so its sign is the reverse of how offsets are written.
+    function tzOffsetStr() {
+        const m = -new Date().getTimezoneOffset();
+        const p = n => String(Math.abs(n)).padStart(2, '0');
+        return `UTC${m < 0 ? '-' : '+'}${p(Math.trunc(m / 60))}:${p(m % 60)}`;
+    }
 
     function rotateLogs() {
         try {
@@ -177,6 +193,7 @@ const GEO_COORDS = {
     'ee':{ lat:59.4370,  lng:24.7536,   accuracy:12, city:'Tallinn'           },
     'cy':{ lat:35.1856,  lng:33.3823,   accuracy:13, city:'Nicosia'           },
     'az':{ lat:40.4093,  lng:49.8671,   accuracy:16, city:'Baku'              },
+    'ge':{ lat:41.7151,  lng:44.8271,   accuracy:15, city:'Tbilisi'           },
     'pe':{ lat:-12.0464, lng:-77.0428,  accuracy:17, city:'Lima'              },
     'cr':{ lat:9.9281,   lng:-84.0907,  accuracy:14, city:'San Jose'          },
     'sc':{ lat:-4.6191,  lng:55.4513,   accuracy:12, city:'Victoria'          },
@@ -311,9 +328,18 @@ function geoExt() {
 //  Browser coverage is DETECTED, never assumed, and every browser named in
 //  this report comes from lib/browsers.js. presence() reads each installed
 //  fork's OWN profile and answers whether the extension is genuinely loaded
-//  there; the Gecko count is the number of profiles this run actually wrote.
-//  No browser is ever named as covered because the table says it could be --
-//  the table only says where to look.
+//  AND enabled there; the Gecko count is the number of profiles this run
+//  actually wrote. No browser is ever named as covered because the table says
+//  it could be -- the table only says where to look.
+//
+//  'needs-enable' is its own group and is never folded into the spoofed one.
+//  Measured: with the delivery helper serving the CRX the policies name, Edge
+//  installs it at location 7 with no disable reason and starts its service
+//  worker, while Chrome and Brave unpack the same bytes at location 6 and
+//  record disable_reasons [8192] = EXTERNAL_EXTENSION -- present, and switched
+//  off until the user accepts it. Those two are not spoofing anything yet, and
+//  a report that said they were would be the exact kind of claim this function
+//  exists to avoid.
 function reportGeoCoverage(coord) {
     const s     = geoEngine().status();
     const where = coord ? coord.city : 'the connected country';
@@ -325,7 +351,20 @@ function reportGeoCoverage(coord) {
     try { seen = geoExt().presence(); } catch (e) {}
     const withState = st => browsers.names(Object.keys(seen).filter(b => seen[b] === st));
     const covered   = withState('installed');
-    const missing   = withState('absent');
+    const pending   = withState('needs-enable');
+    const declined  = withState('declined');
+
+    //  'absent' is two different situations and only one of them is the user's
+    //  problem. MEASURED: a browser that was already open when the external-
+    //  extensions entry was written never sees it -- Chrome, open since before,
+    //  had nothing hours later -- while Brave, started 12 minutes after, had it
+    //  3 minutes into that start. So an absent browser with the route still
+    //  armed is waiting for a start, not for the user to load a folder by hand,
+    //  and saying otherwise invents work.
+    let armed = [];
+    try { armed = geoExt().awaitingStart(); } catch (e) {}
+    const waiting = browsers.names(armed);
+    const missing = withState('absent').filter(n => !waiting.includes(n));
 
     //  Gecko is reported by the fork whose profiles were actually written,
     //  never as "Firefox" for whatever happened to be on disk. A profile
@@ -342,10 +381,39 @@ function reportGeoCoverage(coord) {
     Logger.info('Location coverage -- ' +
         `app window: spoofed (${where}); ` +
         `Chromium (${covered.join('/') || 'none'}): spoofed by the extension; ` +
+        (pending.length
+            ? `Chromium (${pending.join('/')}): extension delivered but switched OFF, ` +
+              'so NOT spoofed there yet; ' : '') +
+        (declined.length
+            ? `Chromium (${declined.join('/')}): the user removed the extension, not spoofed; ` : '') +
+        (waiting.length
+            ? `Chromium (${waiting.join('/')}): set up, not picked up yet -- arrives at ` +
+              'that browser\'s next start or within ~2 h; ' : '') +
         `${gecko}; ` +
         `Windows platform: ${s.windowsShielded ? 'shielded -- lfsvc cannot resolve or ' +
             'send a fresh real fix, so no native app is given ' + where + ' either: ' +
             'Windows has no coordinate-injection API' : 'NOT shielded'}`);
+
+    if (pending.length) {
+        Logger.warn(`${pending.join(' and ')} already has the extension downloaded and ` +
+                    'unpacked, switched off: Chromium keeps anything an installer offered ' +
+                    'disabled until the user accepts it once, and the record holding that ' +
+                    'bit is signed with the profile\'s own key, so nothing this app writes ' +
+                    'can flip it. One switch on the extensions page, once, and it is ' +
+                    'permanent -- until then the real location is what those browsers report');
+    }
+
+    if (waiting.length) {
+        Logger.info(`${waiting.join(' and ')}: the extension is registered for ` +
+                    (waiting.length > 1 ? 'them' : 'it') + ' and the package is being served, ' +
+                    'and has not been picked up yet. A browser takes a registration like ' +
+                    'this at its next start, or on its own within about two hours -- ' +
+                    'measured on this machine: 3 min for a browser started afterwards, ' +
+                    '93 to 108 min for two left running. So it arrives the next time ' +
+                    (waiting.length > 1 ? 'those browsers are' : 'that browser is') +
+                    ' opened (the restart this app offers does that for all of them at ' +
+                    'once), and needs one switch then. Nothing to do by hand.');
+    }
 
     if (missing.length) {
         Logger.warn(`${missing.join(' and ')} will keep reporting the real location until ` +
@@ -456,7 +524,22 @@ function isRunAsAdmin() {
     catch(e) { return false; }
 }
 
+//  A headless job never draws anything, and one of them -- --fp-boot -- runs as
+//  SYSTEM at startup, in a session with no interactive desktop and no GPU to
+//  talk to. Asking Chromium for hardware acceleration there is how a task that
+//  only writes registry values would end up failing on the one machine state it
+//  exists for. Both calls have to happen before app.whenReady(), so they sit
+//  here rather than next to the job itself.
+if (installerTasks.installerTask(process.argv)) {
+    try {
+        app.disableHardwareAcceleration();
+        app.commandLine.appendSwitch('disable-gpu');
+        app.commandLine.appendSwitch('no-sandbox');
+    } catch (e) { /* an older Electron: the job still runs */ }
+}
+
 // Override userData to C:\ProgramData\freeproxy-vpn (no spaces in path)
+
 // Must be set BEFORE app.getPath() is ever called
 const APPDATA_PATH = 'C:\\ProgramData\\freeproxy-vpn';
 try {
@@ -470,15 +553,17 @@ app.whenReady().then(() => {
     Logger.init(app.getPath('userData'));
     Logger.info('app.whenReady() fired');
 
-    //  --fp-setup / --fp-teardown: do that job and exit. No window, no
-    //  Tor, and no elevation dance -- the installer is already elevated,
-    //  and prompting from inside an install would be a UAC dialog with no
-    //  visible parent. Placed before the admin check for exactly that
-    //  reason; lib/installer-tasks.js warns if it really is unelevated.
+    //  --fp-setup / --fp-teardown / --fp-boot: do that job and exit. No
+    //  window, no Tor, and no elevation dance -- the installer is already
+    //  elevated and the boot task runs as SYSTEM, and prompting from inside
+    //  either would be a UAC dialog with no visible parent. Placed before the
+    //  admin check for exactly that reason; lib/installer-tasks.js warns if it
+    //  really is unelevated.
     const installerJob = installerTasks.installerTask(process.argv);
     if (installerJob) {
         installerTasks.runInstallerTask(installerJob, {
             Logger, isRunAsAdmin, geoEngine, geoExt,
+            stateDir: APPDATA_PATH,
             restoreBrowserPolicy: restoreAllBrowsersProxy,
         }).then(code => {
             Logger.info(`--fp-${installerJob} finished with exit code ${code}`);
@@ -616,6 +701,16 @@ function runAdminApp() {
             // Remove any stale IPv6-block firewall rules from a crashed session
             `netsh advfirewall firewall delete rule name="FreeProxy Block IPv6 Out" 2>nul`,
             `netsh advfirewall firewall delete rule name="FreeProxy Block IPv6 In" 2>nul`,
+            //  ...and the DNS lock, for the same reason but with more urgency.
+            //  A firewall rule survives a reboot, so a session that was killed
+            //  hard -- Task Manager, a power cut, a Windows update restart --
+            //  leaves outbound port 53 blocked to everything except a
+            //  127.0.0.1:53 that no longer has Tor behind it. That is a PC
+            //  that cannot resolve a single hostname, with nothing in any
+            //  Windows dialog to say why. Removed here on every start, before
+            //  anything else needs a name, and unconditionally: if the app is
+            //  starting, the lock has no owner yet.
+            ...dnsLockRemove(),
             // Restore IPv6
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 0 /f`,
             `powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { try { Enable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {} }"`,
@@ -746,13 +841,43 @@ function runAdminApp() {
             //  Nothing in this app writes those values any more. This is
             //  pure cleanup, and a no-op once there is nothing to remove.
             geoEngine().clearBlockingPolicy();
-            //  Same for our own force-install entry. If the app was killed
-            //  while connected it still points at a loopback port nothing
-            //  is listening on, so Edge would report a failing install on
-            //  every start -- and a force-installed extension cannot be
-            //  removed by the user, which makes leaving it behind worse
-            //  than useless.
-            try { geoExt().restore(); } catch(e) {}
+            //  Same for our own force-install entry -- but ONLY when nothing is
+            //  left to serve it.
+            //
+            //  Measured 2026-08-31, on a from-scratch install of this build:
+            //  --fp-setup wrote all four routes, logged that the extension
+            //  "arrives at that browser's next start or within ~2 h", and the
+            //  installer's finish page then launched the app. Twenty-eight
+            //  seconds later this line deleted every one of them -- the
+            //  force-install policy, ExtensionSettings in three browsers, the
+            //  external-extensions key and the allowlist -- and a read-back of
+            //  all three profiles showed the extension nowhere. It recurs on
+            //  every app start, so coverage only ever existed between a boot
+            //  and the first time the user opened the window.
+            //
+            //  The comment above was written for a build where the routes lived
+            //  only while the app was connected and only the app answered the
+            //  port, which made a leftover entry a genuinely dead one. That is
+            //  no longer the shape of it: --fp-setup and --fp-boot write these
+            //  routes to persist, and "FreeProxy VPN Extension Delivery"
+            //  re-serves the port at every logon. While that task exists the
+            //  entries are the live install, not litter, and removing them is
+            //  the app sabotaging its own installer. Reverting them belongs to
+            //  --fp-teardown, which the uninstaller runs.
+            //
+            //  With no delivery task there is nothing to re-serve the port, so
+            //  the old reasoning still holds and the sweep still runs -- which
+            //  is also the upgrade path for a machine that has the older build's
+            //  connect-time entry and no task to go with it.
+            try {
+                if (installerTasks.deliverTaskRegistered()) {
+                    Logger.debug('Extension routes left in place -- "' +
+                                 installerTasks.DELIVER_TASK + '" re-serves the port at every ' +
+                                 'logon, so they are this install, not leftovers');
+                } else {
+                    geoExt().restore();
+                }
+            } catch(e) {}
             Logger.success('Startup cleanup complete');
         } catch(e) { Logger.error('Startup cleanup failed', { err: e.message }); }
     }
@@ -788,6 +913,42 @@ function runAdminApp() {
                 Logger.success('Firewall rule added');
             } catch(e2) { Logger.warn('Could not add firewall rule (dev mode ok)', { err: e2.message }); }
         }
+
+        //  Self-heal the boot pass, for the same reason and in the same spirit.
+        //
+        //  The ONSTART task registered at install time is what covers a browser
+        //  the user installs LATER: an external-extensions entry is read while a
+        //  browser starts, so the boot is the only moment every fork on the
+        //  machine is guaranteed not to have started yet. Anything can take that
+        //  task away -- a "PC optimiser", another admin, a right-click delete in
+        //  Task Scheduler -- and it would end the coverage without a word.
+        //
+        //  Asked of Windows (schtasks /query), never remembered, and repaired
+        //  only when the answer is "gone". No job file is written and no restart
+        //  card is raised: re-arming a task is not new work waiting for a boot,
+        //  and the app has just applied every route it can apply live. Packaged
+        //  builds only -- in dev, process.execPath is node_modules' electron.exe
+        //  and a task pointing there would be litter on a developer's machine.
+        try {
+            if (app.isPackaged && !installerTasks.bootTaskRegistered()) {
+                Logger.warn('The boot-time browser setup task is missing -- re-registering it');
+                installerTasks.registerBootTask(Logger);
+            }
+        } catch (e) { Logger.warn('Boot task check failed: ' + e.message); }
+
+        //  The other half, and the one that actually hands a browser the
+        //  package. MEASURED: Edge, Chrome and Brave each fetch the update
+        //  manifest and the CRX within about five seconds of starting -- so the
+        //  routes were never the problem, the port being dead was. This app
+        //  answers it while it runs; the logon task answers it while it does
+        //  not. Same reasoning as above: asked of Windows, repaired only when
+        //  the answer is "gone", packaged builds only.
+        try {
+            if (app.isPackaged && !installerTasks.deliverTaskRegistered()) {
+                Logger.warn('The extension delivery task is missing -- re-registering it');
+                installerTasks.registerDeliverTask(Logger);
+            }
+        } catch (e) { Logger.warn('Delivery task check failed: ' + e.message); }
     }
 
     // ── Proxy bat builder ─────────────────────────────────
@@ -849,6 +1010,72 @@ function runAdminApp() {
     //  blocking the main process the whole time). netsh returns in
     //  milliseconds and takes effect immediately.
     // ════════════════════════════════════════════════════════
+    // ── The DNS lock, defined once ────────────────────────────────────
+    //  Three code paths install or remove these two rules -- connect/switch
+    //  (applyLeakProtection), disconnect (reverseLeakProtection) and the Kill
+    //  Switch (killSwitchLeakLock) -- so the netsh lines live here rather than
+    //  being typed out three times. A rule NAME that drifts between the place
+    //  that adds it and the place that deletes it is a rule that never comes
+    //  off, and for a DNS block that means a machine that cannot resolve
+    //  anything after the app is gone.
+    //
+    //  The same two names are listed in FW_RULES in lib/installer-tasks.js and
+    //  in the customUnInstall firewall section of installer.nsh, which is what
+    //  removes them when the program files are already gone.
+    const DNS_LOCK_RULES = {
+        dns: 'FreeProxy Block DNS Out',
+        dot: 'FreeProxy Block DoT Out',
+    };
+    //  remoteip covers every unicast address EXCEPT 127/8, so the block can
+    //  never reach Tor's own DNSPort on 127.0.0.1:53. Windows Firewall
+    //  resolves block before allow, so a rule that did include loopback would
+    //  beat the app's own allow rules and take all name resolution with it.
+    //  WFP does not filter loopback in the first place -- naming the range
+    //  means this does not silently depend on that.
+    const NOT_LOOPBACK = '0.0.0.0-126.255.255.255,128.0.0.0-255.255.255.255';
+    const dnsLockRemove = () => [
+        `netsh advfirewall firewall delete rule name="${DNS_LOCK_RULES.dns}" 2>nul`,
+        `netsh advfirewall firewall delete rule name="${DNS_LOCK_RULES.dot}" 2>nul`,
+    ];
+    const dnsLockAdd = () => [
+        `netsh advfirewall firewall add rule name="${DNS_LOCK_RULES.dns}" dir=out action=block protocol=UDP remoteport=53 remoteip=${NOT_LOOPBACK} enable=yes profile=any description="FreeProxy VPN -- DNS may only go to Tor on 127.0.0.1"`,
+        `netsh advfirewall firewall add rule name="${DNS_LOCK_RULES.dns}" dir=out action=block protocol=TCP remoteport=53 remoteip=${NOT_LOOPBACK} enable=yes profile=any description="FreeProxy VPN -- DNS may only go to Tor on 127.0.0.1"`,
+        //  DNS-over-TLS has a port of its own and Tor cannot carry it, so a
+        //  stub resolver that falls back to :853 would be a leak the SOCKS
+        //  proxy never sees. DoH rides 443 and cannot be separated by port --
+        //  Chromium's is switched off by policy in forceAllBrowsersOntoProxy(),
+        //  and everything else on the machine goes through the tunnel.
+        `netsh advfirewall firewall add rule name="${DNS_LOCK_RULES.dot}" dir=out action=block protocol=TCP remoteport=853 remoteip=${NOT_LOOPBACK} enable=yes profile=any description="FreeProxy VPN -- block DNS-over-TLS, which cannot travel through Tor"`,
+    ];
+    //  "Make sure the lock is on", NOT "rebuild the lock" -- and on a country
+    //  switch that distinction is the whole point.
+    //
+    //  The obvious version of this is delete-then-add, so a rule someone edited
+    //  by hand is replaced. But the rules are already in place when a switch
+    //  starts, and deleting them to add them back opens a window -- short, but a
+    //  real one -- in which port 53 is open to the internet while tor.exe is
+    //  down. That is precisely the moment this lock exists for, so it must not
+    //  be the moment the lock is missing.
+    //
+    //  So: look first, and only rebuild if something is actually wrong. netsh
+    //  exits non-zero when no rule matches the name, which also catches the
+    //  half-built pair (`add` succeeded for one protocol and failed for the
+    //  other) that a plain "add only if absent" would leave broken forever --
+    //  either name missing rebuilds both.
+    const dnsLockEnsure = () => [
+        'set FP_DNSLOCK=1',
+        `netsh advfirewall firewall show rule name="${DNS_LOCK_RULES.dns}" >nul 2>&1 || set FP_DNSLOCK=0`,
+        `netsh advfirewall firewall show rule name="${DNS_LOCK_RULES.dot}" >nul 2>&1 || set FP_DNSLOCK=0`,
+        'if "%FP_DNSLOCK%"=="1" echo DNS lock already in place',
+        'if "%FP_DNSLOCK%"=="0" (',
+        //  Indented for the log, and every line is a single netsh call with no
+        //  parentheses of its own -- cmd parses the whole block in one go, so a
+        //  stray ) inside it would silently truncate the lock.
+        ...dnsLockRemove().map(l => '    ' + l),
+        ...dnsLockAdd().map(l => '    ' + l),
+        ')',
+    ];
+
     async function applyLeakProtection({ dnsViaTor }) {
         Logger.info(`Applying leak protection (DNS via Tor: ${dnsViaTor ? 'yes' : 'no'})...`);
 
@@ -879,6 +1106,28 @@ function runAdminApp() {
         const content = [
             '@echo off',
             ...dnsLines,
+            // ── DNS: nothing on this PC may reach a resolver that is not
+            //    Tor's, for as long as we are connected ───────────────────
+            //  Pointing the adapters at 127.0.0.1 covers everything that ASKS
+            //  Windows where to send a query. It does not cover an app that
+            //  ignores the answer -- a browser with its own DoH client, a
+            //  launcher with 8.8.8.8 compiled in, a router-pushed secondary
+            //  that reappears on a DHCP renew mid-session. Those are the
+            //  queries that showed up in ipleak's DNS test as resolvers in
+            //  countries nobody selected.
+            //
+            //  This is also what makes a COUNTRY SWITCH leak-proof, which is
+            //  the case the adapter setting alone could not cover: for the few
+            //  seconds tor.exe is being restarted there is nothing listening
+            //  on 127.0.0.1:53, and without the block a stub resolver simply
+            //  falls back to the next server it knows -- so the queries that
+            //  bracket a switch went out in clear text to the ISP. Now they
+            //  fail instead, which is what a switch is supposed to look like.
+            //
+            //  Ensured rather than rebuilt, so a switch does not briefly take
+            //  the lock off in order to put the same lock back -- see
+            //  dnsLockEnsure().
+            ...(dnsViaTor ? dnsLockEnsure() : dnsLockRemove()),
             // ── Location: handled by the geo engine, not here ──────────
             //  This used to run `sc stop lfsvc`, three steps before the geo
             //  engine snapshots the machine -- so the snapshot recorded a
@@ -909,7 +1158,7 @@ function runAdminApp() {
         //  no longer touches it, and reportGeoCoverage() states what is
         //  really covered there, surface by surface.
         Logger.success(dnsViaTor
-            ? 'Leak protection ON -- DNS locked to Tor on 127.0.0.1:53, IPv6 blocked'
+            ? 'Leak protection ON -- DNS locked to Tor on 127.0.0.1:53, outbound 53/853 blocked everywhere else, IPv6 blocked'
             : 'Leak protection ON -- IPv6 blocked (system DNS left intact, see warning above)');
     }
 
@@ -937,6 +1186,13 @@ function runAdminApp() {
             `)`,
             `reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters" /v NameServer /f 2>nul`,
             `net start dnscache 2>nul`,
+            //  The two DNS blocks come off BEFORE the flush, so the first
+            //  lookup after this script is a real one. Leaving either behind
+            //  would leave the machine unable to resolve anything at all once
+            //  Tor's 127.0.0.1:53 listener is gone -- the worst possible
+            //  leftover, because it looks like the internet is down rather
+            //  than like a VPN that failed to clean up.
+            ...dnsLockRemove(),
             `ipconfig /flushdns`,
             // ── Location: NOT restarted here ──────────────────────────
             //  lfsvc belongs to the geo engine, which recorded whether it
@@ -967,6 +1223,18 @@ function runAdminApp() {
             // DNS locked -- dnscache stopped, Tor gone, so DNS fails safely
             `net stop dnscache /y 2>nul`,
             `for /f %%i in ('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces"') do reg add "%%i" /v NameServer /t REG_SZ /d "127.0.0.1" /f 2>nul`,
+            //  ...and the same firewall block the connected state uses, because
+            //  "fails safely" was only true of apps that consult Windows. The
+            //  Kill Switch fires when Tor has DIED, which is exactly the moment
+            //  a stub resolver with its own hardcoded server would sail past a
+            //  dead 127.0.0.1:53 and out to the ISP in clear text.
+            //
+            //  Identical rules to applyLeakProtection() -- same names, same
+            //  loopback exemption -- so the two paths cannot install different
+            //  variants, and reverseLeakProtection() removes them whichever
+            //  path put them there. Turning the Kill Switch off always goes
+            //  through that function; see the toggle-killswitch handler.
+            ...dnsLockEnsure(),
             // ── lfsvc stopped -- no WiFi geo leak, no permission error ──
             //  Stop only, never `sc config start= disabled`: disabling the
             //  start type breaks the Windows Location subsystem
@@ -1330,6 +1598,45 @@ function runAdminApp() {
         } catch (e) { return { ok: false, dir: null, err: e.message }; }
     });
     ipcMain.handle('get-fastest-server', async () => ({ best: 'sg', others: ['hk', 'jp'] }));
+
+    // ── The one restart, if Windows really deferred something ──
+    //
+    //  See pendingRestart() for why this is evidence-based and normally
+    //  answers "nothing pending". The renderer asks once per launch; there is
+    //  no push, because a card that appears mid-session while the user is
+    //  connecting is the interruption this whole change was made to remove.
+    ipcMain.handle('get-pending-restart', async () => {
+        const p = pendingRestart();
+        return p ? { pending: true, at: p.at, why: p.why } : { pending: false, why: [] };
+    });
+
+    //  "Later" is a real answer, not a snooze: the marker goes, and the user is
+    //  not asked again. What Windows deferred still completes at whatever
+    //  restart happens next, on the user's own schedule -- which is the point.
+    ipcMain.handle('dismiss-pending-restart', async () => ({ ok: clearPendingRestart() }));
+
+    //  Only ever reached from an explicit click on "Restart now". The marker is
+    //  cleared BEFORE the reboot is asked for, so a machine that comes back up
+    //  does not show the card again even if the shutdown call is refused.
+    ipcMain.handle('restart-windows', async () => {
+        clearPendingRestart();
+        Logger.warn('User chose Restart now -- asking Windows to reboot');
+        try {
+            //  /t 0 with no /f: Windows still lets an app with unsaved work
+            //  put up its "you have unsaved changes" prompt, which is right.
+            //  Forcing it could throw away the very open documents this whole
+            //  change exists to protect.
+            execFile('shutdown', ['/r', '/t', '0', '/c',
+                     'FreeProxy VPN is finishing its installation'],
+                     { windowsHide: true }, err => {
+                if (err) Logger.error('The restart request failed: ' + err.message);
+            });
+            return { ok: true };
+        } catch (e) {
+            Logger.error('The restart request could not be made: ' + e.message);
+            return { ok: false, err: e.message };
+        }
+    });
 
     // ── Where the globe may draw a ring ───────────────────────
     //
@@ -1998,6 +2305,89 @@ function runAdminApp() {
             ],
         }, { defaultAnswer: null });
     }
+
+    // ════════════════════════════════════════════════════════
+    //  WHEN THE ENGINE ITSELF WILL NOT COME UP
+    //
+    //  A DIFFERENT FAILURE, AND IT USED TO BE SILENT. The question above is
+    //  about a country with no exit relay -- the relay list answered, and the
+    //  answer was "not there". This one is about Tor not bootstrapping at all:
+    //  every guard timed out, the connection stalled, bridges did not help, or
+    //  the config was rejected. Nothing about the country was ever established.
+    //
+    //  What the app did with that until now: logged it, wrote "Server not
+    //  responding" into the progress line, killed Tor and returned. On a
+    //  SWITCH, the caller then reverted to the previous country on its own --
+    //  no question, no blast, no permission asked. That is the same silent
+    //  substitution this file spends hundreds of lines refusing, wearing the
+    //  one hat nobody checked, and it is what the user reported: "eka ekai
+    //  revart hoye geche rocket kono blast charai kono pop up o aslona".
+    //
+    //  So the decision goes back to them here too, with the options that
+    //  actually exist at this moment:
+    //
+    //    wait    -- keep trying this same country. Nothing is connected while
+    //               it runs; each round is a fresh bootstrap, so a network that
+    //               was momentarily down is exactly what this recovers from
+    //    revert  -- offered ONLY on a switch, and only when there is a country
+    //               to go back to: reconnect the one that was working
+    //    auto    -- the nearest country that has a usable exit, when one exists
+    //    cancel  -- connect to nothing. The rocket blasts where it is and the
+    //               machine goes back to normal (or stays blocked, kill switch)
+    //
+    //  No default answer, for the same reason as the question above: there is
+    //  no safe guess. A null (every surface gone) is read as cancel.
+    // ════════════════════════════════════════════════════════
+    async function askEngineFailed(cc, { reason = null, percent = 0, oldCc = null,
+                                         nearest = null, note = null } = {}) {
+        const want = ccName(cc);
+        const near = nearest ? `${ccName(nearest.cc)}, about ${nearest.km} km away` : null;
+        //  Tor's own bootstrap percentage is the most informative thing this
+        //  path has, and it distinguishes the two very different failures a
+        //  user can do something about: 0-10% is this PC's network or a
+        //  blocked connection; 25-80% is Tor reaching the network but not
+        //  finishing a circuit.
+        const where = reason === 'config'
+            ? 'The Tor engine rejected its own configuration, so nothing was started and ' +
+              'nothing has been connected. This is a fault in the app, not in your ' +
+              'connection -- the log has the detail.'
+            : percent >= 25
+                ? `The Tor engine reached the network but could not finish building a ` +
+                  `circuit (it stopped at ${percent}%). Nothing has been connected.`
+                : `The Tor engine could not reach the Tor network at all (it stopped at ` +
+                  `${percent}%). Either this connection blocks Tor, or it is momentarily ` +
+                  `down. Nothing has been connected.`;
+        const options = [
+            { id: 'wait',
+              label: `Keep trying ${want}`,
+              hint: 'Nothing is connected while this runs. Every round is a fresh start of ' +
+                    'the engine, including bridge mode where bridges are available.' },
+        ];
+        if (oldCc) {
+            options.push({ id: 'revert',
+                label: `Go back to ${ccName(oldCc)}`,
+                hint: `Reconnect the country that was working before this switch. ` +
+                      `${want} is not connected.` });
+        }
+        if (near) {
+            options.push({ id: 'auto',
+                label: `Connect me to the nearest country (${near})`,
+                hint: `The app keeps looking for ${want} in the background and asks you ` +
+                      'before moving you there.' });
+        }
+        options.push({ id: 'cancel',
+            label: 'Cancel -- do not connect at all',
+            hint: 'The half-built tunnel is taken back down and this PC goes back to its ' +
+                  'normal connection (or stays blocked, if the Kill Switch is on).' });
+
+        return askUser({
+            variant: 'choice', cc, note,
+            title: `Could not connect through ${want}`,
+            body: where,
+            options,
+        }, { defaultAnswer: null });
+    }
+
     //  ── Stop claiming a country, without tearing the tunnel down ──
     //
     //  Called at the moment the app is about to tell the user it could not reach
@@ -2355,7 +2745,7 @@ function runAdminApp() {
                                   : 'the user cancelled');
         }
 
-        const firstSpec = plan[0].fp ? `$${plan[0].fp}` : `{${serverCode}}`;
+        let firstSpec = plan[0].fp ? `$${plan[0].fp}` : `{${serverCode}}`;
         Logger.info(`Exit plan for ${serverCode.toUpperCase()}: ${plan.length} candidate(s)`,
             { first: plan[0].nick || plan[0].fp || `{${serverCode}}` });
 
@@ -2365,42 +2755,111 @@ function runAdminApp() {
         //  From here on the tunnel that may have been up has been replaced, so
         //  a cancel can no longer mean "keep what was working".
         torStarted = true;
-        let res = await startTor({
-            exitSpec: firstSpec, dnsPort,
-            onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
-        });
-
-        if (!res.ok && res.reason === 'dns-bind') {
-            //  Something other than dnscache owns :53 (a local resolver,
-            //  Docker, Pi-hole...). Retry on 9053 instead of failing --
-            //  and do NOT point the adapters at 127.0.0.1 afterwards,
-            //  because that would kill name resolution machine-wide.
-            Logger.warn(`Port ${res.port} unavailable -- retrying with DNSPort ${DNS_FALLBACK_PORT}`);
-            sendProgress(5, 'Adjusting DNS port...');
-            dnsPort = DNS_FALLBACK_PORT;
+        //  Every round of this loop is a complete attempt to bring the engine up
+        //  -- direct, then a DNS-port retry if :53 is taken, then bridges. Only
+        //  when all three are exhausted is the user asked, and only their answer
+        //  decides whether it runs again, moves country, goes back, or stops.
+        let res = null, engineRound = 0, engineNote = null;
+        for (;;) {
+            engineRound += 1;
             res = await startTor({
                 exitSpec: firstSpec, dnsPort,
                 onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
             });
-        }
 
-        if (!res.ok && (res.reason === 'stall' || res.reason === 'timeout') && fs.existsSync(P.lyre)) {
-            Logger.warn('Direct connection stalled -- retrying with obfs4 bridges');
-            sendProgress(res.percent, 'Switching to bridge mode...');
-            res = await startTor({
-                exitSpec: firstSpec, dnsPort, useBridges: true,
-                onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
-            });
-        }
+            if (!res.ok && res.reason === 'dns-bind') {
+                //  Something other than dnscache owns :53 (a local resolver,
+                //  Docker, Pi-hole...). Retry on 9053 instead of failing --
+                //  and do NOT point the adapters at 127.0.0.1 afterwards,
+                //  because that would kill name resolution machine-wide.
+                Logger.warn(`Port ${res.port} unavailable -- retrying with DNSPort ${DNS_FALLBACK_PORT}`);
+                sendProgress(5, 'Adjusting DNS port...');
+                dnsPort = DNS_FALLBACK_PORT;
+                res = await startTor({
+                    exitSpec: firstSpec, dnsPort,
+                    onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
+                });
+            }
 
-        if (!res.ok) {
-            const why = res.reason === 'config'
-                ? 'Tor configuration error. Check the log.'
-                : 'Server not responding. Try another country.';
-            Logger.error('Connection failed', { serverCode, reason: res.reason, percent: res.percent });
-            sendProgress(res.percent, why, 'unavailable');
+            if (!res.ok && (res.reason === 'stall' || res.reason === 'timeout') && fs.existsSync(P.lyre)) {
+                Logger.warn('Direct connection stalled -- retrying with obfs4 bridges');
+                sendProgress(res.percent, 'Switching to bridge mode...');
+                res = await startTor({
+                    exitSpec: firstSpec, dnsPort, useBridges: true,
+                    onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
+                });
+            }
+
+            if (res.ok) break;
+
+            // ── Detection point C: the engine itself would not come up ──
+            //
+            //  Not a country problem and not a verification problem: Tor did not
+            //  finish bootstrapping. Everything automatic has been spent by now
+            //  -- direct, the DNS-port retry, and bridges where a bridge line
+            //  exists -- so what happens next belongs to the user. This is the
+            //  path that used to log one line, return `unavailable`, and let the
+            //  switch handler revert on its own with no question on screen.
+            Logger.error('Connection failed', { serverCode, reason: res.reason,
+                                                percent: res.percent, round: engineRound });
+            //  Killed BEFORE the question goes up, not after it is answered. A
+            //  half-bootstrapped Tor still holding :9050 with the machine
+            //  already pointed at it is the one state in this function where a
+            //  page could leave through a route nobody chose. torStarted stays
+            //  true on purpose: the tunnel that was working has been replaced,
+            //  so cancelConnect must not claim it is still up.
             killTor();
-            return { status: 'unavailable', serverCode, verified: false };
+            sendProgress(res.percent,
+                res.reason === 'config' ? 'Tor configuration error. Check the log.'
+                                        : `Could not connect through ${ccName(serverCode)}.`,
+                'unavailable');
+
+            const backTo = (isSwitch && oldServerCode && oldServerCode !== serverCode)
+                ? oldServerCode : null;
+            const nearNow = nearestExitCountries(requestedCode, exitCapacityStats(),
+                                                 { exclude: [...tried] })[0] || null;
+            const pick = await askEngineFailed(serverCode, {
+                reason: res.reason, percent: res.percent,
+                oldCc: backTo, nearest: nearNow, note: engineNote,
+            });
+            engineNote = null;
+
+            if (pick === 'wait') {
+                //  A fresh attempt, not a resumed one: the relay list is re-read
+                //  first, so a guard or an exit that has come back since is used
+                //  and the exit spec is recomputed from it.
+                sendProgress(4, `Trying ${ccName(serverCode)} again ` +
+                                `(attempt ${engineRound + 1})...`);
+                await sleepUnless(4000, () => false);
+                try { await refreshRelayIndex({ viaTor: false, force: true }); }
+                catch (e) { Logger.debug('Relay list refresh before retry: ' + e.message); }
+                plan = await exitPlan(serverCode);
+                firstSpec = plan[0].fp ? `$${plan[0].fp}` : `{${serverCode}}`;
+                continue;
+            }
+            if (pick === 'revert' && backTo) {
+                //  The caller reverts because THIS answer says so, and for no
+                //  other reason -- switch-vpn no longer reverts on its own.
+                Logger.info('User chose to go back to ' + backTo.toUpperCase());
+                return { status: 'revert', serverCode, revertTo: backTo,
+                         requested: requestedCode, verified: false };
+            }
+            if (pick === 'auto' && nearNow) {
+                autoGranted = true;
+                watchFor    = requestedCode;
+                serverCode  = nearNow.cc;
+                tried.add(serverCode);
+                Logger.info('User chose the nearest country instead: ' +
+                            serverCode.toUpperCase() + ` (${nearNow.km} km)`);
+                sendProgress(4, `Connecting via ${ccName(serverCode)} instead...`);
+                plan = await exitPlan(serverCode);
+                firstSpec = plan[0].fp ? `$${plan[0].fp}` : `{${serverCode}}`;
+                continue;
+            }
+            //  cancel, or every surface vanished while the question was up.
+            return await cancelConnect(pick
+                ? 'the user cancelled after the engine could not start'
+                : 'no surface was left to answer the engine-failure question');
         }
 
         dnsViaTor     = (dnsPort === DNS_PORT);
@@ -3037,15 +3496,29 @@ function runAdminApp() {
             //  torn down) or taken the machine back to normal.
             if (r.status === 'cancelled') return r;
 
-            //  New country unreachable -- go back to the one that worked.
-            if (!oldServerCode || oldServerCode === serverCode) return r;
-            Logger.warn('Switch failed, reverting', { oldServerCode });
+            //  REVERTING IS NOW AN ANSWER, NOT A REFLEX.
+            //
+            //  This used to revert on any status that was not 'connected' or
+            //  'cancelled' -- which meant the commonest failure of all, the
+            //  engine not bootstrapping, put the user back on the old country
+            //  with nothing on screen and nothing asked. establishConnection
+            //  raises that question itself now (askEngineFailed) and returns
+            //  status 'revert' only when the user picked "go back to X". Any
+            //  other failure is handed to the renderer as the failure it is:
+            //  the rocket blasts where it is, and the country they asked for is
+            //  not quietly swapped for the one they left.
+            if (r.status !== 'revert') return r;
+
+            const backTo = r.revertTo || oldServerCode;
+            if (!backTo || backTo === serverCode) return r;
+            Logger.info('Switch failed -- reverting on the user\'s instruction',
+                        { backTo });
             progressToAll(wc, {
-                percent: 5, message: `Reverting to ${oldServerCode.toUpperCase()}...`,
-                status: 'connecting', serverCode: oldServerCode,
+                percent: 5, message: `Reverting to ${backTo.toUpperCase()}...`,
+                status: 'connecting', serverCode: backTo,
             });
             const back = await establishConnection({
-                serverCode: oldServerCode, bypassList, isSwitch: true, wc,
+                serverCode: backTo, bypassList, isSwitch: true, wc,
             });
             return back.status === 'connected'
                 ? { ...back, status: 'reconnected' }
@@ -3129,38 +3602,65 @@ function runPs1(content, name, timeoutMs = 20000) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  BROWSER RESTART -- only when it is actually needed
+//  THIS APP NO LONGER CLOSES ANYBODY'S BROWSER
 //
-//  Chromium reads the ProxySettings enterprise policy when its network
-//  service starts and caches it; Edge additionally keeps a background
-//  "startup boost" process alive after its last window closes, so a
-//  policy written afterwards is not picked up. That is the asymmetry in
-//  the report -- Chrome saw the new proxy, Edge kept using the old one.
-//  Closing the browsers guarantees a fresh read.
+//  It used to. `closeBrowsersAndWait()` lived here and ran taskkill over
+//  every installed browser on every connect, every disconnect and every
+//  country switch, with a 10 s grace period and then /F. It was written to
+//  guarantee a fresh policy read, and it is deleted rather than merely
+//  disabled, because "sometimes we kill your browsers" is not a behaviour
+//  worth keeping a code path for.
 //
-//  But the old code closed all three browsers on EVERY connect AND every
-//  country switch, even though the proxy value -- socks5://127.0.0.1:9050
-//  -- is identical for every country. Switching from Luxembourg to Japan
-//  changes nothing a browser needs to re-read, so it now only restarts
-//  when the policy value it depends on has genuinely changed.
+//  WHY IT WAS NEVER NECESSARY
+//  --------------------------
+//  Every policy this app writes is one Chromium applies LIVE:
+//
+//    ProxySettings              -> proxy config prefs, read by the network
+//                                  service on every request
+//    WebRtcIPHandlingPolicy     -> pref, read per PeerConnection
+//    DnsOverHttpsMode
+//    BuiltInDnsClientEnabled
+//    DnsPrefetchingEnabled
+//    NetworkPredictionOptions   -> prefs, read per lookup
+//    ExtensionInstallForcelist  -> the extension updater runs on the policy
+//                                  change itself and installs without a
+//                                  restart; this is the ordinary enterprise
+//                                  case, where an admin pushes an extension
+//                                  to running browsers
+//
+//  Chromium watches its HKLM policy subtree (RegNotifyChangeKeyValue) and
+//  reloads on the change, and `InternetSetOption(INTERNET_OPTION_SETTINGS_
+//  CHANGED / _REFRESH)` -- which forceAllBrowsersOntoProxy() already
+//  broadcasts -- covers every WinINET consumer in the same instant. So the
+//  restart bought nothing that the write did not already do.
+//
+//  WHAT WENT WRONG IN PRACTICE, AND WHY THE FLAG COULD NOT SAVE IT
+//  ---------------------------------------------------------------
+//  The restart was gated on `proxyChanged || !alreadyOn`, and both halves
+//  were true far more often than the gate implied:
+//
+//    * clearGeolocationSpoof() removed ProxySettings on disconnect, so the
+//      next connect always saw a change -- and a country switch is a
+//      disconnect the user did not ask for.
+//    * `let changed = true; // if we cannot tell, assume it changed` made
+//      any PowerShell hiccup -- and that script compiles C# with Add-Type
+//      on a fresh process every single time, against a 20 s timeout -- read
+//      as "the proxy moved", so every browser died for a slow script.
+//
+//  A guess that costs the user their open tabs is not a safe default. The
+//  work that genuinely cannot be done to a running Windows -- replacing
+//  locked files, landing the force-install policy so it is there before the
+//  browser starts -- is done by the INSTALLER now, followed by one reboot
+//  prompt, which is how IDM and the commercial VPNs handle exactly this.
+//  See lib/installer-tasks.js (taskSetup) and pendingRestart() below.
 // ═══════════════════════════════════════════════════════════════════
-//  Close every browser that reads what this app writes, and WAIT for them
-//  to be gone.
-//
-//  The list comes from lib/browsers.js and holds only what is installed:
-//  the Chromium forks, which read their Preferences and policy at startup,
-//  and the Gecko forks, which read user.js at startup -- so a Firefox that
-//  is restarted here comes back with the spoofed position instead of having
-//  to be closed by hand. Internet Explorer is excluded by processNames() on
-//  purpose: it follows the system proxy live, so closing it would cost the
-//  user their tabs for no gain.
-//
-//  The wait is not politeness, it is correctness: Chromium keeps its
-//  Preferences file in memory and writes it out on exit. An edit made
-//  while the browser is alive is discarded, and a force-kill skips the
-//  flush entirely. So: ask nicely, wait for the process to disappear,
-//  and only then touch the profile.
-function closeBrowsersAndWait(why = 'to apply the new settings') {
+/**
+ * Which browsers are up right now. Read-only -- nothing is signalled, asked
+ * or closed. Used only so the log can say whether a live policy change had
+ * an audience, which is the difference between "applied" and "applied and
+ * picked up".
+ */
+function runningBrowsers() {
     const EXES = browsers.processNames();
     const isUp = exe => {
         try {
@@ -3169,38 +3669,76 @@ function closeBrowsersAndWait(why = 'to apply the new settings') {
                 .toLowerCase().includes(exe.toLowerCase());
         } catch (e) { return false; }
     };
+    return EXES.filter(isUp);
+}
 
-    const running = EXES.filter(isUp);
-    if (!running.length) return Promise.resolve([]);
+// ═══════════════════════════════════════════════════════════════════
+//  THE ONE RESTART -- read here, decided by the installer
+// ═══════════════════════════════════════════════════════════════════
+//  This is the other half of "no browser is ever closed again". Instead of
+//  interrupting the user every time they connect or switch country, the whole
+//  install lands at install time and, IF Windows deferred any part of it, the
+//  app asks for one restart -- once -- and then never again. IDM and the
+//  commercial VPNs work exactly this way.
+//
+//  Three rules keep this from turning into the fake prompt it would be easy to
+//  make it:
+//
+//   1. THE APP NEVER DECIDES A RESTART IS NEEDED. lib/installer-tasks.js
+//      writes restart-pending.json only when something is really waiting for a
+//      boot, and there are exactly two such things. Work of OURS a boot
+//      finishes fastest: a browser takes an installer's external-extensions
+//      offer at its next start, or on its own within about two hours (measured
+//      2026-08-30 -- Chrome +107.6 min while never restarted), so the entry
+//      written for Chrome, Brave and the other forks reaches them at their next
+//      start and a restart buys seconds instead of hours -- the marker is
+//      written because a boot pass is queued and the machine has not booted
+//      since, which is a file on disk, not an assumption. And work WINDOWS
+//      deferred: PendingFileRenameOperations naming our own files, exit code
+//      3010 from the bundled VC++ redistributable, or NSIS's reboot flag.
+//      Neither present, no marker, no card -- and everything that applies live
+//      (Chromium policy, the system proxy, the firewall rules) never asks.
+//   2. IT EXPIRES ON ITS OWN. os.uptime() gives this boot's start time, so a
+//      marker written before the machine last booted has already been
+//      satisfied -- the file is deleted and nothing is shown, even if the user
+//      restarted for their own reasons and never touched the card.
+//   3. IT SAYS WHY. The `why` strings are the installer's, naming what Windows
+//      actually put off, so the card can never claim more than happened.
+const RESTART_MARKER = path.join(APPDATA_PATH, 'restart-pending.json');
 
-    for (const exe of running) {
-        try {
-            execSync(`taskkill /IM ${exe}`, { windowsHide: true, stdio: 'pipe' });
-            Logger.info(`${exe} closed ${why} (reopens normally, session restored)`);
-        } catch (e) { /* refused the graceful close -- handled below */ }
+function pendingRestart() {
+    let j;
+    try {
+        if (!fs.existsSync(RESTART_MARKER)) return null;
+        j = JSON.parse(fs.readFileSync(RESTART_MARKER, 'utf8'));
+    } catch (e) {
+        //  Unreadable or corrupt: it cannot be shown and it must not be asked
+        //  about forever, so it goes.
+        try { fs.unlinkSync(RESTART_MARKER); } catch (e2) {}
+        return null;
+    }
+    if (!j || !Array.isArray(j.why) || !j.why.length || !j.at) {
+        try { fs.unlinkSync(RESTART_MARKER); } catch (e) {}
+        return null;
     }
 
-    return new Promise(resolve => {
-        let waited = 0;
-        const GRACE = 10000, STEP = 500;
-        const tick = () => {
-            const left = EXES.filter(isUp);
-            if (!left.length) { Logger.debug('All browsers closed cleanly'); return resolve(running); }
-            waited += STEP;
-            if (waited < GRACE) return void setTimeout(tick, STEP);
-            //  Something is holding it open -- an unsaved-form prompt, or a
-            //  background extension. Force it, and say so: without the clean
-            //  exit its stored per-site grants can survive, and then the
-            //  policy layer is the only thing covering them.
-            for (const exe of left) {
-                try { execSync(`taskkill /F /IM ${exe}`, { windowsHide: true, stdio: 'pipe' }); } catch (e) {}
-            }
-            Logger.warn(`${left.join(', ')} ignored the graceful close and was force-closed ` +
-                        'after 10s -- its stored site permissions are covered by policy instead');
-            setTimeout(() => resolve(running), 1500);
-        };
-        setTimeout(tick, 1000);
-    });
+    //  os.uptime() is seconds since this boot. A 60 s allowance covers the
+    //  clock skew between the installer's Date.now() and the uptime counter --
+    //  and erring on the side of "not yet rebooted" only costs one extra card,
+    //  where erring the other way would drop a restart the install needs.
+    const bootedAt = Date.now() - (os.uptime() * 1000);
+    if (bootedAt > j.at + 60000) {
+        Logger.info('The restart this install needed has already happened -- clearing the ' +
+                    'pending-restart marker');
+        clearPendingRestart();
+        return null;
+    }
+    return { at: j.at, why: j.why };
+}
+
+function clearPendingRestart() {
+    try { if (fs.existsSync(RESTART_MARKER)) fs.unlinkSync(RESTART_MARKER); return true; }
+    catch (e) { Logger.warn('Could not clear the pending-restart marker: ' + e.message); return false; }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3396,25 +3934,25 @@ async function restoreAllBrowsersProxy() {
 //  The ORDER below is the fix for "Chrome and Brave still show the real
 //  location":
 //
-//   1. Push the proxy policy and find out whether it ACTUALLY changed.
-//      That answer decides step 3 on its own merits, instead of the old
-//      code's guess.
-//   2. Package the extension and write its install policy BEFORE the
-//      browsers are closed. Chromium reads enterprise policy at startup,
-//      so the entry has to already be in the registry when the browser
-//      next starts. Doing this after the restart would mean the spoofer
-//      only arrived on the connect after the one that asked for it.
-//   3. Close the browsers -- gracefully, and WAIT for them to really
-//      exit. A live Chromium holds its Preferences in memory and rewrites
-//      it on exit, so anything written underneath a running browser is
-//      silently discarded, and a force-kill skips the flush entirely.
+//   1. Push the proxy policy. Chromium watches this subtree and reloads on
+//      the change, and the WinINET broadcast inside that function reaches
+//      every already-running consumer in the same instant.
+//   2. Package the extension and write its install policy. The forcelist
+//      entry is normally already there from install time; when it is not --
+//      a first run whose installer step failed, or a new loopback port --
+//      writing it here is enough on its own, because Chromium's extension
+//      updater runs on the policy change and installs into a browser that
+//      is already open. That is the ordinary enterprise case.
+//   3. Say what happened. NOTHING IS CLOSED -- see the block above
+//      runningBrowsers() for why the old restart was both unnecessary and,
+//      because of its "assume it changed" default, far more frequent than
+//      it looked.
 //   4. Then the surfaces that have nothing to do with the browsers: shield
 //      the Windows platform, and point Firefox at the spoofed coordinates.
 //
-//  The browsers are only closed when something they read has actually
-//  changed. On a country SWITCH nothing here changes -- the extension is
-//  already installed and the new coordinates reach it live over the
-//  WebSocket -- so the user's tabs are left alone.
+//  On a country SWITCH there is nothing for a browser to re-read at all:
+//  the proxy is 127.0.0.1:9050 for every country, the extension is already
+//  installed, and the new coordinates reach it live over the WebSocket.
 const _origApplyGeo = applyGeolocationSpoof;
 applyGeolocationSpoof = function (win, sc) {
     _origApplyGeo(win, sc);
@@ -3424,7 +3962,6 @@ applyGeolocationSpoof = function (win, sc) {
     return (async () => {
         const geo = geoEngine();
         const ext = geoExt();
-        const alreadyOn = geo.status().active;
         const { proxyChanged } = await forceAllBrowsersOntoProxy();
 
         // 2. Package, serve and force-install the spoofer.
@@ -3436,14 +3973,17 @@ applyGeolocationSpoof = function (win, sc) {
             Logger.warn('Browser location spoofer could not be installed: ' + e.message);
         }
 
-        // 3. Restart only when something the browser reads has changed.
-        if (proxyChanged || !alreadyOn) {
-            await closeBrowsersAndWait(proxyChanged
-                ? 'to apply the new proxy and load the location spoofer'
-                : 'to load the location spoofer');
-        } else {
-            Logger.info('Proxy and location spoofer already in force -- browsers left running');
-        }
+        // 3. NOTHING IS CLOSED. Every value written above is one Chromium
+        //    applies live, and the browsers that are up read it from the
+        //    registry-change notification within about a second -- see the
+        //    block above runningBrowsers(). All that is left to do is say so
+        //    truthfully, naming what was actually running when the write
+        //    landed.
+        const up = runningBrowsers();
+        Logger.info(
+            (proxyChanged ? 'Browser proxy policy changed' : 'Browser proxy policy unchanged') +
+            ` -- applied live to ${up.length ? up.join(', ') : 'no running browser'}; ` +
+            'nothing was closed');
 
         // 4. Windows platform + Firefox.
         geo.applyAll(coord);
@@ -3452,17 +3992,34 @@ applyGeolocationSpoof = function (win, sc) {
         //  on Windows, so say so plainly and once, instead of leaving the
         //  user to work it out from a map showing the wrong city.
         if (extReady) {
-            //  needManualLoad() answers in browser ids, and renderer.js joins
-            //  this array straight into a toast -- so it has to carry display
-            //  names. `auto` names the browsers that were force-installed into
-            //  successfully, so the toast can say what IS covered without
-            //  hardcoding a browser that may not even be on the machine.
+            //  needManualLoad() and needEnable() answer in browser ids, and
+            //  renderer.js joins these arrays straight into a toast -- so they
+            //  have to carry display names. `auto` names the browsers that were
+            //  force-installed into successfully, so the toast can say what IS
+            //  covered without hardcoding a browser that may not even be on the
+            //  machine.
+            //
+            //  Two different asks, and conflating them wastes the user's time:
+            //  'needs-enable' means the download already happened and one
+            //  switch is left; 'absent' means nothing arrived and the folder has
+            //  to be loaded by hand. Measured on this machine, Chrome and Brave
+            //  land in the first group once the delivery helper has run.
             const manual = ext.needManualLoad();
-            if (manual.length) {
-                ext.writeHowTo(manual);
+            const enable = ext.needEnable();
+            //  ...and a third: armed, absent, and simply not started since.
+            //  Measured on this machine -- Chrome, open since before the entry
+            //  was written, had nothing hours later; Brave, started 12 minutes
+            //  after, had it 3 minutes into that start. A toast that says "load
+            //  it by hand" there is asking for work the next start does itself.
+            let restart = [];
+            try { restart = ext.awaitingStart(); } catch (e) {}
+            if (manual.length || enable.length || restart.length) {
+                ext.writeHowTo(manual, enable, restart);
                 if (win && !win.isDestroyed()) {
                     win.webContents.send('geo-ext-setup', {
                         browsers: browsers.names(manual),
+                        enable:   browsers.names(enable),
+                        restart:  browsers.names(restart),
                         auto:     browsers.names(autoDone),
                         dir:      ext.dir,
                     });
@@ -3487,14 +4044,24 @@ clearGeolocationSpoof = function (win) {
     //  switched off after disconnecting.
     try { geoEngine().restoreAll(); }
     catch (e) { Logger.warn('Device location restore failed: ' + e.message); }
-    //  Drop the force-install entry. The extension itself is left alone:
-    //  background.js has already been told the app is disconnected, so it
-    //  reports active:false and pages get the real provider back -- and an
-    //  extension the user loaded by hand is theirs to unload, not ours to
-    //  rip out from behind their back. Only the policy, which they could
-    //  NOT undo themselves, is removed.
-    try { geoExt().restore(); }
-    catch (e) { Logger.warn('Extension policy restore failed: ' + e.message); }
+    //  The force-install entry is deliberately LEFT IN PLACE, and this is
+    //  the other half of "browsers stop closing".
+    //
+    //  Removing it on disconnect made Chromium UNINSTALL the extension, and
+    //  the next connect wrote it back -- so every session, and every country
+    //  switch that goes through a teardown, uninstalled and reinstalled the
+    //  spoofer in every browser. That is the churn the restart existed to
+    //  paper over, and it is also why a reconnect could not be told apart
+    //  from a first install.
+    //
+    //  Leaving it costs the user nothing. It points at
+    //  http://127.0.0.1:<port>, which nothing answers while the app is down,
+    //  and background.js has already reported active:false and cleared the
+    //  browser proxy -- so the extension is present but inert, which is
+    //  exactly the "only works while the app is running" rule. It is removed
+    //  for real at UNINSTALL, by GeoExt.restore() plus the forcelist sweep in
+    //  lib/installer-tasks.js, and by the no-exe-required fallback in
+    //  installer.nsh behind that.
     return restoreAllBrowsersProxy()
         .catch(e => Logger.warn('Browser policy restore failed: ' + e.message));
 };
