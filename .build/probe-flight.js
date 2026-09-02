@@ -34,6 +34,9 @@
 //      ring coordinates must be main.js's GEO_COORDS for that country, exactly
 //    * a country main.js cannot place gets its name in the caption and NO ring,
 //      rather than a ring at 0,0
+//    * a connect that took SEVERAL attempts behind one click still ends anchored
+//      in the country reached, not at home -- the failed attempt's blast took
+//      the pending record with it and there was nothing left to land
 //
 //  It starts no Tor, binds no port, touches no registry, and changes nothing
 //  about the machine: the kill switch is exercised by setting the checkbox and
@@ -72,6 +75,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const SNAP = `(() => {
     const fc = (typeof FC !== 'undefined') ? FC : null;
     const g  = (typeof globe !== 'undefined') ? globe : null;
+    //  The flight path used to be a THREE.QuadraticBezierCurve3 and this read its
+    //  v0 and v2 control points directly. It is now a great circle with a sin(pi t)
+    //  altitude profile and has no such fields, so the two ends are asked for the
+    //  way every other caller asks: getPoint(0) and getPoint(1). They sit one PAD
+    //  (0.6 units) above the ground, so each is scaled back onto the surface --
+    //  which makes the comparison with globe.getCoords() exact rather than merely
+    //  inside the tolerance.
+    const endOf = t => {
+        if (!fc || !fc.curve || typeof fc.curve.getPoint !== 'function') return null;
+        const p = fc.curve.getPoint(t);
+        const l = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z) || 1;
+        return { x: p.x * 100 / l, y: p.y * 100 / l, z: p.z * 100 / l };
+    };
     return {
         anchor: (typeof ANCHOR !== 'undefined' && ANCHOR)
             ? { kind: ANCHOR.kind, code: ANCHOR.code, name: ANCHOR.name,
@@ -80,8 +96,8 @@ const SNAP = `(() => {
             ? { code: PENDING.code, dest: PENDING.dest ? PENDING.dest.code : null,
                 outcome: PENDING.outcome } : null,
         flying: fc ? { state: fc.state, t: fc.t, dest: fc.destInfo && fc.destInfo.code } : null,
-        v0: (fc && fc.curve) ? { x: fc.curve.v0.x, y: fc.curve.v0.y, z: fc.curve.v0.z } : null,
-        v2: (fc && fc.curve) ? { x: fc.curve.v2.x, y: fc.curve.v2.y, z: fc.curve.v2.z } : null,
+        v0: endOf(0),
+        v2: endOf(1),
         trail: (fc && fc.trail) ? {
             obj:   fc.trail.line && fc.trail.line.type,
             mat:   fc.trail.mat && fc.trail.mat.type,
@@ -188,6 +204,7 @@ app.whenReady().then(async () => {
     //  resolves an IPC round trip later.
     await sleep(4500);
     await scenarioKillSwitchOff();
+    await scenarioSecondAttempt();
     await scenarioKillSwitchOn();
     await scenarioUnplaced();
     report(died);
@@ -287,6 +304,80 @@ async function scenarioKillSwitchOff() {
     ok(!!s.anchor && s.anchor.kind === 'home', 'anchored at home', JSON.stringify(s.anchor));
     ringNear("the user's own location", HOME.lat, HOME.lng, s);
     captions(/Standing by in Berlin, Germany/, s);
+}
+
+//  ONE CLICK, SEVERAL ATTEMPTS  --  reported 2026-08-31 with a screenshot.
+//
+//  The user pressed Connect for the United States. The first attempt failed, the
+//  country-unavailable dialog offered its three choices, they picked "keep trying
+//  until it connects", and it did connect -- yet the app showed DISCONNECT,
+//  Protected, a running timer and "United States" in the dropdown while the ring
+//  pulsed over Motijheel, Bangladesh and the caption still read "Standing by in
+//  Motijheel, Bangladesh".
+//
+//  Why: the failed attempt had already blasted the rocket, and a blast clears
+//  PENDING. When the retry succeeded there was no rocket to land and no attempt
+//  on record either, so landing was a silent no-op and the anchor stayed home.
+//  The exit country is now passed to landRocket() for exactly this case.
+async function scenarioSecondAttempt() {
+    console.log('\n══ one click, several attempts: the first fails, a later one connects ══');
+    await run(`window.flyToCountry('${A}')`);
+    await sleep(1600);
+    let s = await snap();
+    ok(!!s.flying && s.flying.dest === A, 'the first attempt puts a rocket in the air',
+       JSON.stringify(s.flying));
+
+    await run('window.explodeRocket()');
+    await sleep(5200);
+    s = await snap();
+    ok(!!s.anchor && s.anchor.kind === 'home' && s.pending === null,
+       'it fails, so the app is back home with nothing pending -- and the dialog is up',
+       JSON.stringify(s.anchor) + ' pending=' + JSON.stringify(s.pending));
+
+    //  What the renderer used to do here, and the whole bug: there is nothing
+    //  left to land. Asserted rather than assumed, because it is also correct --
+    //  a landing with no attempt and no country named has no place to go.
+    await run('window.landRocket()');
+    await sleep(400);
+    s = await snap();
+    ok(!!s.anchor && s.anchor.kind === 'home',
+       'landing with no country named still cannot move it: nothing is on record',
+       JSON.stringify(s.anchor));
+
+    //  What it does now: the verified exit country, which is the one thing the
+    //  renderer does know at that moment.
+    await run(`window.landRocket('${A}')`);
+    await sleep(500);
+    s = await snap();
+    ok(!!s.anchor && s.anchor.kind === 'country' && s.anchor.code === A,
+       'told where the tunnel came out, it anchors there', JSON.stringify(s.anchor));
+    ringOn(A, s);
+    captions(/Secured & Routed via Romania/, s);
+    ok(s.pending === null, 'and nothing is left pending', JSON.stringify(s.pending));
+
+    //  The settle re-records the attempt to place it, which schedules a launch
+    //  960 ms out. It must not go: the tunnel is already up.
+    await sleep(1600);
+    s = await snap();
+    ok(s.flying === null, 'no rocket takes off out of the settle afterwards',
+       JSON.stringify(s.flying));
+    ringOn(A, s);
+
+    //  The renderer's progress record and its connect reply can both land the
+    //  same success. The second one has to be a no-op.
+    await run(`window.landRocket('${A}')`);
+    await sleep(400);
+    s = await snap();
+    ok(!!s.anchor && s.anchor.code === A && s.flying === null,
+       'landing the same country twice changes nothing', JSON.stringify(s.anchor));
+    ringOn(A, s);
+    captions(/Secured & Routed via Romania/, s);
+
+    await run('window.backToHome()');
+    await sleep(4800);
+    s = await snap();
+    ok(!!s.anchor && s.anchor.kind === 'home', 'and it disconnects back home as usual',
+       JSON.stringify(s.anchor));
 }
 
 async function scenarioKillSwitchOn() {

@@ -150,6 +150,19 @@ class Probe {
 
         let log = '';
         try { log = fs.readFileSync(logFile, 'utf8'); } catch (e) {}
+        //  --enable-logging=stderr is not always honoured when stderr is a
+        //  redirected handle: some runs put everything in the profile's own
+        //  chrome_debug.log instead and the redirect file comes back empty.
+        //  MEASURED on Brave: a failing run of test-geo-purge.js reported "the
+        //  extension printed nothing at all" while the switch demonstrably
+        //  reached the page -- i.e. the capture was missing, not the extension.
+        //  Both are read now, because which one gets written is not ours to
+        //  choose and a diagnostic that is absent exactly when a test fails is
+        //  worse than none.
+        try {
+            const alt = fs.readFileSync(path.join(udd, 'chrome_debug.log'), 'utf8');
+            if (alt && !log.includes(alt.slice(0, 200))) log += (log ? '\n' : '') + alt;
+        } catch (e) {}
         return {
             pos: this.reports.find(r => r.startsWith('ok=')) || this.reports.find(r => r.startsWith('err=')) || null,
             perm: this.reports.find(r => r.startsWith('perm=')) || null,

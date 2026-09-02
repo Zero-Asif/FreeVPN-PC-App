@@ -23,7 +23,8 @@ const http = require('http');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 
-const { GeoExt } = require('../lib/geo-ext');
+const geoExtMod = require('../lib/geo-ext');
+const { GeoExt } = geoExtMod;
 const crx = require('../lib/crx');
 const browsersMod = require('../lib/browsers');
 
@@ -186,7 +187,24 @@ const get = url => new Promise((res, rej) => {
        'not-present means exactly "no verified executable on this machine"');
     const manual = ext.needManualLoad();
     console.log('   needManualLoad -> ' + JSON.stringify(manual));
-    ok(!manual.includes('edge'), 'Edge is never listed as needing a manual load');
+    //  Edge used to be asserted out of this list unconditionally, on the premise
+    //  that its forcelist works. Measured 2026-09-01: that holds only on a device
+    //  an organization manages -- an unmanaged Edge tags an off-store
+    //  force-install [BLOCKED] and installs nothing -- so the invariant is now
+    //  stated per device state, which is what geo-ext.js actually implements.
+    geoExtMod._setManaged(true);
+    const managedManual = ext.needManualLoad();
+    ok(!managedManual.includes('edge'),
+       'managed device: Edge is never listed as needing a manual load -- route 1 has it',
+       JSON.stringify(managedManual));
+    geoExtMod._setManaged(false);
+    const unmanagedManual = ext.needManualLoad();
+    const seenNow = ext.presence();
+    ok(unmanagedManual.every(id => seenNow[id] === 'absent' && !ext.awaitingStart(seenNow).includes(id)),
+       'unmanaged device: Edge may appear, but only while it is absent AND nothing ' +
+       'is armed for it -- there is no other door left to promise',
+       JSON.stringify(unmanagedManual));
+    geoExtMod._setManaged(null);
     ok(manual.every(n => seen[n] === 'absent'), 'manual list only contains absent browsers');
     ok(manual.every(id => here.has(id)),
        'a browser that is not installed is never put in a "do this by hand" list');

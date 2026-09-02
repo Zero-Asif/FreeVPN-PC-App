@@ -257,7 +257,14 @@ async function session(probe, app, name, exe, extDir) {
        `${name}: the FIRST geolocation call of the session already gets the connected country`,
        'got: ' + (firstAnswer || '(none)'));
 
-    ok(!!seen.jp, `${name}: a country switch reaches an already-open page, no reload, no repack`,
+    //  "no repack" is the claim: the switch travels the live WebSocket into an
+    //  extension that is already installed, so no CRX is rebuilt and no browser
+    //  is restarted. It is NOT a claim that the tab is not reloaded -- the
+    //  location purge added for the Brave stale-country bug reloads exactly the
+    //  tabs that were handed a position, and the report stream above shows it:
+    //  the counter restarts at n=1 when the new country arrives, which is a new
+    //  document. .build/test-geo-purge.js is where that reload is the subject.
+    ok(!!seen.jp, `${name}: a country switch reaches an already-open page over the live socket, no repack`,
        'reports after the switch: ' + probe.reports.slice(markJP).join(' | '));
     if (seen.jp) console.log(`        ${seen.jp}`);
     ok(perms.includes('granted'),

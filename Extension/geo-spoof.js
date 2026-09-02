@@ -69,6 +69,21 @@
 
     var CHANNEL = '__freeproxy_geo__';
 
+    //  The reverse direction of CHANNEL, and it carries no data -- only the
+    //  fact that THIS page was handed a spoofed position at least once.
+    //  geo-bridge.js relays it to the service worker, which needs the list for
+    //  exactly one purpose: when the country changes, the sites that were told
+    //  the OLD one are the sites now holding a stale copy of it, and they are
+    //  the only ones whose stored state may be cleared. Sites that never asked
+    //  are left completely alone. See purgeLocationTraces() in background.js.
+    var USED = '__freeproxy_geo_used__';
+    var reported = false;
+    function reportUse() {
+        if (reported) return;         // once per page is all the worker needs
+        reported = true;
+        try { document.dispatchEvent(new CustomEvent(USED)); } catch (e) {}
+    }
+
     //  Ceiling on how long a call may be held waiting for an answer that never
     //  comes -- a service worker that cannot start, or something occupying the
     //  app's port without speaking its protocol. Normally nothing waits
@@ -142,6 +157,10 @@
     function jitter(span) { return (Math.random() - 0.5) * span; }
 
     function makePosition(cfg) {
+        //  Every spoofed position this file ever hands out is built here, which
+        //  makes it the one honest place to record that this origin consumed
+        //  one -- no call site can be added later that forgets to.
+        reportUse();
         var acc = typeof cfg.accuracy === 'number' ? cfg.accuracy : 18;
         var coords = {
             latitude:         cfg.lat + jitter(0.0008),

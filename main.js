@@ -1,6 +1,6 @@
 const WebSocket = require('ws');
 const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
-const { exec, execSync, execFile, spawn, spawnSync } = require('child_process');
+const { exec, execSync, execFile, fork, spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs   = require('fs');
 const os   = require('os');
@@ -548,6 +548,27 @@ try {
     }
     app.setPath('userData', APPDATA_PATH);
 } catch(e) { /* fallback to default if setPath fails */ }
+
+//  ── The delivery port, bound before Electron finishes starting ──
+//  MEASURED 2026-09-01: this task's action started at 21:37:27 and
+//  app.whenReady() did not fire until 21:38:09.5 -- 42.5 seconds of Chromium
+//  browser-process init, with the port every browser policy names dead for all
+//  of it. The user's desktop is usable well inside that window, and a browser
+//  started there reads its external-extensions provider once, finds nothing
+//  listening, installs nothing, and does not look again until its next start.
+//  That is the reported "restart er por Edge e dhukle kichu asena, kete diye
+//  abar open korle asche".
+//
+//  Serving the two static files needs http, fs and the bundle on disk -- no
+//  window, no GPU, no Electron API -- and the main process's event loop is
+//  already running here. So the listener goes up now, seconds into the process,
+//  and serveUntilDelivered() adopts it (and replays the log lines it could not
+//  write yet, Logger.init being inside whenReady). A port already held by the
+//  boot pass still lands on the existing grace path, unchanged.
+if (installerTasks.installerTask(process.argv) === 'deliver') {
+    try { require('./lib/ext-deliver').serveEarly({ stateDir: APPDATA_PATH }); }
+    catch (e) { /* whenReady still runs the job the ordinary way */ }
+}
 
 app.whenReady().then(() => {
     Logger.init(app.getPath('userData'));
@@ -1502,7 +1523,21 @@ function runAdminApp() {
         ws.send(JSON.stringify({ type: 'STATE_SYNC', state: stateForWire() }));
         ws.on('message', async raw => {
             const d = JSON.parse(raw);
-            if (d.command === 'PING') return;
+            //  ANSWERED, not swallowed. The extension pings every 20 s to hold
+            //  its MV3 service worker above Chromium's ~30 s idle cut-off, and
+            //  only WebSocket TRAFFIC resets that timer -- so a ping nothing
+            //  replies to leaves the worker leaning on its own outgoing send
+            //  alone. A worker that dies while the browser is pointed at Tor is
+            //  what left Brave with ERR_PROXY_CONNECTION_FAILED after the app
+            //  closed: the proxy pref is persistent and only a live worker can
+            //  release it. Extension/background.js carries the watchdog that
+            //  recovers from it; this is the cheaper half -- keeping the worker
+            //  alive so its onclose can release the proxy the instant the app
+            //  goes away, instead of up to 30 s later.
+            if (d.command === 'PING') {
+                try { ws.send(JSON.stringify({ type: 'PONG' })); } catch (e) {}
+                return;
+            }
             //  Answered BEFORE the no-window guard below: a question can be put
             //  to a popup while the app window is closed to the tray, and an
             //  answer that got dropped there would leave the connect waiting
@@ -1712,6 +1747,15 @@ function runAdminApp() {
     const DNS_PORT           = 53;
     const DNS_FALLBACK_PORT  = 9053;
 
+    //  How many exit relays one round of "keep trying this country" walks
+    //  through. A normal attempt takes the best 5, which is the right budget
+    //  when a failure hands the user a choice a few seconds later. This is the
+    //  other case: the user has read the three options and chosen to wait, so
+    //  the only wrong answer is giving up early. Sweden lists 300+ exits and
+    //  was being abandoned after five -- and, before the repinFirst fix, after
+    //  one.
+    const KEEP_TRYING_DEPTH  = 12;
+
     let torProc       = null;
     let torCtl        = null;
     let dnsViaTor     = false;
@@ -1867,40 +1911,81 @@ function runAdminApp() {
         return lines.join('\n');
     }
 
+    //  ── Slow Windows commands, off the UI thread ─────────────────────
+    //
+    //  MEASURED, .build/probe-uiblock.js on this machine: with NO tor.exe to
+    //  kill and dnscache deliberately left alone, the synchronous calls in
+    //  startTor() still held Electron's main thread for 1370 ms -- taskkill
+    //  131 ms, tor --verify-config 937 ms cold (104 ms once Defender has
+    //  scanned the binary), tasklist 124 ms. That thread is the one pumping
+    //  the window's message queue, and Windows paints "(Not Responding)" over
+    //  a window that has not serviced its queue for roughly 5 s. Add
+    //  `net stop dnscache` against a RUNNING service -- allowed 15 s here,
+    //  three times that budget -- and a connect or a switch is exactly the
+    //  "sometimes it says not responding, then it comes back" in the report.
+    //
+    //  Same commands, same order, same arguments. The only change is that the
+    //  event loop keeps turning while Windows takes its time.
+    //
+    //  execFile, not exec: an args array never goes through cmd.exe, so the
+    //  space in "C:\Users\User pc" survives -- the same reason verifyTorrc()
+    //  used spawnSync rather than execSync.
+    const runQuiet = (file, args, timeout = 15000) => new Promise(resolve => {
+        try {
+            execFile(file, args, { windowsHide: true, encoding: 'utf8', timeout },
+                (err, stdout, stderr) => resolve({
+                    ok: !err,
+                    code: err ? (err.code === undefined ? null : err.code) : 0,
+                    out: (stdout || '') + (stderr || ''),
+                }));
+        } catch (e) { resolve({ ok: false, code: null, out: e.message }); }
+    });
+
     //  tor exits with status 1 on a bad config, and the old code learned
     //  that only by watching bootstrap never start and timing out 120 s
     //  later. --verify-config returns the actual parser error in ~200 ms.
-    //  spawnSync with an args array, never execSync: the space in
+    //  An args array, never a command string: the space in
     //  "C:\Users\User pc" is destroyed by cmd.exe's quote handling.
-    function verifyTorrc(file) {
+    async function verifyTorrc(file) {
         const P = torPaths();
         try {
-            const r = spawnSync(P.torExe, ['--verify-config', '-f', file], {
-                cwd: torDir, windowsHide: true, encoding: 'utf8', timeout: 20000,
-            });
-            const out = (r.stdout || '') + (r.stderr || '');
-            if (r.status === 0 && /Configuration was valid/.test(out)) return { ok: true };
-            const why = (out.match(/\[(?:warn|err)\][^\r\n]*/g) || [])
+            const r = await runQuiet(P.torExe, ['--verify-config', '-f', file], 20000);
+            if (r.ok && /Configuration was valid/.test(r.out)) return { ok: true };
+            const why = (r.out.match(/\[(?:warn|err)\][^\r\n]*/g) || [])
                 .filter(l => !/is relative and will resolve/.test(l))
-                .slice(0, 4).join(' | ') || `exit ${r.status}`;
+                .slice(0, 4).join(' | ') || `exit ${r.code}`;
             return { ok: false, error: why };
         } catch (e) { return { ok: false, error: e.message }; }
     }
 
-    function killTor() {
+    //  Resolves once tor is really gone. `blocking: false` wherever a window
+    //  is on screen; the default stays synchronous for the quit path, where
+    //  freezing an already-closing window is invisible and being certain
+    //  tor.exe is dead before the process exits is worth more.
+    function killTor({ blocking = true } = {}) {
         //  Before torCtl goes away -- the guard has nothing to talk to
         //  after this, and an interval firing against a dead control port
         //  just logs noise every 15 s.
         stopCircuitGuard();
         if (torCtl)  { try { torCtl.close(); } catch (e) {} torCtl = null; }
         if (torProc) { try { torProc.kill(); } catch (e) {} torProc = null; }
-        try { execSync('taskkill /F /IM tor.exe /IM lyrebird.exe', { stdio: 'ignore', windowsHide: true }); } catch (e) {}
-        //  Remove the lock file only. The descriptor/consensus cache is
-        //  KEPT: deleting it forced a ~9600-relay re-download that made
-        //  switches take 36-64 s and sometimes stall outright.
+
+        //  Remove the lock file only, and only AFTER the kill -- tor is still
+        //  holding it until then. The descriptor/consensus cache is KEPT:
+        //  deleting it forced a ~9600-relay re-download that made switches
+        //  take 36-64 s and sometimes stall outright.
         const P = torPaths();
-        [path.join(P.torData, 'lock'), path.join(torDir, 'data', 'lock')]
-            .forEach(lf => { try { if (fs.existsSync(lf)) fs.unlinkSync(lf); } catch (e) {} });
+        const dropLock = () => {
+            [path.join(P.torData, 'lock'), path.join(torDir, 'data', 'lock')]
+                .forEach(lf => { try { if (fs.existsSync(lf)) fs.unlinkSync(lf); } catch (e) {} });
+        };
+        if (!blocking) {
+            return runQuiet('taskkill', ['/F', '/IM', 'tor.exe', '/IM', 'lyrebird.exe'], 10000)
+                .then(dropLock);
+        }
+        try { execSync('taskkill /F /IM tor.exe /IM lyrebird.exe', { stdio: 'ignore', windowsHide: true }); } catch (e) {}
+        dropLock();
+        return Promise.resolve();
     }
 
     //  Resolves { ok, reason, percent }. reason is one of
@@ -1910,16 +1995,16 @@ function runAdminApp() {
     //  on DNSPort 9053. tor TERMINATES when a listener cannot bind, which
     //  is exactly why every attempt sat at 0% until the 120 s timeout
     //  whenever dnscache still held port 53.
-    function startTor({ exitSpec, useBridges = false, dnsPort = DNS_PORT,
-                        onProgress, stallMs = 40000, maxMs = 120000 }) {
+    async function startTor({ exitSpec, useBridges = false, dnsPort = DNS_PORT,
+                             onProgress, stallMs = 40000, maxMs = 120000 }) {
         const P = torPaths();
-        killTor();
+        await killTor({ blocking: false });
 
         fs.writeFileSync(P.torrc, buildTorrc({ exitSpec, useBridges, dnsPort }), 'utf8');
-        const check = verifyTorrc(P.torrc);
+        const check = await verifyTorrc(P.torrc);
         if (!check.ok) {
             Logger.error('torrc rejected by tor --verify-config', { error: check.error });
-            return Promise.resolve({ ok: false, reason: 'config', error: check.error, percent: 0 });
+            return { ok: false, reason: 'config', error: check.error, percent: 0 };
         }
         Logger.debug('torrc validated by tor --verify-config');
 
@@ -1927,11 +2012,11 @@ function runAdminApp() {
         //  cannot be used instead: it forwards TCP only, and DNS is UDP,
         //  so the earlier portproxy approach silently forwarded nothing.
         if (dnsPort === DNS_PORT) {
-            try {
-                spawnSync('net', ['stop', 'dnscache', '/y'],
-                    { windowsHide: true, stdio: 'pipe', timeout: 15000 });
-                Logger.debug('dnscache stopped -- port 53 free for Tor');
-            } catch (e) { Logger.debug('dnscache stop: ' + e.message); }
+            const r = await runQuiet('net', ['stop', 'dnscache', '/y'], 15000);
+            Logger.debug(r.ok
+                ? 'dnscache stopped -- port 53 free for Tor'
+                : 'dnscache stop: ' +
+                  ((r.out || '').trim().split(/\r?\n/).filter(Boolean).pop() || `exit ${r.code}`));
         }
 
         Logger.info('Spawning tor.exe', { exitSpec, useBridges, dnsPort });
@@ -2046,19 +2131,54 @@ function runAdminApp() {
     //  Relay churn does the same thing over a longer session. Which is
     //  why this runs on a timer instead of only at connect: "connect to
     //  Luxembourg" has to still mean Luxembourg twenty minutes later.
-    function startCircuitGuard(fp) {
+    //
+    //  What the timer must NOT do is keep using MAX_SAFE_INTEGER. That
+    //  value means "condemn every circuit whose exit is not known yet, no
+    //  matter how young", which was right for the one-shot sweep above and
+    //  wrong fifteen seconds later: by then a circuit with fewer than two
+    //  hops was launched AFTER the pin, so StrictNodes leaves it only one
+    //  possible exit -- the pinned one. Closing it destroys a circuit Tor
+    //  was building for us, and since 0.4.8 most exit circuits are built as
+    //  conflux legs, which is Tor's own throughput mechanism.
+    //
+    //  Measured on this machine (.build/probe-exit-speed.js PS_GUARD=2, CH,
+    //  280 polls of circuit-status over 201 s while streaming): 13 app
+    //  circuits appeared, 10 of them were caught mid-build, all 10 launched
+    //  after the pin, and 7 went on to reach BUILT on the pinned exit.
+    //  Something was mid-build in 3.2% of the clock, so a 15 s tick lands on
+    //  one about 8 times an hour. It is not a large number and the A/B run
+    //  (PS_GUARD=1) measured no TTFB difference -- 594 ms against 599 ms,
+    //  inside the noise -- so this is removing pointless work, not a speed
+    //  claim. The watermark is read here, at arm time, which is immediately
+    //  after finalSweep() has already closed everything not on `fp`.
+    async function startCircuitGuard(fp) {
         stopCircuitGuard();
         if (!fp) return;
         guardFp = fp.replace(/^\$/, '').toUpperCase();
+        //  MAX_SAFE_INTEGER on failure, never 0: a control port that would not
+        //  answer must not be able to quietly disarm the half-built branch.
+        //  maxCircuitId() swallows its own errors and returns 0, so 0 is read
+        //  here as "no marker", not as "spare everything".
+        let watermark = Number.MAX_SAFE_INTEGER;
+        try {
+            if (torCtl && torCtl.isOpen) {
+                const hi = await torCtl.maxCircuitId();
+                if (hi > 0) watermark = hi;
+            }
+        } catch (e) {
+            Logger.debug('Circuit guard: could not read the circuit-id watermark, ' +
+                         'falling back to closing every half-built circuit');
+        }
         guardTimer = setInterval(async () => {
             if (!appState.connected || !guardFp) return stopCircuitGuard();
             if (!torCtl || !torCtl.isOpen) return;
             try {
-                //  staleIdMax: Number.MAX_SAFE_INTEGER -- by now every
-                //  half-built circuit is old news, so any of them that is
-                //  not headed for the pinned relay can go.
+                //  Circuits that already have an exit are still checked against
+                //  the pinned relay on every tick -- that is the guarantee this
+                //  guard exists for, and it is untouched. Only the "exit not
+                //  known yet" branch is now bounded by the watermark.
                 const closed = await torCtl.purgeCircuitsExcept(guardFp,
-                    { staleIdMax: Number.MAX_SAFE_INTEGER });
+                    { staleIdMax: watermark });
                 if (closed) {
                     Logger.info(`Circuit guard: closed ${closed} circuit(s) drifting off ` +
                                 `${guardFp.slice(0, 8)}`);
@@ -2069,7 +2189,9 @@ function runAdminApp() {
         }, 15000);
         //  Never let this keep the process alive on quit.
         if (guardTimer.unref) guardTimer.unref();
-        Logger.info(`Circuit guard armed on ${guardFp.slice(0, 8)}`);
+        Logger.info(`Circuit guard armed on ${guardFp.slice(0, 8)}` +
+                    (watermark === Number.MAX_SAFE_INTEGER
+                        ? '' : `, sparing circuits launched after #${watermark}`));
     }
 
     function stopCircuitGuard() {
@@ -2101,16 +2223,39 @@ function runAdminApp() {
     //       relays first (see exit-selector.js for why)
     //    3. plain {cc} if no relay list is reachable at all -- unverified,
     //       and reported as such rather than claimed as confirmed
-    async function exitPlan(cc) {
+    //
+    //  `limit` is 5 for a normal attempt and deliberately much larger when the
+    //  user has said "keep trying this country": a country with 300 exit relays
+    //  was being given up on after five, which is the report "jekhane sweden er
+    //  exit node 300+ sekhane ekta nodeo naki app connect korte parchena".
+    //
+    //  `exclude` is the set of fingerprints THIS connect has already proved it
+    //  cannot build a circuit to -- neither through the running Tor nor by
+    //  restarting it on that relay. It is not a rejection and is never written
+    //  to disk; it exists so round 2 of "keep trying" does not spend itself on
+    //  the same relay round 1 just failed on, which is exactly what it did.
+    async function exitPlan(cc, { limit = 5, exclude = null } = {}) {
         const plan = [];
         const cached = exitStore.getVerified(cc);
-        if (cached && cached.fp) {
+        if (cached && cached.fp && !(exclude && exclude.has(cached.fp))) {
             plan.push({ fp: cached.fp, nick: cached.nick || '', ip: cached.ip || null, cached: true });
             Logger.info(`Using previously verified ${cc.toUpperCase()} exit: ${cached.nick || cached.fp.slice(0, 8)}`);
         }
         try {
             await refreshRelayIndex({ viaTor: appState.connected });
-            for (const c of relayIndex.candidates(cc, exitStore, { limit: 5 })) {
+            let cands = relayIndex.candidates(cc, exitStore, { limit, exclude });
+            //  If the exclusion has emptied the country, it has turned "keep
+            //  trying" into "stop trying". Drop it and go round again: a relay
+            //  that would not carry a circuit ten minutes ago is precisely the
+            //  kind of thing that changes, and the reject store -- which IS a
+            //  measurement -- is still being honoured underneath.
+            if (!cands.length && exclude && exclude.size) {
+                Logger.info(`Re-trying ${exclude.size} ${cc.toUpperCase()} relay(s) that could ` +
+                            'not be reached earlier -- there is nothing else left to try');
+                exclude.clear();
+                cands = relayIndex.candidates(cc, exitStore, { limit });
+            }
+            for (const c of cands) {
                 if (!plan.some(p => p.fp === c.fp)) plan.push({ ...c, cached: false });
             }
         } catch (e) {
@@ -2132,9 +2277,22 @@ function runAdminApp() {
     //  requested country, so the geolocation spoof always agrees with the
     //  IP the user can see -- announcing Luxembourg over a Swiss exit is
     //  the exact inconsistency in the report.
-    async function lockExitCountry(cc, plan, { repin, onProgress }) {
+    //
+    //  `repinFirst` exists because candidate 0 is only "already pinned" for the
+    //  country Tor was STARTED on. Every other caller -- the nearest-country
+    //  search, and every round of "keep trying" -- reaches this with Tor
+    //  standing on some other country, and they used to handle that by pinning
+    //  candidate 0 themselves and treating a failure as "the whole country is
+    //  unreachable". That is the bug behind "keep trying" never arriving: one
+    //  relay was tried per round, the same one every round, while the other 300
+    //  in the country were never touched.
+    async function lockExitCountry(cc, plan, { repin, onProgress, repinFirst = false }) {
         const want = cc.toUpperCase();
         let answers = 0;
+        //  Candidates that got as far as a geolocation probe. It separates "no
+        //  source answered" from "no circuit could be built to any of them",
+        //  which are different failures and used to share one name.
+        let probed = 0;
         let lastSeen = null;
         //  The last fingerprint ExitNodes was actually set to, whether or
         //  not it verified. The caller needs it even on failure: circuits
@@ -2149,7 +2307,7 @@ function runAdminApp() {
                         : cand.fp  ? cand.fp.slice(0, 8)
                                    : `Tor GeoIP {${cc}}`;
 
-            if (i > 0) {
+            if (i > 0 || repinFirst) {
                 if (onProgress) onProgress(98, `Trying another ${want} exit (${i + 1}/${plan.length})...`);
                 if (cand.fp) pinnedFp = cand.fp;
                 if (!await repin(cand)) {
@@ -2167,6 +2325,7 @@ function runAdminApp() {
             }
 
             if (onProgress) onProgress(98, 'Confirming exit location...');
+            probed++;
             const probe = await probeExitLocation(SOCKS_PORT, Logger, { timeoutMs: 14000 });
 
             if (!probe) {
@@ -2207,7 +2366,10 @@ function runAdminApp() {
 
         return {
             verified: false, cc: null, ip: null, fp: null,
-            reason: answers ? 'exhausted' : 'no-answer',
+            //  'exhausted'   -- relays answered, none of them was in this country
+            //  'no-answer'   -- a circuit stood, but no geolocation source replied
+            //  'unreachable' -- no circuit could be built to any candidate at all
+            reason: answers ? 'exhausted' : (probed ? 'no-answer' : 'unreachable'),
             pinnedFp, lastSeen,
         };
     }
@@ -2407,7 +2569,16 @@ function runAdminApp() {
     //  and it is what makes "Nothing has been connected in X" true rather than
     //  just written.
     async function sealTunnel(cc) {
-        if (!torCtl || !torCtl.isOpen) return false;
+        if (!torCtl || !torCtl.isOpen) {
+            //  Tor is not running or its control port is gone -- which is the
+            //  state a failed engine restart leaves behind. Nothing needs
+            //  closing in that case, but it has to be VISIBLE that the hold was
+            //  achieved by the engine being down rather than by a config change,
+            //  or the log simply stops mentioning the hold at all.
+            Logger.info(`Holding: no Tor control port -- the engine is down, so nothing ` +
+                        `can leave this PC for {${cc}} or anywhere else`);
+            return false;
+        }
         try {
             await torCtl.setConf({ ExitNodes: `{${cc}}` });
             const closed = await torCtl.closeAppCircuits();
@@ -2437,7 +2608,7 @@ function runAdminApp() {
         Logger.info('Tearing the tunnel back down: ' + why);
         stopCircuitGuard();
         stopExitWatcher();
-        try { killTor(); } catch (e) { Logger.warn('killTor: ' + e.message); }
+        try { await killTor({ blocking: false }); } catch (e) { Logger.warn('killTor: ' + e.message); }
         try { await setAppProxy(appState.killSwitch ? 'blocked' : 'direct'); }
         catch (e) { Logger.warn('setAppProxy: ' + e.message); }
         try { if (mainWindow) await clearGeolocationSpoof(mainWindow); }
@@ -2759,9 +2930,16 @@ function runAdminApp() {
         //  -- direct, then a DNS-port retry if :53 is taken, then bridges. Only
         //  when all three are exhausted is the user asked, and only their answer
         //  decides whether it runs again, moves country, goes back, or stops.
-        let res = null, engineRound = 0, engineNote = null;
+        //
+        //  `usedBridges` is carried out of here on purpose. Every later restart
+        //  of the engine -- and re-pinning an exit can now require one -- has to
+        //  be started the same way this one succeeded, or a connection that only
+        //  reaches Tor through obfs4 would lose the tunnel the moment the app
+        //  tried to change its exit.
+        let res = null, engineRound = 0, engineNote = null, usedBridges = false;
         for (;;) {
             engineRound += 1;
+            usedBridges  = false;
             res = await startTor({
                 exitSpec: firstSpec, dnsPort,
                 onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
@@ -2788,6 +2966,7 @@ function runAdminApp() {
                     exitSpec: firstSpec, dnsPort, useBridges: true,
                     onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
                 });
+                usedBridges = res.ok;
             }
 
             if (res.ok) break;
@@ -2808,7 +2987,7 @@ function runAdminApp() {
             //  page could leave through a route nobody chose. torStarted stays
             //  true on purpose: the tunnel that was working has been replaced,
             //  so cancelConnect must not claim it is still up.
-            killTor();
+            await killTor({ blocking: false });
             sendProgress(res.percent,
                 res.reason === 'config' ? 'Tor configuration error. Check the log.'
                                         : `Could not connect through ${ccName(serverCode)}.`,
@@ -2884,6 +3063,25 @@ function runAdminApp() {
         try { ctl = await openControl(); }
         catch (e) { Logger.warn('Control port unavailable: ' + e.message); }
 
+        //  Fingerprints this connect has proved it cannot reach: the running Tor
+        //  refused to build to them AND a restart pinned on them did not come
+        //  up either. Session-only, never written to the reject store -- that
+        //  store is for where a relay geolocates, which is a different fact with
+        //  a different lifetime. See exitPlan()'s `exclude`.
+        const noCircuit = new Set();
+
+        //  Set the first time the control-port re-pin is shown not to work on
+        //  THIS tor process, after which every candidate goes straight to a
+        //  restart. It is a property of the process, not of the relay: measured
+        //  on 2026-09-01, once Tor started printing "No exits in ExitNodes seem
+        //  to be running: can't choose an exit" it did so for all 5 SE
+        //  candidates, then for EE, FI, NO and DK, then for four more rounds --
+        //  13 attempts, ~50 s each, none of which could ever have worked. The
+        //  same relay that failed four consecutive 25 s waits on that process
+        //  (ferrarizGonzalez) connected 9 s after a fresh tor.exe was spawned
+        //  with it pinned in the torrc.
+        let livePinBroken = false;
+
         //  Curried on the target country, not closed over `serverCode`: the
         //  fallback spec for a candidate with no fingerprint is `{cc}`, and the
         //  nearest-country search and the "keep trying" loop both re-pin for a
@@ -2892,11 +3090,29 @@ function runAdminApp() {
         //  country -- the one that had just been shown to have nothing usable.
         const repinFor = target => async cand => {
             const spec = cand.fp ? `$${cand.fp}` : `{${target}}`;
-            if (ctl && ctl.isOpen) {
+            //  Set when the live path has given up on this candidate, so the
+            //  engine restart below is reached instead of a bare `return false`.
+            let restart = false;
+            if (ctl && ctl.isOpen && !livePinBroken) {
                 try {
-                    //  Taken BEFORE the config change: every circuit id at
-                    //  or below this was launched under the OLD ExitNodes, so
-                    //  even the ones with no exit chosen yet are suspect.
+                    //  Guard/middle pairs for the forced build below, stashed
+                    //  BEFORE the purge on purpose. Afterwards Tor's circuit
+                    //  list is empty and it cannot refill it, because refilling
+                    //  means choosing the exit it is refusing to choose --
+                    //  measured in .build/probe-force-pin.js run 1, where every
+                    //  escalation reported "no built 3-hop circuit to borrow a
+                    //  path from" for that reason alone.
+                    await ctl.harvestPathDonors();
+
+                    //  Taken BEFORE the config change, and as late as possible:
+                    //  every circuit id at or below this was launched under the
+                    //  OLD ExitNodes, so even the ones with no exit chosen yet
+                    //  are suspect. It is read AFTER the harvest above, not
+                    //  before it, because anything Tor launches between the
+                    //  marker and the SETCONF gets an id above the marker and
+                    //  would survive the purge while still ending in the country
+                    //  being left -- and on the `{cc}` path below there is no
+                    //  fingerprint check to catch it afterwards.
                     const idMark = await ctl.maxCircuitId();
 
                     //  StrictNodes is already 1 in the torrc; setting it
@@ -2919,7 +3135,30 @@ function runAdminApp() {
                     //  that have already carried a stream, and Tor keeps a
                     //  pool of clean pre-built ones that have not. So the
                     //  offending circuits get closed by id instead.
-                    if (cand.fp) await ctl.purgeCircuitsExcept(cand.fp, { staleIdMax: idMark });
+                    //
+                    //  Not gated on `cand.fp` any more, and that was a real
+                    //  hole: with no fingerprint the spec is `{cc}`, so there
+                    //  is no relay to exempt -- and the old gate turned that
+                    //  into exempting EVERYTHING. A switch made while the relay
+                    //  list was unreachable changed the config, reported
+                    //  success, and left the previous country's circuits
+                    //  attachable. purgeCircuitsExcept() reads a falsy fp as
+                    //  "nothing is exempt, condemn by the id marker", which is
+                    //  the only question that can be answered about a circuit
+                    //  when the pin names a country instead of a relay.
+                    //
+                    //  MAX_SAFE_INTEGER rather than 0 on that path when the
+                    //  marker could not be read, for the same reason
+                    //  startCircuitGuard() does it: maxCircuitId() swallows its
+                    //  own errors and returns 0, and with no fingerprint to fall
+                    //  back on, reading that 0 as "spare everything" would let a
+                    //  control port that would not answer silently keep the old
+                    //  country attachable. Everything standing at this instant
+                    //  predates the SETCONF that just returned anyway, and a
+                    //  Tor with no circuits at all also reports 0 -- where
+                    //  closing everything closes nothing.
+                    const sweepMax = (!cand.fp && !idMark) ? Number.MAX_SAFE_INTEGER : idMark;
+                    await ctl.purgeCircuitsExcept(cand.fp, { staleIdMax: sweepMax });
 
                     //  NEWNYM on top, for the client-side state a circuit
                     //  purge cannot reach. Tor rate-limits it to roughly once
@@ -2936,33 +3175,114 @@ function runAdminApp() {
                     if (cand.fp) {
                         //  Wait for a real BUILT circuit through this relay
                         //  instead of the old blind `await sleep(12000)`.
-                        const built = await ctl.waitForExit(cand.fp, { timeoutMs: 25000 });
+                        //
+                        //  10 s, not 25. When Tor is willing to choose this
+                        //  relay it does so in about 1.5-5 s (measured, 7 of 7
+                        //  successful pins in .build/probe-force-pin.log: 79,
+                        //  1462, 1480, 2857 and 5031 ms). When it is NOT
+                        //  willing, waiting is worthless -- it spends the whole
+                        //  budget printing "No exits in ExitNodes seem to be
+                        //  running: can't choose an exit" and then fails. The
+                        //  seconds saved go into the forced build instead.
+                        let built = await ctl.waitForExit(cand.fp, { timeoutMs: 10000 });
+
+                        //  ESCALATION -- stop asking Tor to choose, and name
+                        //  the path. Tor's exit scoring is what refuses these
+                        //  relays, not reachability: measured, EXTENDCIRCUIT
+                        //  built to a relay Tor had just refused for 25 s in
+                        //  1414 ms, PURPOSE=GENERAL, visible to activeExits().
+                        //  This is what makes a country with listed exits
+                        //  actually connectable instead of merely offered.
                         if (!built) {
-                            Logger.warn(`No circuit reached ${cand.nick || cand.fp.slice(0, 8)} in 25s`);
-                            return false;
+                            const forced = await ctl.forceExitCircuit(cand.fp, {
+                                middles: relayIndex.fastestRelays(8),
+                                tries: 3, buildMs: 12000,
+                            });
+                            built = forced.ok;
+                            if (built) {
+                                Logger.info(`Tor would not choose ${cand.nick || cand.fp.slice(0, 8)} ` +
+                                            `-- built the path explicitly via ${forced.via} ` +
+                                            `in ${forced.ms} ms`);
+                            } else {
+                                Logger.warn(`Could not force a circuit to ` +
+                                            `${cand.nick || cand.fp.slice(0, 8)}: ${forced.reason}`);
+                            }
                         }
-                        //  A circuit that was mid-build when ExitNodes changed
-                        //  finishes on the OLD exit -- it was launched under
-                        //  the old restriction and Tor does not re-check. So
-                        //  sweep again now that the wait is over.
-                        await ctl.purgeCircuitsExcept(cand.fp, { staleIdMax: idMark });
+
+                        if (!built) {
+                            //  ESCALATION 2 -- STOP TALKING TO THIS TOR.
+                            //
+                            //  This used to `return false`, which handed the
+                            //  candidate back as unreachable and left the engine
+                            //  restart below -- the one thing that was measured
+                            //  to work -- permanently dead code: it is only
+                            //  reached when there is no control port, and there
+                            //  was one. That is the whole of "sweden e ekta
+                            //  nodeo connect korte parchena": 300 relays in the
+                            //  country, every one of them refused by a process
+                            //  that had made up its mind, and no path in the app
+                            //  that did anything else.
+                            //
+                            //  A restart costs ~9 s with the consensus cache
+                            //  warm -- less than the 46 s of waiting and forcing
+                            //  that has just been spent failing -- and it puts
+                            //  the fingerprint in ExitNodes BEFORE Tor picks its
+                            //  first circuit, which is the difference that makes
+                            //  it work.
+                            Logger.warn(`No circuit reached ${cand.nick || cand.fp.slice(0, 8)} ` +
+                                        'on the running engine -- restarting it with that ' +
+                                        'relay pinned in the configuration instead');
+                            livePinBroken = true;
+                            restart = true;
+                        } else {
+                            //  A circuit that was mid-build when ExitNodes changed
+                            //  finishes on the OLD exit -- it was launched under
+                            //  the old restriction and Tor does not re-check. So
+                            //  sweep again now that the wait is over.
+                            await ctl.purgeCircuitsExcept(cand.fp, { staleIdMax: idMark });
+                        }
                     } else {
+                        //  No fingerprint to wait for: StrictNodes + `{cc}` is
+                        //  what enforces the country here, and Tor needs a
+                        //  moment to build the first circuit under it.
                         await new Promise(r => setTimeout(r, 3000));
+
+                        //  Same second sweep as the pinned path, for the same
+                        //  reason -- a circuit that was mid-build when
+                        //  ExitNodes changed finishes on the OLD exit, and the
+                        //  first sweep cannot close what had not appeared in
+                        //  circuit-status yet. It is also the retry that
+                        //  matters: purgeCircuitsExcept() returns 0 silently if
+                        //  it could not read the circuit list at all.
+                        await ctl.purgeCircuitsExcept(null, { staleIdMax: idMark });
                     }
-                    return true;
+                    if (!restart) return true;
                 } catch (e) {
                     Logger.warn('SETCONF re-pin failed: ' + e.message);
                     ctl = null;
                 }
             }
-            //  No control port: restart Tor on the new exit. Slower, but
-            //  the descriptor cache is preserved (the old code deleted it,
-            //  which is what made the retry hopeless).
+            //  RESTART THE ENGINE ON THIS EXIT. Reached when there is no control
+            //  port, when SETCONF threw, and -- since the escalation above --
+            //  when the running Tor simply will not build to the relay. Slower,
+            //  but the descriptor cache is preserved (the old code deleted it,
+            //  which is what made the retry hopeless), and bridge mode is
+            //  carried over so a connection that only reaches Tor through obfs4
+            //  does not lose its tunnel to an exit change.
             const r = await startTor({
-                exitSpec: spec, dnsPort: activeDnsPort,
+                exitSpec: spec, dnsPort: activeDnsPort, useBridges: usedBridges,
                 onProgress: (pct, msg) => sendProgress(Math.min(90 + Math.round(pct / 12), 97), msg),
             });
-            if (!r.ok) return false;
+            if (!r.ok) {
+                //  Both routes to this relay are spent: the running engine would
+                //  not build to it, and an engine started with it pinned did not
+                //  come up. That is enough to stop offering it again for the rest
+                //  of this connect -- see exitPlan()'s `exclude`. It is NOT
+                //  written to the reject store: nothing here measured where the
+                //  relay geolocates, and that store is kept for hours.
+                if (cand.fp) noCircuit.add(cand.fp);
+                return false;
+            }
             try { ctl = await openControl(); } catch (e) { ctl = null; }
             return true;
         };
@@ -2973,22 +3293,24 @@ function runAdminApp() {
         //  "keep trying" loop, so both of them prove a country the same way the
         //  originally requested one was proved.
         //
-        //  The explicit first re-pin matters. lockExitCountry() only re-pins
-        //  from its SECOND candidate onwards -- it assumes the first one is
-        //  whatever Tor was started with, which was true for the requested
-        //  country and is true for nothing reached from here. Without this line
-        //  the "nearest country" attempt would verify the exit still standing
-        //  for the country that just failed, and then report the nearest
-        //  country over it: a fake success, in the exact shape of the bug this
-        //  whole path exists to remove.
-        const attemptCountry = async target => {
-            const p = await exitPlan(target);
-            if (!await repinFor(target)(p[0])) {
-                return { verified: false, cc: null, ip: null, fp: null,
-                         reason: 'unreachable', pinnedFp: p[0].fp || null, lastSeen: null };
-            }
-            return await lockExitCountry(target, p,
-                { repin: repinFor(target), onProgress: (pc, m) => sendProgress(pc, m) });
+        //  `repinFirst` is what makes it an attempt at the COUNTRY rather than
+        //  at one relay in it. lockExitCountry() re-pins from its second
+        //  candidate onwards, because for the requested country the first one is
+        //  whatever Tor was started with -- which is true here for nothing. This
+        //  used to be handled by pinning candidate 0 out here and returning
+        //  'unreachable' the moment that failed, and that single early return is
+        //  the second half of the Sweden report: every round of "keep trying"
+        //  tried one relay, the highest-scoring one, the SAME one each round --
+        //  it was never rejected, because nothing about it had been measured --
+        //  while the rest of the country was never touched. Now the plan is
+        //  walked to the end, and a relay that could not be reached at all is
+        //  kept out of the next round by `noCircuit`.
+        const attemptCountry = async (target, { limit = 5 } = {}) => {
+            const p = await exitPlan(target, { limit, exclude: noCircuit });
+            return await lockExitCountry(target, p, {
+                repin: repinFor(target), repinFirst: true,
+                onProgress: (pc, m) => sendProgress(pc, m),
+            });
         };
 
         //  Final enforcement sweep.
@@ -3007,13 +3329,25 @@ function runAdminApp() {
         //  entirely, and the sweep has to run once, on whatever exit actually
         //  won.
         const finalSweep = async fp => {
-            if (!ctl || !ctl.isOpen || !fp) return;
+            if (!ctl || !ctl.isOpen) return;
             try {
-                const closed = await ctl.purgeCircuitsExcept(fp,
-                    { staleIdMax: Number.MAX_SAFE_INTEGER });
+                //  The purge still needs a relay to keep. With none, every
+                //  circuit would be condemned -- including the one verification
+                //  just proved is in the right country -- and the rebuild would
+                //  be a fresh gamble. On that path the country is enforced by
+                //  StrictNodes + ExitNodes={cc} at build time and the stale
+                //  circuits were already closed by id in repinFor(), so there
+                //  is nothing left here to close. What is still worth doing is
+                //  LOOKING: more than one exit country in use is the thing this
+                //  sweep exists to catch, and it has to be visible in the log on
+                //  both paths, not just the pinned one.
+                const closed = fp
+                    ? await ctl.purgeCircuitsExcept(fp, { staleIdMax: Number.MAX_SAFE_INTEGER })
+                    : 0;
                 const live   = await ctl.activeExits();
                 Logger.info(`Circuit lock: ${live.length} exit relay(s) in use` +
-                            (closed ? `, ${closed} stale circuit(s) closed` : ''),
+                            (closed ? `, ${closed} stale circuit(s) closed` : '') +
+                            (fp ? '' : ' (country pin, no relay locked)'),
                             { exits: live.map(e => (e.nick || e.fp.slice(0, 8))) });
                 if (live.length > 1) {
                     Logger.warn(`${live.length} distinct exits are still reachable -- ` +
@@ -3038,6 +3372,13 @@ function runAdminApp() {
         //  promised: sealTunnel() holds ExitNodes at {cc} with StrictNodes on
         //  and closes every attachable circuit, so pages fail to load rather
         //  than leaving from a country the app is saying it could not reach.
+        //
+        //  Each round is a whole pass over the country now, not one relay --
+        //  KEEP_TRYING_DEPTH candidates, each of which will restart the engine
+        //  on itself rather than accept a refusal from the running one. "keep
+        //  trying mane forcefully app tar sorboccho kormokkhomota lagiye dibe"
+        //  is what that is for: with 300 relays listed in a country, five was
+        //  not maximum effort and one was not an attempt.
         //
         //  The Stop button is a 'live' ask -- a small card, not a modal -- so
         //  the progress line and the globe stay visible while it counts rounds.
@@ -3074,7 +3415,7 @@ function runAdminApp() {
                         continue;
                     }
 
-                    const v = await attemptCountry(cc);
+                    const v = await attemptCountry(cc, { limit: KEEP_TRYING_DEPTH });
                     if (v.verified) return v;
                     if (stopped) break;
                     await sealTunnel(cc);          // back to holding
@@ -3261,7 +3602,7 @@ function runAdminApp() {
 
         //  Armed after appState.connected, because the guard stops itself
         //  the moment that flag is false.
-        if (lockFp) startCircuitGuard(lockFp);
+        if (lockFp) await startCircuitGuard(lockFp);
 
         //  The promise option `auto` made: keep looking for the country they
         //  actually asked for. Armed only now, with a verified substitute
@@ -3360,7 +3701,7 @@ function runAdminApp() {
             return await establishConnection({ serverCode, bypassList, isSwitch: false, wc });
         } catch (e) {
             Logger.error('connect-vpn threw', { err: e.message, stack: e.stack });
-            killTor();
+            await killTor({ blocking: false });
             progressToAll(wc,
                 { percent: 0, message: 'Connection error. Check the log.', status: 'unavailable', serverCode });
             return { status: 'unavailable', serverCode, verified: false };
@@ -3386,7 +3727,7 @@ function runAdminApp() {
             //  The old version killed tor.exe and left torCtl believing it
             //  still had a live connection, so the next connect inherited
             //  a dead control socket.
-            killTor();
+            await killTor({ blocking: false });
             Logger.debug('Tor engine stopped');
 
             //  Match whatever the rest of the machine is about to get:
@@ -3930,6 +4271,107 @@ async function restoreAllBrowsersProxy() {
 //     CN=www.googleapis.com roots in the machine store; startupCleanup()
 //     removes them.
 // ═══════════════════════════════════════════════════════════════════
+// ── One blocking burst, in another process ─────────────────────────
+//  MEASURED on this machine, with execSync replaced by a recorder so that
+//  nothing was executed (.build/probe-uiblock-geo.js,
+//  .build/probe-uiblock-ext.js):
+//
+//      one `reg query` through cmd.exe            57-78 ms
+//      one `powershell -NoProfile "$null"`       235-301 ms
+//      GeoSpoof.applyAll(coord)                >= 35 calls  ~2343 ms
+//      the extension/browser steps below          59 calls  ~3415 ms
+//      -----------------------------------------------------------
+//      one cold connect                                    ~5758 ms
+//
+//  Electron's main process runs the window's message pump on the thread
+//  that runs this code, and Windows paints "(Not Responding)" over a
+//  window whose queue has gone unserviced for about five seconds. That is
+//  the report -- "not responding, then it comes back": the burst ends, the
+//  pump is serviced, the title clears.
+//
+//  lib/offthread.js runs the same module, the same commands, the same
+//  arguments and the same order in a child process, and forwards its log
+//  lines back here so the app's log is unchanged. The child inherits this
+//  process's elevated token, so the HKLM writes still land.
+const OFFTHREAD_SCRIPT = (() => {
+    const inside = path.join(__dirname, 'lib', 'offthread.js');
+    //  Packaged, __dirname is inside app.asar. The unpacked copy is
+    //  preferred so the child needs no asar support of its own; the
+    //  in-asar path is the fallback, and works when Electron provides it.
+    const unpacked = inside.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
+    try { if (unpacked !== inside && fs.existsSync(unpacked)) return unpacked; } catch (e) {}
+    return inside;
+})();
+
+function runOffThread(job, payload, timeoutMs = 120000) {
+    return new Promise(resolve => {
+        let child = null, settled = false, errOut = '';
+        const finish = v => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { if (child && child.connected) child.disconnect(); } catch (e) {}
+            try { if (child) child.kill(); } catch (e) {}
+            resolve(v);
+        };
+        const timer = setTimeout(
+            () => finish({ ok: false, error: `${job} timed out after ${timeoutMs} ms` }),
+            timeoutMs);
+        try {
+            child = fork(OFFTHREAD_SCRIPT, [], {
+                windowsHide: true,
+                stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+                //  ELECTRON_RUN_AS_NODE: the child is a plain Node process,
+                //  not a second Electron app -- no window, no second instance
+                //  lock, no app.on('ready').
+                env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+            });
+        } catch (e) { return finish({ ok: false, error: e.message }); }
+
+        if (child.stderr) child.stderr.on('data', d => { errOut += d.toString().slice(0, 400); });
+        child.on('error', e => finish({ ok: false, error: e.message }));
+        child.on('exit', code => finish({
+            ok: false,
+            error: `${job} exited ${code} with no result` + (errOut ? ': ' + errOut.trim() : ''),
+        }));
+        child.on('message', m => {
+            if (!m) return;
+            if (m.log) {
+                const fn = Logger[m.log.level] || Logger.info;
+                try { fn.call(Logger, m.log.msg, m.log.meta || undefined); } catch (e) {}
+                return;
+            }
+            if (m.done) finish({ ok: !!m.ok, result: m.result || null, error: m.error || null });
+        });
+        try { child.send({ job, payload }); }
+        catch (e) { finish({ ok: false, error: e.message }); }
+    });
+}
+
+//  ── One at a time, in the order they were asked for ────────────────
+//  Two of these overlapping would both read the same restore journal, both
+//  write it, and both write the same Firefox user.js -- and the loser of
+//  that race is whichever country the user switched AWAY from, left on
+//  screen as the spoofed location. The wrapper below is fire-and-forget
+//  and its first step is an await, so a fast second switch really can
+//  arrive mid-run. Chained FIFO, so the newest country is applied last.
+let _geoApplyChain = Promise.resolve();
+const runGeoApply = coord => {
+    const step = async () => {
+        const off = await runOffThread('geo-apply', { stateDir: APPDATA_PATH, coord });
+        if (off.ok) return;
+        //  A freeze is a bug; skipping the shield would be a claim of
+        //  coverage that was never applied. Same call, in-process, and if
+        //  it throws the wrapper's own catch reports it as it always did.
+        Logger.debug('Location shield: could not run off-thread (' +
+                     (off.error || 'no reason reported') + ') -- applying in-process');
+        geoEngine().applyAll(coord);
+    };
+    const next = _geoApplyChain.then(step, step);
+    _geoApplyChain = next.then(() => {}, () => {});
+    return next;
+};
+
 // ── Wrap applyGeolocationSpoof ────────────────────────────────────
 //  The ORDER below is the fix for "Chrome and Brave still show the real
 //  location":
@@ -3960,7 +4402,6 @@ applyGeolocationSpoof = function (win, sc) {
     //  Fire-and-forget with a real catch: an unhandled rejection here
     //  would take down the main process on a policy-write failure.
     return (async () => {
-        const geo = geoEngine();
         const ext = geoExt();
         const { proxyChanged } = await forceAllBrowsersOntoProxy();
 
@@ -3986,7 +4427,14 @@ applyGeolocationSpoof = function (win, sc) {
             'nothing was closed');
 
         // 4. Windows platform + Firefox.
-        geo.applyAll(coord);
+        //
+        //    In the child process, because this step alone measured 43
+        //    synchronous `reg`/`sc`/`powershell` calls -- 2.3 to 5.0 s
+        //    depending on the machine -- on the thread that pumps the
+        //    window's messages, and it runs on every connect AND every
+        //    switch. runGeoApply() also serialises them, so a fast second
+        //    switch cannot leave the country they left on screen.
+        await runGeoApply(coord);
 
         //  Chrome and Brave refuse every automatic install route an app has
         //  on Windows, so say so plainly and once, instead of leaving the

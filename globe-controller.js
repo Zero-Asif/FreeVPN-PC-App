@@ -371,16 +371,42 @@ function build3DRocket() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  📐 PHYSICS-CORRECT BEZIER CURVE
+//  📐 THE FLIGHT PATH  --  a great circle on the ground, an arc in the air.
 //
-//  Altitude formula:
-//    angle    = acos(vS · vE / |vS||vE|)        [0 … π rad]
-//    arcFrac  = angle / π                        [0 … 1]
-//    peakAlt  = 0.50 + arcFrac × 1.30           [0.50 … 1.80]
-//    control  = midDir × R × (1 + peakAlt)
+//  This was a QuadraticBezierCurve3 from vS to vE with one control point pushed
+//  out along the midpoint direction, under a comment promising "minimum 50%
+//  above surface -> rocket NEVER intersects globe". That promise was false, and
+//  .build/test-flight-path.js measures by how much.
 //
-//  Minimum 50% above surface → rocket NEVER intersects globe.
-//  Antipodal guard: if midpoint ≈ 0, build perpendicular control.
+//  A quadratic Bezier leaves each endpoint along the line toward its control
+//  point and only ever travels part of the way there, so near its ends it hugs
+//  the CHORD -- and the chord between two points more than 90 degrees apart runs
+//  inside the sphere. Writing h for the control point's distance from the centre
+//  in globe radii, the radius grows at launch only if h > sec(angle/2). The old
+//  h = 1.5 + 1.3*angle/pi is 2.66 at 160 degrees, against a sec of 5.76.
+//
+//  MEASURED, over every ordered pair of the countries main.js can place:
+//  348 of 5402 went underground. Bangladesh -> Chile is 160.8 degrees apart and
+//  dipped 2.52 units below a 100-unit globe, launching at -12 degrees -- nose
+//  into the ground -- and arriving at +12, climbing back out of the Pacific.
+//  Worst was Spain -> New Zealand at 178.6 degrees, 6.23 units under. That is
+//  exactly what the two screenshots showed: a rocket appearing out of the open
+//  Indian Ocean already in flight, and a flat trail into the sea beside Chile
+//  instead of a landing on it. The ground track was never the problem -- it was
+//  on the great circle to 1e-15 -- the altitude profile was.
+//
+//  So the path is now built as the two separate things it actually is:
+//
+//    GROUND TRACK   the great circle, by rotating the start direction about that
+//                   circle's own normal. Exact, so the rocket passes over the
+//                   same places a real flight would.
+//    ALTITUDE       PAD + (PEAK - PAD) * sin(pi * t)
+//
+//  sin(pi*t) is zero at both ends and never negative between them, so the radius
+//  is at least R*(1+PAD) at EVERY t for EVERY pair -- by construction, not by a
+//  choice of h that can be too small. It also makes the nose rise steeply off
+//  the pad and drop onto the destination, because that term's derivative is
+//  largest at exactly the two ends.
 // ════════════════════════════════════════════════════════════════════
 function buildCurve(startLat, startLng, endLat, endLng) {
     const G  = window.THREE;
@@ -390,27 +416,64 @@ function buildCurve(startLat, startLng, endLat, endLng) {
     const vE = new G.Vector3(e.x, e.y, e.z);
     const R  = vS.length();
 
-    // Angular distance → arc height
-    const angle   = vS.angleTo(vE);           // 0 … π
-    const arcFrac = angle / Math.PI;           // 0 … 1
-    const peakAlt = 0.50 + arcFrac * 1.30;    // 0.50 … 1.80 above surface
+    //  PAD: the rocket mesh's origin is its TAIL, so a hair of clearance is what
+    //  keeps it standing ON the ground rather than half-sunk in it.
+    //  BASE/SPAN: fitted to what the OLD curve actually reached where it worked
+    //  -- 0.34 R apex for a 30-degree hop, 0.43 R at 90 -- so short and medium
+    //  flights look as they did before. Only the long ones, which are the broken
+    //  ones, now climb higher: 0.58 R at 160 degrees, 0.62 at the antipodes.
+    const PAD  = 0.006;
+    const BASE = 0.28;
+    const SPAN = 0.34;
 
-    // Midpoint direction (handle near-antipodal: vMid ≈ 0)
-    const vMid   = vS.clone().add(vE).multiplyScalar(0.5);
-    const midLen = vMid.length();
-    let   vCtrl;
+    const uS = vS.clone().normalize();
+    const uE = vE.clone().normalize();
 
-    if (midLen < R * 0.01) {
-        // Nearly antipodal — pick a perpendicular axis
-        let perp = new G.Vector3(1, 0, 0);
-        if (Math.abs(vS.dot(perp) / R) > 0.9) perp.set(0, 1, 0);
-        vCtrl = vS.clone().cross(perp).normalize()
-                  .multiplyScalar(R * (1 + peakAlt));
-    } else {
-        vCtrl = vMid.clone().normalize().multiplyScalar(R * (1 + peakAlt));
+    //  The rotation carrying uS onto uE along the great circle. cross() is
+    //  degenerate in exactly the two cases where a pair does not define a plane
+    //  -- the same point, and exact antipodes -- and a country list reaches both,
+    //  so each gets an explicit axis rather than the normalize() of a zero
+    //  vector that would put NaN into every point on the path.
+    const angle = Math.acos(Math.max(-1, Math.min(1, uS.dot(uE))));
+    let axis = uS.clone().cross(uE);
+    if (axis.length() < 1e-9) {
+        const perp = new G.Vector3(0, 1, 0);
+        if (Math.abs(uS.dot(perp)) > 0.9) perp.set(1, 0, 0);
+        axis = uS.clone().cross(perp);
     }
+    axis.normalize();
 
-    return new G.QuadraticBezierCurve3(vS, vCtrl, vE);
+    //  uS and w are an orthonormal basis of the flight plane, so the point a
+    //  radians along the great circle from the start is uS*cos(a) + w*sin(a):
+    //  Rodrigues with the axis term dropped, the axis being perpendicular to uS
+    //  by construction. At a = angle this returns uE exactly.
+    const w    = axis.clone().cross(uS).normalize();
+    const peak = BASE + SPAN * (angle / Math.PI);
+    const alt  = t => PAD + (peak - PAD) * Math.sin(Math.PI * t);
+    const dAlt = t => (peak - PAD) * Math.PI * Math.cos(Math.PI * t);
+    const dir  = a => new G.Vector3(uS.x * Math.cos(a) + w.x * Math.sin(a),
+                                    uS.y * Math.cos(a) + w.y * Math.sin(a),
+                                    uS.z * Math.cos(a) + w.z * Math.sin(a));
+
+    //  getPoint() and getTangent() are the whole of what is ever asked of this
+    //  -- by positionRocket() and by buildTrail(), and by nothing else -- so it
+    //  is those two functions in the open, rather than a THREE.Curve subclass
+    //  whose behaviour would live inside the minified vendor bundle.
+    return {
+        getPoint(t) { return dir(angle * t).multiplyScalar(R * (1 + alt(t))); },
+        getTangent(t) {
+            const a = angle * t;
+            const dDir = new G.Vector3(w.x * Math.cos(a) - uS.x * Math.sin(a),
+                                       w.y * Math.cos(a) - uS.y * Math.sin(a),
+                                       w.z * Math.cos(a) - uS.z * Math.sin(a));
+            const v = dir(a).multiplyScalar(dAlt(t))
+                            .add(dDir.multiplyScalar(angle * (1 + alt(t))));
+            //  Zero only where there is no ground track AND the arc is at its
+            //  apex -- a "flight" to the country already connected, at t = 0.5.
+            //  buildTrail() normalises this, so it must never be zero.
+            return v.lengthSq() < 1e-12 ? w.clone() : v.normalize();
+        },
+    };
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -789,7 +852,16 @@ window.flyToCountry = function(countryCode) {
 };
 
 // ✅ Reached the country  (Tor bootstrap = 100%)
-window.landRocket = function() {
+//
+//  `countryCode` is the VERIFIED exit country and it is used only as a fallback,
+//  for the case where nothing is pending any more. One click can run several
+//  attempts -- the country-unavailable dialog's "keep trying until it connects"
+//  loop -- and the first failed attempt already blasted its rocket, which clears
+//  PENDING. With no attempt on record there is nothing to land, so the app ended
+//  up reporting Protected while the ring still pulsed over home. Measured
+//  2026-08-31: connected out through the United States, caption and ring both
+//  still on "Standing by in Motijheel, Bangladesh".
+window.landRocket = function(countryCode) {
     if (FC && (FC.state === 'done' || FC.state === 'landing' || FC.state === 'exploding')) return;
 
     if (!FC) {
@@ -797,7 +869,17 @@ window.landRocket = function() {
         //  origin to launch from -- or the connect resolved inside the 960 ms a
         //  launch waits out. Nothing to land: the app simply is in that country
         //  now, and that is where the ring goes.
-        const p = PENDING;
+        let p = PENDING;
+        //  Not even an attempt on record: an earlier one in this same click took
+        //  it. Re-record the country actually reached and settle there. Skipped
+        //  when the globe is already showing that country, so a second land call
+        //  stays the no-op it is everywhere else.
+        if (!p && countryCode) {
+            const code = String(countryCode).toLowerCase();
+            if (ANCHOR && ANCHOR.kind === 'country' && ANCHOR.code === code) return;
+            window.flyToCountry(code);
+            p = PENDING;
+        }
         if (!p) return;
         //  Coordinates have not arrived yet. Recorded, so start() settles it.
         if (!p.dest) { p.outcome = 'land'; return; }
@@ -972,29 +1054,94 @@ function buildGlobeUI() {
         globe.controls().autoRotate      = true;
         globe.controls().autoRotateSpeed = 0.25;
 
-        //  LIGHTING. Ambient used to be 0.55, which flattened the earth into a
-        //  poster: no terminator anywhere, so the night-lights layer had
-        //  nothing to sit on and had to glow over the daylit side to be seen at
-        //  all. Low ambient plus one strong directional light gives a real
-        //  day/night edge, and the city lights then appear only where they
-        //  would. No cloud layer is added, here or below.
+        //  LIGHTING. This block used to add AmbientLight(0.28) and a 1.55
+        //  directional under a comment that reasoned about 0.28 as if it were
+        //  the whole ambient. It was not. vendor/globe.gl.min.js bakes two
+        //  lights into its own objects list -- AmbientLight(0xbbbbbb) at
+        //  intensity 1, which weights to 0.733, and a 0.6 directional left at
+        //  three.js's default (0,1,0) -- and it exposes no lights() accessor to
+        //  replace them, so they added to ours: a real ambient of 1.013, and
+        //  2.8x the texture's own colour where the sun is overhead. Past 1.0 is
+        //  cut off at white, and earth-blue-marble.jpg reads 0.72 in the Sahara
+        //  and 0.70 over Arabia, so the deserts nearest the sub-solar point
+        //  (23.5N 53.9E, which is where SUN_DIR points) lost their colour and
+        //  their relief together: 13.2% of the lit globe came out as featureless
+        //  white in the default view, which is what the report ringed in red.
+        //
+        //  The specular is not a taste call -- MeshPhongMaterial has no
+        //  specular map here, so the highlight is added across the whole lit
+        //  disc and peaks exactly where the view mirrors the sun, i.e. on the
+        //  reported spot. Even a quarter as bright and four times as tight
+        //  (0x060c14 at shininess 140) it put 5.9% of the close view back to
+        //  white and flattened Arabia's r-b spread from +0.30 to +0.12. So it
+        //  is black, and no cloud layer is added, here or below.
+        //
+        //  The first fix for that white -- 0.21 ambient with a 1.10 directional,
+        //  row 1 of set 3 of .build/probe-globe-light-sweep.js -- was measured
+        //  on the day side only, and it broke the other side. A directional
+        //  light contributes max(0, dot(normal, sun)), which is 0 everywhere on
+        //  the hemisphere facing away from SUN_DIR: the night side is lit by the
+        //  ambient and nothing else, so taking the ambient from 1.013 down to
+        //  0.21 multiplied that whole hemisphere by 0.21. Measured from the
+        //  anti-solar camera, 31.6% of the night disc came out black and land
+        //  sat 0.02 above sea -- an unreadable globe, and reported as one.
+        //
+        //  Both sides are therefore one dial. With no tone mapping the night is
+        //  `ambient` and the sub-solar point is `ambient + directional`, so the
+        //  ambient may only be raised as far as the directional is lowered.
+        //  What ships is row 8 of set 2 of .build/probe-globe-night.js, which
+        //  applied 11 candidate lightings to the running app and measured BOTH
+        //  hemispheres of each from four cameras: over the sun, close over the
+        //  sun, over the anti-solar point, and one frame that holds the Sahara
+        //  in daylight and the Amazon in night at the same time. 0.90 ambient
+        //  with a 0.42 directional keeps the same ~1.32 total, so the day side
+        //  stays where the first fix put it -- 0.33% featureless white in the
+        //  default view, 0.05% close, Sahara r-b spread +0.34, Karakoram relief
+        //  0.188 against 0.205 -- while the night side returns to 88% of the
+        //  pre-fix brightness and 77% of its land-against-sea contrast, with
+        //  0.00% of the disc black. A fill light at -SUN_DIR was measured first
+        //  and rejected: it cannot reach the day side at all (three fill rows
+        //  moved the lit mean by under 0.006), but it falls off from the
+        //  anti-solar point, so no intensity short of a visible second sun got
+        //  past 58% of the night it was meant to restore.
         setTimeout(() => {
             if (!window.THREE) return;
             const scene = globe.scene();
-            scene.add(new window.THREE.AmbientLight(0xffffff, 0.28));
-            const dir = new window.THREE.DirectionalLight(0xffffff, 1.55);
+
+            //  Run before ours are added, so every light this finds is
+            //  globe.gl's by construction -- no colour or intensity guessing.
+            //  Idempotent, and repeated twice in case that objects list is
+            //  rebuilt after this point; ours are skipped by identity.
+            const ours = [];
+            const silenceVendorLights = () => {
+                try {
+                    scene.traverse(o => {
+                        if (o.isLight && ours.indexOf(o) === -1) o.intensity = 0;
+                    });
+                } catch (e) {}
+            };
+            silenceVendorLights();
+
+            const amb = new window.THREE.AmbientLight(0xffffff, 0.90);
+            const dir = new window.THREE.DirectionalLight(0xffffff, 0.42);
             dir.position.set(SUN_DIR.x, SUN_DIR.y, SUN_DIR.z);
+            ours.push(amb, dir);
+            scene.add(amb);
             scene.add(dir);
+            setTimeout(silenceVendorLights, 500);
+            setTimeout(silenceVendorLights, 2000);
 
             //  Surface response. The topology bump map was being applied at
             //  scale 1 on a sphere of radius 100, which is no relief at all;
-            //  and a dark, tight specular gives the oceans a sheen without
-            //  turning the continents into plastic.
+            //  9 is what makes the dunes and the Himalayas read as terrain.
+            //  The specular is black for the reason written above: with no
+            //  specular map there is no way to give the oceans a sheen without
+            //  also putting a white patch on Arabia.
             try {
                 const gm = globe.globeMaterial();
                 if (gm) {
                     if ('bumpScale' in gm) gm.bumpScale = 9;
-                    if (gm.specular && gm.specular.setHex) gm.specular.setHex(0x14202c);
+                    if (gm.specular && gm.specular.setHex) gm.specular.setHex(0x000000);
                     if ('shininess' in gm) gm.shininess = 24;
                     gm.needsUpdate = true;
                 }

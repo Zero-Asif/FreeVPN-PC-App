@@ -32,7 +32,8 @@
     },
     "asar": true,
     "asarUnpack": [
-      "Tor/**/*"
+      "Tor/**/*",
+      "lib/**/*"
     ],
     "files": [
       "main.js",

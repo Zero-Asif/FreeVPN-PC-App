@@ -129,9 +129,17 @@
                             data-external="https://ipleak.net/">
                             🔍 Verify Privacy
                         </a>
+                        <!-- HIDDEN ON PURPOSE, not deleted. The log modal, its filter,
+                             its "open folder" button and the read-log IPC behind them
+                             are all still in place and still wired up in renderer.js;
+                             only this trigger is commented out, so putting the button
+                             back is uncommenting these four lines and nothing else.
+                             renderer.js attaches its click handler with `?.`, so with
+                             the element gone that line is a no-op instead of a crash.
                         <button class="log-btn" id="openLogBtn">
                             📋 View Logs
                         </button>
+                        -->
                     </div>
 
                 </div><!-- /.features-section -->

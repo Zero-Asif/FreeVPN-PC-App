@@ -27,6 +27,10 @@
 //       update_url both say it is ours, and is a no-op run twice.
 //    4. installExternal() writes, reads back, and journals what it wrote;
 //       _restoreExternal() takes out exactly that and nothing else.
+//    5. It skips the forks route 1 has already taken -- measured, two providers
+//       racing at a cold start is what made Edge arrive disabled -- but ONLY on
+//       a device an organization manages, because an unmanaged Edge tags an
+//       off-store force-install [BLOCKED] and route 1 then delivers nothing.
 // ════════════════════════════════════════════════════════════════════
 const { execSync } = require('child_process');
 
@@ -239,6 +243,98 @@ ok(warned.length === before, 'a second revert of the same journal warns about no
    warned.slice(before).join(' | '));
 ok(G.GeoExt.prototype._restoreExternal.call(g, null) === undefined,
    'and no journal at all is not an error');
+
+console.log('── 5. not offered to a browser route 1 has already taken ──');
+//  Measured 2026-08-31, and this is the bug it encodes: Edge had the extension
+//  at location 6 (EXTERNAL_PREF_DOWNLOAD) instead of 7 -- this route won the
+//  cold-start race against the policy one -- so it arrived DISABLED, with
+//  disable_reasons [8192], no service worker, no onInstalled, and no welcome
+//  tab. The user had to open edge://extensions and switch it on by hand. Route 1
+//  lands the same extension already enabled and pinned, so a browser whose
+//  forcelist is measured to work AND verified written is left to route 1 alone.
+//
+//  Measured 2026-09-01, and this is the other half of the same gate: the DEVICE
+//  decides too. On a machine no organization manages, Edge rewrites our id to
+//  [BLOCKED]<id> inside the forcelist slot -- the slot still reads back
+//  byte-for-byte, so only edge://policy shows it -- and installs nothing. There
+//  route 1 has won no race, and skipping this one left Edge with no extension at
+//  all: absent from edge://extensions, absent from the toolbar, no welcome tab.
+//  Both device states are driven below through the module's own _setManaged().
+ok(G.FORCE_WORKS.includes('edge'),
+   'the table still measures Edge as the one fork whose forcelist works',
+   JSON.stringify(G.FORCE_WORKS));
+G._setManaged(true);
+ok(JSON.stringify(G.forceWorks()) === JSON.stringify(G.FORCE_WORKS),
+   'on a managed device that measurement is exactly what the gate uses');
+G._setManaged(false);
+ok(JSON.stringify(G.forceWorks()) === '[]',
+   'on an unmanaged one no fork counts as covered by route 1', JSON.stringify(G.forceWorks()));
+
+sh(`reg delete "${ROOT}" /f`);
+const R_EDGE = `${ROOT}\\Microsoft\\Edge\\Extensions`;
+redirect = [{ id: 'edge',   name: 'Microsoft Edge',  key: R_EDGE },
+            { id: 'chrome', name: 'Google Chrome',   key: R_MIX },
+            { id: 'brave',  name: 'Brave',           key: R_MINE }];
+
+G._setManaged(true);
+const gskip = stub(OURS);
+const kept  = G.GeoExt.prototype.installExternal.call(gskip, ['edge', 'chrome', 'brave']);
+ok(JSON.stringify(kept) === '["chrome","brave"]',
+   'managed: Edge is skipped; Chrome and Brave still get it -- they refuse the policy, ' +
+   'so for them a disabled arrival is the best door there is', JSON.stringify(kept));
+ok(!exists(`${R_EDGE}\\${OURS}`),
+   "and nothing is written under Edge's own provider key at all");
+ok((gskip.journal.external || []).every(r => r.browser !== 'edge'),
+   'so there is no Edge row to journal, and none to revert later',
+   JSON.stringify(gskip.journal.external));
+
+//  The regression itself, as a test. Same verified route-1 write, same three
+//  browsers, only the device is not managed -- and Edge must keep this route,
+//  because route 1 cannot deliver there and nothing else can.
+sh(`reg delete "${ROOT}" /f`);
+G._setManaged(false);
+const gunm  = stub(OURS);
+const kept2 = G.GeoExt.prototype.installExternal.call(gunm, ['edge', 'chrome', 'brave']);
+ok(JSON.stringify(kept2) === '["edge","chrome","brave"]',
+   'unmanaged: Edge keeps route 3 even though its forcelist write read back fine',
+   JSON.stringify(kept2));
+ok(val(`${R_EDGE}\\${OURS}`) === OUR_URL,
+   "and Edge's own provider key really carries our update_url",
+   String(val(`${R_EDGE}\\${OURS}`)));
+ok((gunm.journal.external || []).some(r => r.browser === 'edge'),
+   'journalled like any other fork, so teardown takes it out again',
+   JSON.stringify(gunm.journal.external));
+
+//  The gate is route 1's VERIFIED list, not the browser table: an Edge whose
+//  forcelist write did not stick is not covered by route 1, and route 3 is then
+//  the only door left. Losing it would trade a disabled extension for none.
+sh(`reg delete "${ROOT}" /f`);
+G._setManaged(true);
+const gnone = stub(OURS);
+ok(JSON.stringify(G.GeoExt.prototype.installExternal.call(gnone, [])) ===
+   '["edge","chrome","brave"]',
+   'route 1 having failed for Edge, route 3 is offered to it after all');
+ok(exists(`${R_EDGE}\\${OURS}`), 'and that entry really is written');
+
+//  Unknown forks keep route 3 even when their policy write stuck: reg.exe
+//  accepting the value says nothing about whether the browser honoured it.
+const unknown = browsers.CHROMIUM.filter(b => b.policy && b.forcelist === 'unknown')
+                                 .map(b => b.id);
+ok(unknown.length > 0, 'the table still has forks whose forcelist is unmeasured',
+   unknown.join(','));
+sh(`reg delete "${ROOT}" /f`);
+redirect = unknown.map((id, i) => ({ id, name: id, key: `${ROOT}\\U${i}\\Extensions` }));
+const gunk = stub(OURS);
+ok(JSON.stringify(G.GeoExt.prototype.installExternal.call(gunk, unknown)) ===
+   JSON.stringify(unknown),
+   'every one of them is written anyway', JSON.stringify(unknown));
+
+//  Hand the device reading back to the device. Anything after this point --
+//  here or in another test loaded into the same process -- must see the real
+//  machine, not whatever this section last pretended.
+G._setManaged(null);
+ok(typeof G.managedDevice() === 'boolean',
+   'and the override is released: managedDevice() reads the real device again');
 
 console.log('── the store branch, for the day FP_GEO_WEBSTORE_ID is set ──');
 sh(`reg delete "${ROOT}" /f`);

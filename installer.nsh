@@ -151,8 +151,10 @@
   ;  refuses the automatic route, which on Windows is true of Chrome and Brave
   ;  for a reason no app can work around: Google requires the machine to be
   ;  domain-joined, Azure-AD-joined or enrolled in Chrome Browser Cloud
-  ;  Management before an off-store extension can be forced. Those users get
-  ;  HOW-TO-ENABLE.txt and the in-app popup, which is one click, once, ever.
+  ;  Management before an off-store extension can be forced. Measured
+  ;  2026-09-01: EDGE APPLIES THE SAME RULE, so on a personal PC 10 is the
+  ;  normal outcome, not the exception. Those users get HOW-TO-ENABLE.txt and
+  ;  the in-app popup, which is one click, once, ever.
   DetailPrint "Setting up the browser location extension..."
   ;  NSIS's own reboot flag, read and never set: electron-builder's template
   ;  raises it if IT had to schedule a locked file for the next boot, and that
@@ -164,7 +166,7 @@
   ${If} $0 == 0
     DetailPrint "Extension force-installed automatically -- nothing for you to do."
   ${ElseIf} $0 == 10
-    DetailPrint "Extension ready. One browser needs a single manual load -- see HOW-TO-ENABLE.txt."
+    DetailPrint "Extension ready. After the restart your browser asks you to turn it on once -- see HOW-TO-ENABLE.txt."
   ${ElseIf} $0 == 4
     DetailPrint "Extension setup timed out; the app will finish it on first run."
   ${Else}

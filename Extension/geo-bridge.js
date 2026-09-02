@@ -15,11 +15,17 @@
 //       the page's first question
 //    2. chrome.storage.onChanged -- carries live changes to pages that are
 //       already open
+//
+//  One thing travels the other way: a GEO_USED notification when the page has
+//  actually been handed a spoofed position. That is what lets a later country
+//  switch clear the previous country out of the sites that were told it, and
+//  leave every other site untouched.
 // ════════════════════════════════════════════════════════════════════
 (function () {
     'use strict';
 
     var CHANNEL = '__freeproxy_geo__';
+    var USED = '__freeproxy_geo_used__';
     var pushed = false;
 
     function push(cfg) {
@@ -102,4 +108,20 @@
             push(normalise(changes.geoSpoof.newValue));
         });
     } catch (e) { /* no storage access; the GET_GEO reply is the only source */ }
+
+    //  The other direction, and the only thing that ever travels it: "the page
+    //  in this frame was actually handed a spoofed position". geo-spoof.js
+    //  dispatches it once per page from makePosition(); the worker keeps the
+    //  origin so that a later country switch can clear the OLD country out of
+    //  the sites that were told it -- and only those. The message is a
+    //  notification, not a request, so nothing waits for a reply; reading
+    //  lastError just stops "no receiving end" appearing in the console when
+    //  the worker is being restarted at that instant.
+    document.addEventListener(USED, function () {
+        try {
+            chrome.runtime.sendMessage({ type: 'GEO_USED' }, function () {
+                void chrome.runtime.lastError;
+            });
+        } catch (e) { /* worker gone; the next page reports it again */ }
+    }, true);
 })();

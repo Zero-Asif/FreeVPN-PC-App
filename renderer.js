@@ -33,6 +33,17 @@ function ccName(code) {
     try { return regionNames.of(code.toUpperCase()); } catch (e) { return code.toUpperCase(); }
 }
 
+//  Only a literal dotted-quad is ever shown. Two reasons, and both matter:
+//  this string arrives in a JSON body from a third-party geolocation service
+//  and ends up inside showToast's innerHTML, so anything but digits and dots
+//  would be markup someone else chose; and a value that is not an IPv4
+//  address is not the thing being reported, so dropping it is also the honest
+//  answer rather than a cosmetic one.
+function ipv4Only(v) {
+    return typeof v === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(v) &&
+           v.split('.').every(n => +n <= 255) ? v : null;
+}
+
 function resolveExit(resp, fallbackCode) {
     const asked = (resp && resp.requested) || fallbackCode;
     const code  = (resp && resp.serverCode) || asked;
@@ -44,6 +55,11 @@ function resolveExit(resp, fallbackCode) {
         moved:     !!(code && asked && code !== asked),
         unverified: resp ? resp.verified === false : false,
         dnsLeaky:  resp ? resp.dnsViaTor === false : false,
+        //  main.js already measures this -- probeExitLocation() asks four
+        //  geolocation services THROUGH Tor and returns the address they agree
+        //  they are talking to -- and main.js:3292 has been returning it all
+        //  along with nothing on this side reading it. See announceExit().
+        ip:        ipv4Only(resp && resp.exitIp),
     };
 }
 
@@ -60,21 +76,51 @@ function announceExit(x, verb) {
           'other applications will use the system resolver.</small>'
         : '';
 
+    //  The exit IPv4, whenever the verification actually saw one.
+    //
+    //  WHY IT IS HERE. This is the one fact about the connection the user has no
+    //  other reliable way to check. The obvious place to look is ipleak.net, and
+    //  its IPv4 row cannot answer on a connection like this one: the row is an
+    //  AJAX GET to ipv4.ipleak.net with a hard 5 s timeout tried 3 times
+    //  (ipleak's own index.js line 72), and that host takes 8-22 s to send its
+    //  first byte from here with NO tunnel in the path -- 7 attempts, 7 over
+    //  budget, measured in .build/probe-geosource-latency.js and
+    //  .build/probe-ipleak-latency.js, with DNS at 0-6 ms and TCP at 157 ms in
+    //  every one of them, so the wait is ipleak's server and nothing local. The
+    //  blank row is that timeout expiring, not a hidden address, and no change
+    //  on this side can fill it.
+    //
+    //  IPv4 is shown rather than hidden because it cannot be hidden: it is the
+    //  address the server has to send its answer back to, so every site already
+    //  has it whatever ipleak renders. What matters is that it is the EXIT's
+    //  address and not the user's, and that is exactly what this line lets them
+    //  confirm. IPv6 stays hidden -- Tor is NoIPv6Traffic, ::/0 is blocked in
+    //  both directions and the stack's components are disabled -- because a
+    //  leaked IPv6 would be the real ISP's, or would place them in a different
+    //  country than the IPv4 exit.
+    const ipNote = x.ip ? ' Exit IPv4 <strong>' + x.ip + '</strong>.' : '';
+
     if (x.moved) {
         showToast('<strong>' + x.askedName + '</strong> had no confirmed exit right now, so you are ' +
                   verb + ' via <strong>' + x.name + '</strong> instead. That is the country your ' +
-                  'IP and location will show.' + dnsNote, 'warning', 9000);
+                  'IP and location will show.' + ipNote + dnsNote, 'warning', 9000);
     } else if (x.unverified) {
+        //  Deliberately no longer "worth confirming at ipleak.net": that site's
+        //  IPv4 row is the one measured above as unable to answer inside its own
+        //  timeout. ipinfo.io answered in ~0.3 s in the same runs.
         showToast(Verb + ' via <strong>' + x.name + '</strong>, but the exit country could not be ' +
                   'double-checked -- no geolocation service answered through Tor. ' +
-                  'Worth confirming at ipleak.net.' + dnsNote, 'warning', 9000);
+                  'Open <strong>ipinfo.io</strong> in your browser to see the exit address ' +
+                  'yourself.' + dnsNote, 'warning', 9000);
     } else if (x.dnsLeaky) {
-        showToast(Verb + ' via <strong>' + x.name + '</strong>. DNS port 53 was already in use, so ' +
-                  'only browser lookups go through Tor -- other applications will use the ' +
-                  'system resolver.', 'warning', 9000);
+        showToast(Verb + ' via <strong>' + x.name + '</strong>.' + ipNote + ' DNS port 53 was already ' +
+                  'in use, so only browser lookups go through Tor -- other applications will use ' +
+                  'the system resolver.', 'warning', 9000);
     } else {
-        showToast('<strong>' + Verb + '!</strong> Routed via ' + x.name + '. IP, DNS &amp; GPS hidden.',
-                  'success', 6000);
+        //  "Your real IP", not "IP": the line above it now prints an address, and
+        //  "Exit IPv4 1.2.3.4. IP hidden." reads as a contradiction of itself.
+        showToast('<strong>' + Verb + '!</strong> Routed via ' + x.name + '.' + ipNote +
+                  ' Your real IP, DNS &amp; GPS are hidden.', 'success', 6000);
     }
 }
 
@@ -820,6 +866,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 localStorage.setItem('activeServer', x.code);
                 updateUI(true, x.code);
                 if (x.moved) window.flyToCountry?.(x.code);
+                rocketActionTaken=true; window.landRocket?.(x.code);
                 showProgress(100, `Switched & Secured via ${x.name} 🛡️`, 'connected');
                 announceExit(x, 'switched');
                 hideProgress(2500); fetchAndRenderCountries();
@@ -927,7 +974,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             localStorage.setItem('activeServer', x.code);
             updateUI(true, x.code);
             if (x.moved) window.flyToCountry?.(x.code);
-            if (!rocketActionTaken) { rocketActionTaken=true; window.landRocket?.(); }
+            //  Landed unconditionally, and told which country: this click may
+            //  have run several attempts through the country-unavailable dialog,
+            //  and the failed one already blasted the rocket and set the latch.
+            //  Landing an already-landed rocket is a no-op; NOT landing leaves
+            //  the ring on home while the app says Protected.
+            rocketActionTaken=true; window.landRocket?.(x.code);
             showProgress(100, `Connected via ${x.name} 🛡️`, 'connected');
             hideProgress(2800);
             announceExit(x, 'connected');
@@ -1098,7 +1150,7 @@ document.addEventListener('DOMContentLoaded', () => {
             hideProgress(2500);
             announceExit(x, 'switched');
             if (x.moved) window.flyToCountry?.(x.code);
-            window.landRocket?.();
+            window.landRocket?.(x.code);
         } else if (resp && resp.status === 'cancelled') {
             //  Cancelled from the country-unavailable dialog. `kept` is decided
             //  in main.js and it is the whole difference here: a switch that was

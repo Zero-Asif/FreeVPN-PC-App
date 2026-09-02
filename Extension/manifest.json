@@ -8,7 +8,10 @@
     "proxy",
     "storage",
     "tabs",
-    "notifications"
+    "notifications",
+    "cookies",
+    "browsingData",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"

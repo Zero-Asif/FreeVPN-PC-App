@@ -150,8 +150,14 @@ const call = async (cc, o) => { sent = null; await askEngineFailed(cc, o); retur
         const c = src.indexOf('Detection point C');
         ok(c > 0, 'main.js still marks the detection point');
         const seg = src.slice(c, src.indexOf('const pick = await askEngineFailed(', c));
-        ok(/killTor\(\);/.test(seg),
-           'Tor is killed BEFORE the question goes up, not after it is answered');
+        //  killTor() is no longer synchronous here: its taskkill used to freeze
+        //  the window for ~131 ms with nothing to kill, and much longer with a
+        //  half-bootstrapped tor.exe to take down. AWAITED is the part that
+        //  matters -- firing it without waiting would put the question on
+        //  screen while tor still held :9050.
+        ok(/await killTor\(\{ blocking: false \}\);/.test(seg),
+           'Tor is killed BEFORE the question goes up, not after it is answered -- ' +
+           'off the UI thread, and awaited');
         ok(/'unavailable'\)/.test(seg),
            'and the progress line goes to "unavailable" -- the rocket blasts where it is');
         ok(/Logger\.error\('Connection failed'/.test(seg),

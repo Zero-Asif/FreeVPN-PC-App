@@ -26,6 +26,7 @@ const { execSync } = require('child_process');
 
 const geoExtMod = require('../lib/geo-ext');
 const { GeoExt, POLICY_KEYS, FORCELIST } = geoExtMod;
+const browsers = require('../lib/browsers');
 
 const TEST_ROOT = 'HKCU\\SOFTWARE\\FreeProxyGeoTest';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'fpfl-'));
@@ -83,8 +84,33 @@ const USER_2 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://clients2.google.com/ser
     ok(Object.keys(values(KEY)).length === 2, 'two pre-existing entries staged');
 
     console.log('── install ──');
+    //  Route 1 is a MANAGED-device route: measured 2026-09-01, an unmanaged Edge
+    //  rewrites our id to [BLOCKED]<id> in this very slot and installs nothing,
+    //  so install() refuses to name it (see geo-ext.js forceWorks()). The slot
+    //  mechanics below -- free slot, foreign entries, restore, sweep -- are the
+    //  same either way, and they are what this suite exists for, so it runs as a
+    //  managed device throughout and releases the override at the end.
+    geoExtMod._setManaged(true);
     const done = ext.install();
     ok(done.includes('edge'), 'install() reports edge by its stable id', JSON.stringify(done));
+
+    //  And the claim itself, which is the bug that cost a whole round: the slot
+    //  is written and reads back on an unmanaged device too, and install() must
+    //  still not report it as covered. externalRoots() is emptied for this one
+    //  call so route 3 cannot touch a real HKLM key while we are in there.
+    const REAL_ROOTS = browsers.externalRoots;
+    browsers.externalRoots = () => [];
+    geoExtMod._setManaged(false);
+    const unmanaged = ext.install();
+    browsers.externalRoots = REAL_ROOTS;
+    ok(!unmanaged.includes('edge'),
+       'unmanaged: the same verified slot is NOT reported as force-installed',
+       JSON.stringify(unmanaged));
+    ok(values(KEY)['3'] === `${prepared.id};${prepared.updateUrl}`,
+       'though the value really is still there -- only the claim changed',
+       JSON.stringify(values(KEY)['3']));
+    geoExtMod._setManaged(true);
+
     let v = values(KEY);
     ok(v['1'] === USER_1 && v['2'] === USER_2, "the user's own entries are untouched", JSON.stringify(v));
     ok(v['3'] === `${prepared.id};${prepared.updateUrl}`,
@@ -184,6 +210,11 @@ const USER_2 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://clients2.google.com/ser
 
     sh(`reg delete "${TEST_ROOT}" /f`);
     ok(sh(`reg query "${TEST_ROOT}"`) === null, 'test hive removed');
+    //  Hand the device reading back to the device, in case another suite is
+    //  loaded into this same process later.
+    geoExtMod._setManaged(null);
+    ok(typeof geoExtMod.managedDevice() === 'boolean',
+       'and the managed-device override is released');
     try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
 
     console.log(`\n${pass}/${pass + fail} checks passed`);
