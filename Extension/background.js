@@ -515,8 +515,12 @@ function markGeoPending() {
 //  one Brave, one throwaway profile, a fresh tab per visit:
 //
 //    visit 1  no UULE cookie yet, page handed Luxembourg
-//             -> Google Maps centred on the EXIT IP's own city, NOT on the
-//                position it was given
+//             -> Google Maps centred on the REQUESTING IP's own city, NOT on
+//                the position it was given. Recorded UNPROXIED, so that city
+//                was this machine's own ISP city and no exit was involved --
+//                the earlier wording here said "the EXIT IP", which was never
+//                measured. Re-measured four more times on 2026-09-02
+//                (.build/probe-maps-repin.txt): same city, 14z, every time.
 //             -> and Google set  UULE = [1,12,<ts>,null,[496116000,61319000],
 //                null,20000]  -- 49.6116,6.1319, the position we reported
 //    visit 2  that cookie still there, page handed Amsterdam, NEW tab
@@ -525,11 +529,29 @@ function markGeoPending() {
 //  So the stale country is not ours, and it is not a cached copy of our
 //  coordinates in page storage -- localStorage and IndexedDB held no position
 //  at all. Maps centres the map from the `UULE` cookie when there is one and
-//  from the exit IP when there is not, and a cookie outlives the tab and the
-//  browser. That is the entire reported bug: switch country, Maps still shows
-//  the first one, closing the tab does not help, restarting Brave does not
-//  help. It is also why deleting one named cookie fixes it and why clearing
-//  page storage on its own would not have.
+//  from the requesting IP when there is not, and a cookie outlives the tab and
+//  the browser. That is the entire reported bug: switch country, Maps still
+//  shows the first one, closing the tab does not help, restarting Brave does
+//  not help.
+//
+//  Which is why the cookie is deleted -- but deleting it is only half an
+//  answer, and .build/probe-maps-repin.txt is where that stopped being a
+//  guess. Removing the cookie takes the STALE steer away; it does not put the
+//  NEW country in, because with no cookie the map falls back to the requesting
+//  IP and Google's own database is free to disagree with it. What decides the
+//  first-load centre outright is the `/@lat,lng,zoom` pin in the URL:
+//
+//    measured, empty jar, no override, 2026-09-02, Brave 152:
+//      no pin, no cookie      -> this machine's city, 14z          (4 runs)
+//      pin Paris              -> Paris, 12z, exactly as asked
+//      pin Paris + cookie Tokyo -> PARIS. The pin beats the cookie.
+//      cookie Paris, no pin   -> this machine's city. A UULE WE compose is
+//                                read back byte-identical and then IGNORED,
+//                                so composing one is NOT a route we can use.
+//
+//  So the pin is the only signal this extension can set that Maps is measured
+//  to obey, and it is set by rewriting the tab's own URL. See repinMaps().
+
 //
 //  What a switch does here, in descending order of how well we know it:
 //
@@ -542,11 +564,19 @@ function markGeoPending() {
 //       own copy under a key we cannot know, and those are the only sites that
 //       could have one. Cookies are deliberately not in this step, for the same
 //       sign-out reason.
-//    3. Reload those tabs, and only those. A Maps URL that has already been
-//       rewritten to /@lat,lng,zoom is pinned to those coordinates and a plain
-//       reload would re-centre on the old country, so that segment is dropped
-//       -- but only when the pin is the country being left behind. Somewhere
-//       the user navigated to themselves is theirs, not ours to move.
+//    3. Reload those tabs, and only those -- plus any Maps tab carrying a
+//       /@lat,lng,zoom pin, whose pin is REWRITTEN to the new country instead
+//       of being dropped. Dropping it is what produced the reported symptom:
+//       the drop only ran when the pin sat within ~1.5 deg of the country
+//       being LEFT, so a pin anywhere else fell through to a plain reload of
+//       the very URL that carried it, and the map came back on that same wrong
+//       place after every switch, for ever. Rewriting also moves a map the
+//       user panned somewhere themselves, which the 1.5 deg rule existed to
+//       protect: a deliberate trade, made because the ask is that every reload
+//       show the connected country. The pin is only ever moved to a country the
+//       app says it is connected to AT THAT MOMENT -- if a disconnect lands
+//       while a switch purge is still in flight there is no destination any
+//       more, and the older, narrower unpin rule is what runs instead.
 //
 //  A DISCONNECT runs step 1 only. The cookie would otherwise go on naming a
 //  country the user is no longer in, but wiping site storage and reloading tabs
@@ -721,8 +751,10 @@ function clearGeoOriginStorage(origins, done) {
 }
 
 //  /maps/@<lat>,<lng>,<zoom> is Maps' own record of where the map is pointed and
-//  it wins over both the cookie and the exit IP, so a reload of that URL shows
-//  the old country again. Only the pin we are responsible for is dropped:
+//  it wins over both the cookie and the requesting IP -- measured, not assumed:
+//  .build/probe-maps-repin.txt, where a pinned Paris beat a planted Tokyo UULE
+//  and beat Google's own answer for this machine's IP. So a reload of that URL
+//  shows the old country again. Only the pin we are responsible for is dropped:
 //  within ~1.5 deg of the country being left, and only when the segment ends
 //  the path -- a deeper URL like /maps/place/X/@.../data=... is left to a plain
 //  reload rather than risk rebuilding something Maps then cannot parse.
@@ -735,6 +767,40 @@ function unpinMaps(url, from) {
     return m[1] + m[4];
 }
 
+//  REWRITE the pin to the country being switched TO, which is the one signal
+//  Maps is measured to obey. This is a separate function from unpinMaps() on
+//  purpose: that one's 1.5 deg line is a mutation anchor
+//  (.build/probe-mutate.js:60-62 finds it by literal text) and is left exactly
+//  as it was, so the weaker unpin path still exists for a disconnect.
+//
+//  MEASURED, .build/probe-maps-repin2.txt, Brave 152, empty cookie jar, no
+//  geolocation override, this machine ~5000 km from the target so there is no
+//  ambiguity about which signal won:
+//
+//    the URL from the user's screenshot, verbatim
+//      /maps/@35.5026691,51.7546255,7z?entry=ttu&g_ep=...  -> centred on Iran
+//    the same tab renavigated to repinMaps(thatUrl, Paris)
+//      /maps/@48.8566,2.3522,7z?entry=ttu&g_ep=...         -> centred on PARIS
+//    a fresh tab straight to the repinned URL                -> centred on PARIS
+//
+//  The zoom/rotation segment is CARRIED OVER rather than chosen: a 7z country
+//  view stays a 7z country view and only the centre moves, so nothing about how
+//  the user had the map set up is changed except the part that was wrong. The
+//  path after the pin is carried over too (/data=..., and /place/, /dir/,
+//  /search/ before it), all twelve shapes checked in the same file.
+//
+//  Returns null when there is nothing to do -- no destination, no pin in the
+//  URL, not a Maps URL, or the pin is already at the destination -- and a null
+//  hands the tab back to unpinMaps() and then to a plain reload.
+function repinMaps(url, to) {
+    if (!to || typeof to.lat !== 'number' || typeof to.lng !== 'number') return null;
+    const m = /^(https?:\/\/[^/]*google\.[^/]+\/maps(?:\/[^@?#][^?#]*?)?)\/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)([^/?#]*)((?:\/[^?#]*)?(?:[?#].*)?)$/
+        .exec(String(url));
+    if (!m) return null;
+    const next = m[1] + '/@' + to.lat + ',' + to.lng + (m[4] || '') + (m[5] || '');
+    return next === String(url) ? null : next;
+}
+
 //  Two kinds of tab have to be made to ask again, and only the first of them is
 //  in `origins`:
 //
@@ -743,25 +809,53 @@ function unpinMaps(url, from) {
 //   2. a page that is displaying a location it never asked us for. Google Maps
 //      is the measured case (.build/probe-maps-uule2.js): it centres from the
 //      UULE cookie and from its own /maps/@lat,lng URL, and in that run it did
-//      NOT call the geolocation API at all -- so it is invisible to the origin
-//      list, and after a switch it goes on showing the previous country for as
-//      long as the tab is open. That is the reported symptom, exactly.
+//      not call the geolocation API before doing so -- so it is invisible to the
+//      origin list, and after a switch it goes on showing the previous country
+//      for as long as the tab is open. That is the reported symptom, exactly.
 //
-//  So the maps sweep is not gated on the list. It is still narrow: unpinMaps()
-//  only matches a pin within ~1.5 deg of the country being LEFT, so a map the
-//  user pointed somewhere else themselves is not touched, and a tab that is
-//  neither on the list nor pinned to the old country is left alone -- which
-//  test-geo-purge.js asserts with a second origin that never asks for a
+//  So the maps sweep is not gated on the list. What it does with a pin depends
+//  on whether there is a country to point it at right now. On a switch there is,
+//  and repinMaps() rewrites the pin to it whatever it currently says -- including
+//  a map the user panned somewhere themselves, which is the deliberate trade
+//  described in step 3 above. When there is not, `to` is null, repinMaps()
+//  returns null, and the old narrow unpinMaps() rule runs instead: only a pin
+//  within ~1.5 deg of the country being left is touched.
+//
+//  Be precise about when that second case is actually reached, because it is not
+//  "on a disconnect": a disconnect passes deep=false and purgeLocationTraces()
+//  then never starts the per-origin half at all, so nothing here runs. It is
+//  reached when a disconnect arrives while a switch purge is STILL IN FLIGHT --
+//  geoRecord has already gone inactive by the time the reload does -- and then
+//  moving a pin to the country just left would be worse than leaving it.
+//
+//  A tab that is neither on the list nor pinned at all is left alone either way,
+//  which test-geo-purge.js asserts with a second origin that never asks for a
 //  position and must keep both its document and its localStorage.
 function reloadGeoUsers(origins, from) {
     if (!chrome.tabs || !chrome.tabs.query) return;
     const want = new Set(origins);
+    //  The destination is read from the authoritative record rather than passed
+    //  in as an argument, and that is not laziness: writeGeo() assigns
+    //  geoRecord BEFORE noteLocationChange() starts this chain (syncGeoSpoof,
+    //  and .build/probe-mutate.js has a mutant for that very ordering), so by
+    //  the time this runs it already holds the country being switched TO.
+    //  Threading it through purgeLocationTraces() and purgeGeoOriginStorage()
+    //  instead would have changed two call-site strings that probe-mutate.js
+    //  matches literally, turning two live mutants into silent no-ops.
+    //
+    //  Reading it here rather than at the top of the purge is also what makes
+    //  the in-flight-disconnect case above come out right: this is the latest
+    //  possible moment, so it is the most current answer available.
+    const to = geoRecord && geoRecord.active &&
+               typeof geoRecord.lat === 'number' && typeof geoRecord.lng === 'number'
+        ? { lat: geoRecord.lat, lng: geoRecord.lng }
+        : null;
     chrome.tabs.query({}, tabs => {
         void chrome.runtime.lastError;
         for (const t of tabs || []) {
             const o = originOf(t.url || '');
             if (!o) continue;
-            const clean = unpinMaps(t.url, from);
+            const clean = repinMaps(t.url, to) || unpinMaps(t.url, from);
             if (!want.has(o) && !clean) continue;
             try {
                 if (clean && clean !== t.url) chrome.tabs.update(t.id, { url: clean });

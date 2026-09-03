@@ -593,17 +593,30 @@ ok(at(/^storage\.set:geoOrigins=\[\]$/) >= 0 &&
 
 {
     const t = seen(/^tabs\.(reload|update):/);
-    ok(seen(/^tabs\.update:1:https:\/\/www\.google\.com\/maps$/).length === 1,
-       'a Maps tab pinned to the country being left has the /@lat,lng pin dropped -- a plain ' +
-       'reload of that URL re-centres on the old country whatever the cookie says', JSON.stringify(t));
-    ok(seen(/^tabs\.update:3:https:\/\/www\.google\.com\/maps\?hl=en$/).length === 1,
-       'and the rest of the URL survives the un-pinning', JSON.stringify(t));
-    ok(seen(/^tabs\.reload:2:bypassCache$/).length === 1,
-       "a Maps tab pinned somewhere else is the user's own view, so it is only reloaded",
+    //  MEASURED, .build/probe-maps-repin2.txt: a /@lat,lng,zoom pin decides the
+    //  first-load centre outright -- it beat a planted UULE and it beat Google's
+    //  own answer for the requesting IP. So the pin is REWRITTEN to the country
+    //  being switched to rather than dropped. Dropping it was the reported
+    //  symptom: the drop only claimed a pin within ~1.5 deg of the country being
+    //  LEFT, so a pin anywhere else fell through to a plain reload of the very
+    //  URL that carried it, and the map came back on the same wrong city after
+    //  every switch, for ever.
+    ok(seen(/^tabs\.update:1:https:\/\/www\.google\.com\/maps\/@35\.6895,139\.6917,12z$/).length === 1,
+       'a Maps tab pinned to the country being left is REPINNED to the country being switched ' +
+       'to -- dropping the pin only handed the map back to Google, which is free to disagree',
        JSON.stringify(t));
-    ok(seen(/^tabs\.reload:8:bypassCache$/).length === 1,
-       'a deeper /maps/place/.../@.../data=... URL is reloaded rather than rebuilt into ' +
-       'something Maps might not parse', JSON.stringify(t));
+    ok(seen(/^tabs\.update:3:https:\/\/www\.google\.com\/maps\/@35\.6895,139\.6917,12z\?hl=en$/).length === 1,
+       'and the zoom and the rest of the URL survive the repin: only the centre moves, so a ' +
+       'country-level view stays a country-level view', JSON.stringify(t));
+    ok(seen(/^tabs\.reload:2:bypassCache$/).length === 1,
+       'a Maps tab ALREADY pinned at the destination keeps its pin and is only reloaded -- ' +
+       'here that is tab 2, whose Tokyo pin is exactly where this switch is going',
+       JSON.stringify(t));
+    ok(seen(/^tabs\.update:8:https:\/\/www\.google\.com\/maps\/place\/Foo\/@35\.6895,139\.6917,17z\/data=!3m1$/).length === 1,
+       'a deeper /maps/place/.../@.../data=... URL is repinned too, with the place segment and ' +
+       'the data segment intact -- twelve URL shapes are checked in probe-maps-repin2.txt, and ' +
+       'the browser was measured to accept the rebuilt URL rather than choke on it',
+       JSON.stringify(t));
     ok(seen(/^tabs\.reload:4:bypassCache$/).length === 1 &&
        seen(/^tabs\.reload:7:bypassCache$/).length === 1,
        'the other sites that had been given the old country are reloaded too', JSON.stringify(t));
@@ -640,8 +653,8 @@ ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length =
    'the old country -- the switch is what triggers it, not the origin list', shown());
 ok(!seen(/^browsingData\.remove:\["https/).length,
    'and the per-origin clear is skipped, because there is no origin to scope it to', shown());
-//  The tabs ARE queried, and one of them IS touched even though the origin list
-//  is empty: tab 2 is pinned to /@35.6895,139.6917, which was "somewhere else"
+//  The tabs ARE queried, and they ARE touched even though the origin list is
+//  empty. Tab 2 is pinned to /@35.6895,139.6917, which was "somewhere else"
 //  during the LU -> JP switch above and is now the country being LEFT. That page
 //  never asked us for a position, so it can never be on the origin list -- and
 //  it is the measured Google Maps case (.build/probe-maps-uule2.js: Maps centres
@@ -649,13 +662,24 @@ ok(!seen(/^browsingData\.remove:\["https/).length,
 //  API). An empty list is exactly when such a page is the only thing left to put
 //  right, so the sweep cannot be gated on the list.
 ok(seen(/^tabs\.query$/).length === 1 &&
-   seen(/^tabs\.update:2:https:\/\/www\.google\.com\/maps$/).length === 1,
-   'the one tab still pinned to the country being left has its pin dropped, with no origin ' +
+   seen(/^tabs\.update:2:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1,
+   'the tab still pinned to the country being left is repinned to the new one, with no origin ' +
    'on the list at all -- a page can display a country without ever having asked for it',
    shown());
-ok(!seen(/^tabs\.(reload|update):(1|3|4|5|6|7|8)\b/).length,
-   'and nothing else is disturbed: not the maps now pinned to a country nobody is leaving, ' +
-   'not the sites that never asked, not a chrome:// page', shown());
+//  And the trade is asserted rather than left implicit. Tabs 1, 3 and 8 are
+//  pinned to LU, which nobody is leaving on this switch -- under the old 1.5 deg
+//  rule they were "the user's own view" and were left alone. They are moved now,
+//  because the ask is that EVERY reload show the connected country, and a map
+//  left on a third country is the thing being complained about. What is still
+//  not touched is anything that is not a pinned map.
+ok(seen(/^tabs\.update:1:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1 &&
+   seen(/^tabs\.update:3:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z\?hl=en$/).length === 1 &&
+   seen(/^tabs\.update:8:https:\/\/www\.google\.com\/maps\/place\/Foo\/@52\.3676,4\.9041,17z\/data=!3m1$/).length === 1,
+   'every other Maps pin is moved with it, including ones pointing at a country nobody is ' +
+   'leaving -- the deliberate cost of "every reload shows the connected country"', shown());
+ok(!seen(/^tabs\.(reload|update):(4|5|6|7)\b/).length,
+   'and nothing that is not a pinned map is disturbed: not the sites that never asked, not a ' +
+   'chrome:// page', shown());
 
 // ════════════════════════════════════════════════════════════════════
 mark();
@@ -722,8 +746,8 @@ ok(INFO.filter(s => /country changed NL -> JP/.test(s)).length === 1,
 ok(seen(/^cookies\.getAll:UULE$/).length === 1 && !JAR.length, 'so the cookie is swept', shown());
 ok(seen(/^browsingData\.remove:\["https:\/\/www\.google\.com"\]\|/).length === 1,
    'the one site that had asked has its storage cleared', shown());
-ok(seen(/^tabs\.update:11:https:\/\/www\.google\.com\/maps$/).length === 1,
-   'and its Amsterdam pin is dropped', shown());
+ok(seen(/^tabs\.update:11:https:\/\/www\.google\.com\/maps\/@35\.6895,139\.6917,12z$/).length === 1,
+   'and its Amsterdam pin is moved to Tokyo', shown());
 
 // ════════════════════════════════════════════════════════════════════
 JAR = [{ name: 'UULE', domain: '.google.com', path: '/', secure: true }];
@@ -808,9 +832,12 @@ ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length =
    shown());
 ok(seen(/^browsingData\.remove:\["https:\/\/www\.google\.com"\]\|/).length === 1,
    'and the site that had been handed a position has its storage cleared', shown());
-ok(seen(/^tabs\.reload:31/).length === 1 && !seen(/^tabs\.update:31/).length,
-   'its pinned map is reloaded rather than rewritten: with no previous country there are no ' +
-   'coordinates to recognise a pin by, so the one step that needs them is the one step lost',
+ok(seen(/^tabs\.update:31:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1 &&
+   !seen(/^tabs\.reload:31/).length,
+   'its pinned map is repinned to the NEW country even though the previous one was lost: the ' +
+   'repin is driven by the destination, read from geoRecord, and never needed the coordinates ' +
+   'being left. This is the one step the old unpin-only code could not do in this branch, ' +
+   'which is what the comment beside purgeLocationTraces(null, true) used to concede',
    shown());
 ok(!seen(/^tabs\.(reload|update):32/).length,
    'the origin that never asked where it was is still left alone -- a lost record widens ' +
@@ -1038,9 +1065,8 @@ ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length =
    'and not twice', shown());
 ok(seen(/^cookies\.removed:UULE$/).length === 1 && !JAR.length,
    'the cookie that carries the old country to Google is gone', shown());
-ok(seen(/^tabs\.update:61:https:\/\/www\.google\.com\/maps$/).length === 1,
-   'and the map pinned to the old country is taken off that pin -- which can only happen ' +
-   'if the previous country was still known when the purge ran', shown());
+ok(seen(/^tabs\.update:61:https:\/\/www\.google\.com\/maps\/@35\.6895,139\.6917,12z$/).length === 1,
+   'and the map pinned to the old country is repinned to the new one', shown());
 ok(JSON.stringify(prevLoc()) === JSON.stringify({ cc: 'JP', lat: JP.lat, lng: JP.lng }),
    'and what is left on record is where the browser is NOW, so the next switch compares ' +
    'against the right country', JSON.stringify(prevLoc()));

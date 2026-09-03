@@ -61,6 +61,18 @@ const MUTANTS = [
      'if (Math.abs(+m[2] - from.lat) > 1.5 || Math.abs(+m[3] - from.lng) > 1.5) return null;',
      'if (false) return null;'],
 
+    //  The two below guard the repin added for "every reload must show the
+    //  connected country". The first is the old behaviour exactly: drop the pin
+    //  and let Google choose. The second keeps the repin but loses the zoom
+    //  segment, which is the quiet way to move a map correctly and still ruin it.
+    ['the pin is dropped instead of being rewritten to the connected country',
+     'const clean = repinMaps(t.url, to) || unpinMaps(t.url, from);',
+     'const clean = unpinMaps(t.url, from);'],
+
+    ['the repin throws the zoom segment away',
+     "const next = m[1] + '/@' + to.lat + ',' + to.lng + (m[4] || '') + (m[5] || '');",
+     "const next = m[1] + '/@' + to.lat + ',' + to.lng + (m[5] || '');"],
+
     ['the same country counts as a change',
      'if (prev && !sameSpot(prev, now)) {',
      'if (prev) {'],
