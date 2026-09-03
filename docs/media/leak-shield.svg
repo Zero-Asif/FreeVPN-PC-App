@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 520" width="1180" height="520"
+     role="img" aria-labelledby="lt ld" font-family="'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif">
+<title id="lt">The four leak paths, and what closes each one</title>
+<desc id="ld">Four ways traffic escapes a proxy — DNS resolved outside the tunnel, IPv6 taking
+its own route, sockets that were open before the switch, and the tunnel dying while apps keep
+sending — and the specific thing this app does about each, with the log line it prints. The
+kill switch is shown as the fifth layer: it points the proxy at a dead port so nothing resolves
+and nothing connects.</desc>
+<!--
+  docs/media/leak-shield.svg
+  Each row names a real mechanism from main.js: applyLeakProtection (DNS and
+  IPv6), setAppProxy plus closeAllConnections (the sockets), startExitWatcher
+  and sealTunnel (the tunnel), killSwitchLeakLock (the last row). The log
+  strings are quoted from those functions, not paraphrased.
+-->
+<defs>
+  <linearGradient id="lbg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0b0d17"/><stop offset="1" stop-color="#16101f"/>
+  </linearGradient>
+  <linearGradient id="lrow" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#1a1530" stop-opacity=".95"/>
+    <stop offset="1" stop-color="#141024" stop-opacity=".55"/>
+  </linearGradient>
+  <linearGradient id="lred" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#ef4444"/><stop offset="1" stop-color="#f59e0b"/>
+  </linearGradient>
+  <!-- the leak: a packet that gets a little way out and is stopped -->
+  <g id="lstop">
+    <circle r="11" fill="#2a1116" stroke="#ef4444" stroke-width="1.8"/>
+    <path d="M-4.2 -4.2 L4.2 4.2 M4.2 -4.2 L-4.2 4.2" stroke="#f87171"
+          stroke-width="2.1" stroke-linecap="round"/>
+  </g>
+  <g id="lock">
+    <circle r="11" fill="#0f2a1a" stroke="#22c55e" stroke-width="1.8"/>
+    <rect x="-4.4" y="-1.2" width="8.8" height="7.2" rx="1.6" fill="none"
+          stroke="#4ade80" stroke-width="1.7"/>
+    <path d="M-2.6 -1.2 V-3.4 A2.6 2.6 0 0 1 2.6 -3.4 V-1.2" fill="none"
+          stroke="#4ade80" stroke-width="1.7"/>
+  </g>
+</defs>
+<rect width="1180" height="520" rx="16" fill="url(#lbg)" stroke="#241d3d" stroke-width="1.5"/>
+<text x="40" y="40" font-size="12.5" fill="#6f7c96" letter-spacing="2.2">LEAK PROTECTION</text>
+<text x="40" y="70" font-size="21" fill="#e7ecf7">Four ways out that a proxy alone leaves open
+  <tspan fill="#6f7c96" font-size="15"> &#8212; and the fifth that closes everything</tspan></text>
+<g font-size="11" fill="#66738c" letter-spacing="1.6">
+  <text x="96" y="90">THE WAY OUT</text>
+  <text x="412" y="90">WHAT CLOSES IT</text>
+  <text x="806" y="90">WHERE, EXACTLY</text>
+</g>
+<!-- row 1 : DNS -->
+<g>
+  <rect x="34" y="98" width="1112" height="72" rx="10" fill="url(#lrow)" stroke="#241d3d"/>
+  <use href="#lstop" x="72" y="134"/>
+  <text x="96" y="128" font-size="14.5" fill="#f0f4fb">DNS asked outside the tunnel</text>
+  <text x="96" y="148" font-size="11.5" fill="#7d8aa5">the page is hidden; the name you
+    looked up is not</text>
+  <text x="412" y="128" font-size="13" fill="#9fb0c9">Every adapter&#8217;s resolver
+    repointed at Tor</text>
+  <text x="412" y="148" font-size="11.5" fill="#7d8aa5">set to 127.0.0.1, then 53 and 853
+    blocked everywhere but loopback</text>
+  <rect x="806" y="112" width="324" height="44" rx="6" fill="#0f1424" stroke="#22304a"/>
+  <g font-family="Consolas,'Courier New',monospace" font-size="10.5" fill="#8fb3d9">
+    <text x="818" y="130">netsh … set dnsserver … static 127.0.0.1</text>
+    <text x="818" y="146">netsh advfirewall … block 53, 853</text>
+  </g>
+</g>
+<!-- row 2 : IPv6 -->
+<g>
+  <rect x="34" y="178" width="1112" height="72" rx="10" fill="url(#lrow)" stroke="#241d3d"/>
+  <use href="#lstop" x="72" y="214"/>
+  <text x="96" y="208" font-size="14.5" fill="#f0f4fb">IPv6 taking its own road</text>
+  <text x="96" y="228" font-size="11.5" fill="#7d8aa5">the circuit carries IPv4, so an AAAA
+    route goes around it</text>
+  <text x="412" y="208" font-size="13" fill="#9fb0c9">Blocked in both directions, by a
+    rule with a name</text>
+  <text x="412" y="228" font-size="11.5" fill="#7d8aa5">and the tunnelling adapters
+    &#8212; Teredo, ISATAP, 6to4 &#8212; turned off with it</text>
+  <rect x="806" y="192" width="324" height="44" rx="6" fill="#0f1424" stroke="#22304a"/>
+  <g font-family="Consolas,'Courier New',monospace" font-size="10.5" fill="#8fb3d9">
+    <text x="818" y="210">FreeProxy Block IPv6 Out / In</text>
+    <text x="818" y="226">Tcpip6\Parameters DisabledComponents=255</text>
+  </g>
+</g>
+<!-- row 3 : connections that predate the switch -->
+<g>
+  <rect x="34" y="258" width="1112" height="72" rx="10" fill="url(#lrow)" stroke="#241d3d"/>
+  <use href="#lstop" x="72" y="294"/>
+  <text x="96" y="288" font-size="14.5" fill="#f0f4fb">Sockets opened before the switch</text>
+  <text x="96" y="308" font-size="11.5" fill="#7d8aa5">changing a proxy does not move a
+    connection that exists</text>
+  <text x="412" y="288" font-size="13" fill="#9fb0c9">They are closed, not left to
+    finish quietly</text>
+  <text x="412" y="308" font-size="11.5" fill="#7d8aa5">the same call runs both ways, so
+    neither direction strands one</text>
+  <rect x="806" y="272" width="324" height="44" rx="6" fill="#0f1424" stroke="#22304a"/>
+  <g font-family="Consolas,'Courier New',monospace" font-size="10.5" fill="#8fb3d9">
+    <text x="818" y="290">setAppProxy('tor' | 'blocked' | 'direct')</text>
+    <text x="818" y="306">→ session.closeAllConnections()</text>
+  </g>
+</g>
+<!-- row 4 : the tunnel going away underneath you -->
+<g>
+  <rect x="34" y="338" width="1112" height="72" rx="10" fill="url(#lrow)" stroke="#241d3d"/>
+  <use href="#lstop" x="72" y="374"/>
+  <text x="96" y="368" font-size="14.5" fill="#f0f4fb">The tunnel dying without saying so</text>
+  <text x="96" y="388" font-size="11.5" fill="#7d8aa5">apps keep sending to a proxy that is
+    no longer there</text>
+  <text x="412" y="368" font-size="13" fill="#9fb0c9">The exit is read back on a timer,
+    over the live circuit</text>
+  <text x="412" y="388" font-size="11.5" fill="#7d8aa5">if it stops answering, the tunnel
+    comes down and says why</text>
+  <rect x="806" y="352" width="324" height="44" rx="6" fill="#0f1424" stroke="#22304a"/>
+  <g font-family="Consolas,'Courier New',monospace" font-size="10.5" fill="#8fb3d9">
+    <text x="818" y="370">startExitWatcher() → exitWatchTick()</text>
+    <text x="818" y="386">tearDownTunnel() on a failed read</text>
+  </g>
+</g>
+<!-- row 5 : the kill switch, which is the same idea turned all the way up -->
+<g>
+  <rect x="34" y="418" width="1112" height="82" rx="10" fill="#1c1220" stroke="#5c2233"/>
+  <rect x="34" y="418" width="4" height="82" rx="2" fill="url(#lred)"/>
+  <use href="#lock" x="72" y="459"/>
+  <text x="96" y="446" font-size="14.5" fill="#ffd9d9">Kill switch</text>
+  <text x="96" y="466" font-size="11.5" fill="#c98d96">nothing gets out, on purpose,
+    until you turn it off</text>
+  <text x="96" y="484" font-size="11.5" fill="#8c6a72">disconnecting keeps the block</text>
+  <text x="412" y="446" font-size="13" fill="#f3c6cd">The proxy is pointed at a port
+    nothing listens on</text>
+  <text x="412" y="466" font-size="11.5" fill="#c98d96">so nothing resolves and nothing
+    connects, in or out</text>
+  <text x="412" y="484" font-size="11.5" fill="#c98d96">DNS cache stopped, 53 and 853
+    blocked, IPv6 off, lfsvc stopped</text>
+  <rect x="806" y="432" width="324" height="54" rx="6" fill="#170f18" stroke="#4a2130"/>
+  <g font-family="Consolas,'Courier New',monospace" font-size="10.5" fill="#e0a3ad">
+    <text x="818" y="450">ProxyServer=socks=127.0.0.1:9999</text>
+    <text x="818" y="466">net stop dnscache /y · sc stop lfsvc</text>
+    <text x="818" y="482">Kill Switch LOCKED</text>
+  </g>
+  <!-- a slow pulse on the border, so the row reads as active rather than decorative -->
+  <rect x="34" y="418" width="1112" height="82" rx="10" fill="none" stroke="#ef4444"
+        stroke-width="1.4" opacity=".0">
+    <animate attributeName="opacity" values="0;.55;0" dur="3.2s" repeatCount="indefinite"/>
+  </rect>
+</g>
+</svg>

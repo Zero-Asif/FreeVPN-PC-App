@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 600" width="1180" height="600"
+     role="img" aria-labelledby="at ad" font-family="'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif">
+<title id="at">How the pieces fit together</title>
+<desc id="ad">Four columns. This app drives tor.exe over loopback ports 9050, 9080, 9051 and 53;
+it changes the Windows system proxy, firewall and location service and changes them back on
+disconnect; and the surfaces that see the tunnel are eight Chromium browsers, five Gecko
+browsers, Internet Explorer and the rest of Windows. Two extra loopback channels run
+underneath: a WebSocket on 127.0.0.1:8080 to the bundled extension, and a one-time HTTP
+server that hands the extension to a browser during install.</desc>
+<!--
+  docs/media/architecture.svg
+  Port numbers are the constants in main.js: SOCKS_PORT 9050, HTTP_PORT 9080,
+  CTRL_PORT 9051, DNS_PORT 53 with DNS_FALLBACK_PORT 9053. The WebSocket
+  address is the one Extension/background.js hard-codes on its line 18,
+  ws://127.0.0.1:8080. The install-time URL is lib/ext-host.js's own
+  http://127.0.0.1:{port}/freeproxy-geo.crx. Browser counts are the families
+  in lib/browsers.js. Nothing here is drawn from memory.
+-->
+<defs>
+  <linearGradient id="abg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0b0d17"/><stop offset="1" stop-color="#120f24"/>
+  </linearGradient>
+  <linearGradient id="awire" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#7c3aed"/><stop offset="1" stop-color="#22d3ee"/>
+  </linearGradient>
+  <linearGradient id="acol" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1a1530" stop-opacity=".9"/>
+    <stop offset="1" stop-color="#141024" stop-opacity=".9"/>
+  </linearGradient>
+  <!-- one arrow, reused in all three gaps. The bright segment is a flat colour
+       on purpose: url(#awire) is in objectBoundingBox units, and a gradient in
+       those units is undefined on a horizontal line, whose bounding box has no
+       height, so it simply would not paint. The lanes below are safe because
+       their paths turn a corner and so enclose real area. -->
+  <g id="aarrow">
+    <path d="M0 0 H14" stroke="#3b3160" stroke-width="2"/>
+    <path d="M14 0 H20" stroke="#22d3ee" stroke-width="2"/>
+    <path d="M17 -4 L22 0 L17 4" fill="none" stroke="#22d3ee" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</defs>
+<rect width="1180" height="600" rx="16" fill="url(#abg)" stroke="#241d3d" stroke-width="1.5"/>
+<text x="40" y="40" font-size="12.5" fill="#6f7c96" letter-spacing="2.2">ARCHITECTURE</text>
+<text x="40" y="70" font-size="21" fill="#e7ecf7">Four moving parts, all of them on this PC
+  <tspan fill="#6f7c96" font-size="15"> &#8212; and the wiring between them is all loopback</tspan></text>
+<g>
+  <rect x="946" y="26" width="200" height="26" rx="13" fill="#101a2a" stroke="#1d4e5e"/>
+  <circle cx="964" cy="39" r="4" fill="#22d3ee">
+    <animate attributeName="opacity" values="1;.25;1" dur="2.4s" repeatCount="indefinite"/>
+  </circle>
+  <text x="976" y="43" font-size="12.5" fill="#7fd3e4">no account, no telemetry</text>
+</g>
+<!-- ══ column A : this app ══ -->
+<g>
+  <rect x="34" y="104" width="258" height="328" rx="12" fill="url(#acol)" stroke="#2a2247"/>
+  <text x="52" y="132" font-size="14" fill="#c4b5fd" letter-spacing="1.8">THIS APP</text>
+  <text x="52" y="150" font-size="11.5" fill="#6f7c96">Electron 41.3.0, one window</text>
+  <path d="M52 162 H274" stroke="#2a2247"/>
+  <g font-size="13.5" fill="#e7ecf7">
+    <text x="52" y="188">main process</text>
+    <text x="52" y="204" font-size="11.5" fill="#7d8aa5">writes the torrc, seals the tunnel</text>
+    <text x="52" y="232">renderer</text>
+    <text x="52" y="248" font-size="11.5" fill="#7d8aa5">globe, badge, live log viewer</text>
+    <text x="52" y="276">18 IPC channels</text>
+    <text x="52" y="292" font-size="11.5" fill="#7d8aa5">connect, switch, toggle-killswitch</text>
+    <text x="52" y="320">elevated helper</text>
+    <text x="52" y="336" font-size="11.5" fill="#7d8aa5">the parts Windows guards</text>
+  </g>
+  <path d="M52 354 H274" stroke="#2a2247"/>
+  <text x="52" y="380" font-size="11.5" fill="#6b7791">No server of this project is</text>
+  <text x="52" y="396" font-size="11.5" fill="#6b7791">contacted, because there is none.</text>
+</g>
+<use href="#aarrow" x="292" y="268"/>
+<!-- ══ column B : the engine ══ -->
+<g>
+  <rect x="314" y="104" width="268" height="328" rx="12" fill="url(#acol)" stroke="#2a2247"/>
+  <text x="332" y="132" font-size="14" fill="#c4b5fd" letter-spacing="1.8">TOR ENGINE</text>
+  <text x="332" y="150" font-size="11.5" fill="#6f7c96">tor.exe 0.4.9.6, started by this app</text>
+  <path d="M332 162 H564" stroke="#2a2247"/>
+  <g font-size="13" fill="#e7ecf7">
+    <rect x="332" y="172" width="232" height="38" rx="7" fill="#12172b" stroke="#243a52"/>
+    <text x="344" y="189">SocksPort 127.0.0.1:9050</text>
+    <text x="344" y="204" font-size="11" fill="#7d8aa5">where every proxied socket goes</text>
+    <rect x="332" y="218" width="232" height="38" rx="7" fill="#12172b" stroke="#243a52"/>
+    <text x="344" y="235">HTTPTunnelPort 9080</text>
+    <text x="344" y="250" font-size="11" fill="#7d8aa5">for the hosts that speak HTTP proxy</text>
+    <rect x="332" y="264" width="232" height="38" rx="7" fill="#12172b" stroke="#243a52"/>
+    <text x="344" y="281">ControlPort 9051</text>
+    <text x="344" y="296" font-size="11" fill="#7d8aa5">cookie auth, never a password</text>
+    <rect x="332" y="310" width="232" height="38" rx="7" fill="#12172b" stroke="#243a52"/>
+    <text x="344" y="327">DNSPort 53</text>
+    <text x="344" y="342" font-size="11" fill="#7d8aa5">9053 instead if 53 is already taken</text>
+  </g>
+  <path d="M332 360 H564" stroke="#2a2247"/>
+  <text x="332" y="384" font-size="12" fill="#a78bfa">ExitNodes &#123;your country&#125;</text>
+  <text x="332" y="402" font-size="12" fill="#a78bfa">StrictNodes 1</text>
+  <text x="470" y="384" font-size="11.5" fill="#6b7791">rewritten on every</text>
+  <text x="470" y="402" font-size="11.5" fill="#6b7791">connect and switch</text>
+</g>
+<use href="#aarrow" x="582" y="268"/>
+<!-- ══ column C : what Windows is told ══ -->
+<g>
+  <rect x="604" y="104" width="258" height="328" rx="12" fill="url(#acol)" stroke="#2a2247"/>
+  <text x="622" y="132" font-size="14" fill="#c4b5fd" letter-spacing="1.8">WINDOWS</text>
+  <text x="622" y="150" font-size="11.5" fill="#6f7c96">changed, and changed back</text>
+  <path d="M622 162 H844" stroke="#2a2247"/>
+  <g font-size="13.5" fill="#e7ecf7">
+    <text x="622" y="188">system proxy</text>
+    <text x="622" y="204" font-size="11.5" fill="#7d8aa5">socks=127.0.0.1:9050</text>
+    <text x="622" y="232">DNS</text>
+    <text x="622" y="248" font-size="11.5" fill="#7d8aa5">every adapter pinned to 127.0.0.1</text>
+    <text x="622" y="276">firewall</text>
+    <text x="622" y="292" font-size="11.5" fill="#7d8aa5">53 and 853 blocked off loopback</text>
+    <text x="622" y="320">IPv6 and lfsvc</text>
+    <text x="622" y="336" font-size="11.5" fill="#7d8aa5">blocked; location service stopped</text>
+  </g>
+  <path d="M622 354 H844" stroke="#2a2247"/>
+  <text x="622" y="380" font-size="11.5" fill="#6b7791">Every one of these is undone on</text>
+  <text x="622" y="396" font-size="11.5" fill="#6b7791">disconnect, by name, not by reboot.</text>
+</g>
+<use href="#aarrow" x="862" y="268"/>
+<!-- ══ column D : what actually sees the tunnel ══ -->
+<g>
+  <rect x="884" y="104" width="262" height="328" rx="12" fill="url(#acol)" stroke="#2a2247"/>
+  <text x="902" y="132" font-size="14" fill="#c4b5fd" letter-spacing="1.8">SURFACES</text>
+  <text x="902" y="150" font-size="11.5" fill="#6f7c96">14 browsers, and the rest of Windows</text>
+  <path d="M902 162 H1128" stroke="#2a2247"/>
+  <g font-size="13.5" fill="#e7ecf7">
+    <text x="902" y="188">8 Chromium browsers</text>
+    <text x="902" y="204" font-size="11.5" fill="#7d8aa5">proxy + the bundled MV3 extension</text>
+    <text x="902" y="232">5 Gecko browsers</text>
+    <text x="902" y="248" font-size="11.5" fill="#7d8aa5">proxy + prefs, per real profile</text>
+    <text x="902" y="276">Internet Explorer</text>
+    <text x="902" y="292" font-size="11.5" fill="#7d8aa5">proxy only, no extension model</text>
+    <text x="902" y="320">native applications</text>
+    <text x="902" y="336" font-size="11.5" fill="#7d8aa5">proxy; position withheld, not faked</text>
+  </g>
+  <path d="M902 354 H1128" stroke="#2a2247"/>
+  <text x="902" y="380" font-size="11.5" fill="#6b7791">Only the browsers you actually have</text>
+  <text x="902" y="396" font-size="11.5" fill="#6b7791">installed are touched, or named.</text>
+</g>
+<!-- ══ the two loopback channels that run underneath the columns ══ -->
+<g fill="none" stroke-linecap="round">
+  <path d="M200 432 V468 Q200 476 208 476 H972 Q980 476 980 468 V432"
+        stroke="#2a2247" stroke-width="2"/>
+  <path d="M200 432 V468 Q200 476 208 476 H972 Q980 476 980 468 V432"
+        stroke="url(#awire)" stroke-width="2" stroke-dasharray="8 12">
+    <animate attributeName="stroke-dashoffset" values="40;0" dur="1.5s" repeatCount="indefinite"/>
+  </path>
+  <path d="M120 432 V504 Q120 512 128 512 H1052 Q1060 512 1060 504 V432"
+        stroke="#2a2247" stroke-width="2"/>
+  <path d="M120 432 V504 Q120 512 128 512 H1052 Q1060 512 1060 504 V432"
+        stroke="#5b4a8a" stroke-width="2" stroke-dasharray="4 14">
+    <animate attributeName="stroke-dashoffset" values="36;0" dur="4s" repeatCount="indefinite"/>
+  </path>
+</g>
+<g text-anchor="middle" font-size="12">
+  <text x="590" y="470" fill="#8fd7e6">ws://127.0.0.1:8080
+    <tspan fill="#6b7791"> &#8212; every open browser is told the country, the city and an
+      accuracy, and told again the moment it changes</tspan></text>
+  <text x="590" y="506" fill="#a78bfa">http://127.0.0.1:&#123;port&#125;/freeproxy-geo.crx
+    <tspan fill="#6b7791"> &#8212; install time only; the server stops as soon as the
+      browser has taken it</tspan></text>
+</g>
+<path d="M34 534 H1146" stroke="#241d3d" stroke-width="1.2"/>
+<g font-size="11.5" fill="#6b7791">
+  <text x="40" y="556">Hosts this app reaches on its own: onionoo.torproject.org for the relay
+    list, and &#8212; through the circuit it has just built &#8212; one of ipleak.net,
+    get.geojs.io, api.country.is or ipinfo.io, to read the exit country back.</text>
+  <text x="40" y="576">To place the &#8220;you are here&#8221; ring it asks free.freeipapi.com,
+    ipwho.is, get.geojs.io or api.ipbase.com, in that order, and draws nothing if none of
+    them answer. There is no server belonging to this project.</text>
+</g>
+</svg>

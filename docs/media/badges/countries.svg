@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="179" height="22" role="img"
+     viewBox="0 0 179 22" aria-label="exit countries: 74 spoofable">
+  <title>exit countries: 74 spoofable</title>
+  <defs>
+    <linearGradient id="gw22hda" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".16"/>
+    </linearGradient>
+    <clipPath id="cgw22hda"><rect width="179" height="22" rx="4"/></clipPath>
+  </defs>
+  <g clip-path="url(#cgw22hda)">
+    <rect width="93" height="22" fill="#161a27"/>
+    <rect x="93" width="86" height="22" fill="#334155"/>
+    <rect width="179" height="22" fill="url(#gw22hda)"/>
+    <rect x="93" width="86" height="22" fill="#fff" opacity="0">
+      <animate attributeName="opacity" values="0;.28;0" dur="2.4s"
+               begin="0.91s" repeatCount="1" fill="freeze"/>
+    </rect>
+  </g>
+  <g font-family="'Segoe UI',Verdana,DejaVu Sans,sans-serif" font-size="11">
+    <text x="46.5" y="15" fill="#000" fill-opacity=".45" text-anchor="middle"
+          textLength="75" lengthAdjust="spacingAndGlyphs">exit countries</text>
+    <text x="46.5" y="14" fill="#c7cede" text-anchor="middle"
+          textLength="75" lengthAdjust="spacingAndGlyphs">exit countries</text>
+    <text x="136" y="15" fill="#000" fill-opacity=".35" text-anchor="middle"
+          textLength="68" lengthAdjust="spacingAndGlyphs">74 spoofable</text>
+    <text x="136" y="14" fill="#fff" text-anchor="middle" font-weight="600"
+          textLength="68" lengthAdjust="spacingAndGlyphs">74 spoofable</text>
+  </g>
+</svg>

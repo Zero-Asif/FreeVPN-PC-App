@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 28" width="1180" height="28"
+     role="img" aria-labelledby="dt" font-family="'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif">
+<title id="dt">Section divider</title>
+<!--
+  docs/media/divider.svg
+  A rule, not a picture: it sits between README sections so a long page still
+  reads as a page. One packet crosses it every four seconds, which is the same
+  motion the hero uses for the circuit, so the two read as the same document.
+-->
+<defs>
+  <!--
+    userSpaceOnUse, not the default: a gradient in objectBoundingBox units is
+    undefined on a shape whose bounding box has zero height, and a horizontal
+    line is exactly that: the rule painted nothing at all until this was
+    fixed, while the dots and the moving packet still made the preview look
+    plausible. Coordinates therefore match the path: 40 to 1140.
+  -->
+  <linearGradient id="dline" gradientUnits="userSpaceOnUse" x1="40" y1="14" x2="1140" y2="14">
+    <stop offset="0" stop-color="#7c3aed" stop-opacity="0"/>
+    <stop offset=".18" stop-color="#7c3aed" stop-opacity=".85"/>
+    <stop offset=".5" stop-color="#e879f9" stop-opacity=".9"/>
+    <stop offset=".82" stop-color="#22d3ee" stop-opacity=".85"/>
+    <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+  </linearGradient>
+  <radialGradient id="dglow" cx=".5" cy=".5" r=".5">
+    <stop offset="0" stop-color="#ffffff" stop-opacity=".95"/>
+    <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+<path d="M40 14 H1140" stroke="url(#dline)" stroke-width="1.6"/>
+<g fill="#a78bfa">
+  <circle cx="40" cy="14" r="2.6"/><circle cx="1140" cy="14" r="2.6"/>
+</g>
+<circle cx="590" cy="14" r="3.6" fill="#e879f9">
+  <animate attributeName="cx" values="40;1140" dur="4s" repeatCount="indefinite"/>
+</circle>
+<ellipse cx="590" cy="14" rx="26" ry="7" fill="url(#dglow)" opacity=".5">
+  <animate attributeName="cx" values="40;1140" dur="4s" repeatCount="indefinite"/>
+</ellipse>
+</svg>

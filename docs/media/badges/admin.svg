@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="151" height="22" role="img"
+     viewBox="0 0 151 22" aria-label="runs as: administrator">
+  <title>runs as: administrator</title>
+  <defs>
+    <linearGradient id="gsbeqyr" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".16"/>
+    </linearGradient>
+    <clipPath id="cgsbeqyr"><rect width="151" height="22" rx="4"/></clipPath>
+  </defs>
+  <g clip-path="url(#cgsbeqyr)">
+    <rect width="60" height="22" fill="#161a27"/>
+    <rect x="60" width="91" height="22" fill="#b45309"/>
+    <rect width="151" height="22" fill="url(#gsbeqyr)"/>
+    <rect x="60" width="91" height="22" fill="#fff" opacity="0">
+      <animate attributeName="opacity" values="0;.28;0" dur="2.4s"
+               begin="1.43s" repeatCount="1" fill="freeze"/>
+    </rect>
+  </g>
+  <g font-family="'Segoe UI',Verdana,DejaVu Sans,sans-serif" font-size="11">
+    <text x="30" y="15" fill="#000" fill-opacity=".45" text-anchor="middle"
+          textLength="42" lengthAdjust="spacingAndGlyphs">runs as</text>
+    <text x="30" y="14" fill="#c7cede" text-anchor="middle"
+          textLength="42" lengthAdjust="spacingAndGlyphs">runs as</text>
+    <text x="105.5" y="15" fill="#000" fill-opacity=".35" text-anchor="middle"
+          textLength="73" lengthAdjust="spacingAndGlyphs">administrator</text>
+    <text x="105.5" y="14" fill="#fff" text-anchor="middle" font-weight="600"
+          textLength="73" lengthAdjust="spacingAndGlyphs">administrator</text>
+  </g>
+</svg>

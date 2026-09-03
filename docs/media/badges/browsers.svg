@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="158" height="22" role="img"
+     viewBox="0 0 158 22" aria-label="browsers: 14 supported">
+  <title>browsers: 14 supported</title>
+  <defs>
+    <linearGradient id="gij3g3o" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".16"/>
+    </linearGradient>
+    <clipPath id="cgij3g3o"><rect width="158" height="22" rx="4"/></clipPath>
+  </defs>
+  <g clip-path="url(#cgij3g3o)">
+    <rect width="70" height="22" fill="#161a27"/>
+    <rect x="70" width="88" height="22" fill="#334155"/>
+    <rect width="158" height="22" fill="url(#gij3g3o)"/>
+    <rect x="70" width="88" height="22" fill="#fff" opacity="0">
+      <animate attributeName="opacity" values="0;.28;0" dur="2.4s"
+               begin="0.78s" repeatCount="1" fill="freeze"/>
+    </rect>
+  </g>
+  <g font-family="'Segoe UI',Verdana,DejaVu Sans,sans-serif" font-size="11">
+    <text x="35" y="15" fill="#000" fill-opacity=".45" text-anchor="middle"
+          textLength="52" lengthAdjust="spacingAndGlyphs">browsers</text>
+    <text x="35" y="14" fill="#c7cede" text-anchor="middle"
+          textLength="52" lengthAdjust="spacingAndGlyphs">browsers</text>
+    <text x="114" y="15" fill="#000" fill-opacity=".35" text-anchor="middle"
+          textLength="70" lengthAdjust="spacingAndGlyphs">14 supported</text>
+    <text x="114" y="14" fill="#fff" text-anchor="middle" font-weight="600"
+          textLength="70" lengthAdjust="spacingAndGlyphs">14 supported</text>
+  </g>
+</svg>

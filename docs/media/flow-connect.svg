@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 500" width="1040" height="500"
+     role="img" aria-labelledby="ft fd" font-family="'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif">
+<title id="ft">What happens when you press Connect</title>
+<desc id="fd">The seven progress stages the app reports, with the percentage and the exact
+message each one shows: 3% selecting server, 5% starting the Tor engine, Tor's own bootstrap
+forwarded verbatim from 5 to 95%, 96% system proxy, 97% leak paths, 98% exit verification,
+100% connected.</desc>
+<!--
+  docs/media/flow-connect.svg
+  Every percentage and every message string in this diagram is copied from
+  main.js establishConnection(): sendProgress(3, 'Selecting server...'),
+  sendProgress(5, 'Starting Tor engine...'), the capped passthrough of tor's
+  own bootstrap, sendProgress(96, 'Setting up secure proxy...'),
+  sendProgress(97, 'Closing leak paths...'), sendProgress(98, 'Verifying exit
+  country...') and sendProgress(100, `Connected via ${verdict.cc}`). The 62%
+  row shows a real bootstrap line as the popup screenshot captured it.
+  The bar deliberately crawls between rows 3 and 4: that gap is where the
+  time actually goes, and a diagram that spaced the stages evenly would be
+  telling a nicer story than the app can keep.
+-->
+<defs>
+  <linearGradient id="fbg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0d1020"/><stop offset="1" stop-color="#12101f"/>
+  </linearGradient>
+  <linearGradient id="frail" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#7c3aed"/><stop offset=".72" stop-color="#c026d3"/>
+    <stop offset="1" stop-color="#22c55e"/>
+  </linearGradient>
+  <linearGradient id="fhead" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#e879f9"/>
+  </linearGradient>
+</defs>
+<rect width="1040" height="500" rx="16" fill="url(#fbg)" stroke="#241d3d" stroke-width="1.5"/>
+<g font-size="12.5" fill="#6f7c96" letter-spacing="2.2">
+  <text x="40" y="38">CONNECT</text>
+</g>
+<text x="40" y="70" font-size="21" fill="#e7ecf7">Seven stages, in the app&#8217;s own words
+  <tspan fill="#6f7c96" font-size="15"> &#8212; not a spinner</tspan></text>
+<!-- the rail: grey track, then the fill that climbs it -->
+<rect x="90" y="118" width="3" height="336" rx="1.5" fill="#241d3d"/>
+<rect x="90" y="118" width="3" rx="1.5" fill="url(#frail)" height="0">
+  <animate attributeName="height" dur="10s" repeatCount="indefinite"
+    keyTimes="0;.04;.12;.22;.66;.72;.78;.86;1"
+    values="0;0;56;112;168;224;280;336;336"/>
+</rect>
+<!-- the moving head of the bar -->
+<circle cx="91.5" cy="118" r="5" fill="#fff" opacity=".9">
+  <animate attributeName="cy" dur="10s" repeatCount="indefinite"
+    keyTimes="0;.04;.12;.22;.66;.72;.78;.86;1"
+    values="118;118;174;230;286;342;398;454;454"/>
+</circle>
+
+<g font-size="17" fill="#e7ecf7">
+  <g>
+    <circle cx="91.5" cy="118" r="7.5" fill="#241d3d" stroke="#0d1020" stroke-width="3">
+      <animate attributeName="fill" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.035;.04;1" values="#241d3d;#241d3d;#a78bfa;#a78bfa"/>
+    </circle>
+    <rect x="112" y="106" width="52" height="24" rx="6" fill="#1b1730" stroke="#2f2650"/>
+    <text x="138" y="123" font-size="13" fill="#c4b5fd" text-anchor="middle">3%</text>
+    <text x="180" y="115">Selecting server...</text>
+    <text x="180" y="134" font-size="13" fill="#7d8aa5">the country you chose, or the
+      fastest one the live relay list can offer</text>
+    <text x="1000" y="115" font-size="12" fill="#5f6b83" text-anchor="end">this app</text>
+  </g>
+  <g>
+    <circle cx="91.5" cy="174" r="7.5" fill="#241d3d" stroke="#0d1020" stroke-width="3">
+      <animate attributeName="fill" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.115;.12;1" values="#241d3d;#241d3d;#a78bfa;#a78bfa"/>
+    </circle>
+    <rect x="112" y="162" width="52" height="24" rx="6" fill="#1b1730" stroke="#2f2650"/>
+    <text x="138" y="179" font-size="13" fill="#c4b5fd" text-anchor="middle">5%</text>
+    <text x="180" y="171">Starting Tor engine...</text>
+    <text x="180" y="190" font-size="13" fill="#7d8aa5">tor.exe, with a torrc this app writes:
+      ExitNodes pinned to your country, StrictNodes 1</text>
+    <text x="1000" y="171" font-size="12" fill="#5f6b83" text-anchor="end">tor.exe</text>
+  </g>
+  <g>
+    <circle cx="91.5" cy="230" r="7.5" fill="#241d3d" stroke="#0d1020" stroke-width="3">
+      <animate attributeName="fill" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.215;.22;1" values="#241d3d;#241d3d;#a78bfa;#a78bfa"/>
+    </circle>
+    <rect x="112" y="218" width="52" height="24" rx="6" fill="#1b1730" stroke="#2f2650"/>
+    <text x="138" y="235" font-size="13" fill="#c4b5fd" text-anchor="middle">62%</text>
+    <text x="180" y="227">Loading relay descriptors...</text>
+    <text x="180" y="246" font-size="13" fill="#7d8aa5">Tor&#8217;s own bootstrap, forwarded word
+      for word from 5% to 95%. This is the long part.</text>
+    <text x="1000" y="227" font-size="12" fill="#5f6b83" text-anchor="end">tor.exe</text>
+  </g>
+  <g>
+    <circle cx="91.5" cy="286" r="7.5" fill="#241d3d" stroke="#0d1020" stroke-width="3">
+      <animate attributeName="fill" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.655;.66;1" values="#241d3d;#241d3d;#c026d3;#c026d3"/>
+    </circle>
+    <rect x="112" y="274" width="52" height="24" rx="6" fill="#1b1730" stroke="#2f2650"/>
+    <text x="138" y="291" font-size="13" fill="#e9a5f5" text-anchor="middle">96%</text>
+    <text x="180" y="283">Setting up secure proxy...</text>
+    <text x="180" y="302" font-size="13" fill="#7d8aa5">the Windows system proxy is pointed at
+      SOCKS 127.0.0.1, and sockets opened before the switch are closed</text>
+    <text x="1000" y="283" font-size="12" fill="#5f6b83" text-anchor="end">Windows</text>
+  </g>
+  <g>
+    <circle cx="91.5" cy="342" r="7.5" fill="#241d3d" stroke="#0d1020" stroke-width="3">
+      <animate attributeName="fill" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.715;.72;1" values="#241d3d;#241d3d;#c026d3;#c026d3"/>
+    </circle>
+    <rect x="112" y="330" width="52" height="24" rx="6" fill="#1b1730" stroke="#2f2650"/>
+    <text x="138" y="347" font-size="13" fill="#e9a5f5" text-anchor="middle">97%</text>
+    <text x="180" y="339">Closing leak paths...</text>
+    <text x="180" y="358" font-size="13" fill="#7d8aa5">DNS pinned to Tor, ports 53 and 853
+      blocked everywhere else, IPv6 blocked in and out</text>
+    <text x="1000" y="339" font-size="12" fill="#5f6b83" text-anchor="end">Windows + firewall</text>
+  </g>
+  <g>
+    <circle cx="91.5" cy="398" r="7.5" fill="#241d3d" stroke="#0d1020" stroke-width="3">
+      <animate attributeName="fill" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.775;.78;1" values="#241d3d;#241d3d;#f59e0b;#f59e0b"/>
+    </circle>
+    <rect x="112" y="386" width="52" height="24" rx="6" fill="#1b1730" stroke="#2f2650"/>
+    <text x="138" y="403" font-size="13" fill="#fcd34d" text-anchor="middle">98%</text>
+    <text x="180" y="395">Verifying exit country...</text>
+    <text x="180" y="414" font-size="13" fill="#7d8aa5">the app asks over the circuit it just
+      built where that circuit actually came out</text>
+    <text x="1000" y="395" font-size="12" fill="#5f6b83" text-anchor="end">the live circuit</text>
+  </g>
+  <g>
+    <circle cx="91.5" cy="454" r="7.5" fill="#241d3d" stroke="#0d1020" stroke-width="3">
+      <animate attributeName="fill" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.855;.86;1" values="#241d3d;#241d3d;#22c55e;#22c55e"/>
+      <animate attributeName="r" dur="10s" repeatCount="indefinite"
+        keyTimes="0;.86;.92;1" values="7.5;7.5;11;9"/>
+    </circle>
+    <rect x="112" y="442" width="52" height="24" rx="6" fill="#0f2a1a" stroke="#1c6b3a"/>
+    <text x="138" y="459" font-size="13" fill="#6ee7a0" text-anchor="middle">100%</text>
+    <text x="180" y="451" fill="#c9f7d8">Connected via JP</text>
+    <text x="180" y="470" font-size="13" fill="#7d8aa5">and every browser on this PC is told the
+      same country, down to the city and an accuracy in metres</text>
+    <text x="1000" y="451" font-size="12" fill="#5f6b83" text-anchor="end">browsers</text>
+  </g>
+</g>
+
+</svg>

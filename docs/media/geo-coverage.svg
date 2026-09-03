@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 462" width="1180" height="462"
+     role="img" aria-labelledby="gt gd" font-family="'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif">
+<title id="gt">Geolocation coverage, surface by surface</title>
+<desc id="gd">Five surfaces. The exit country is correct on all of them because traffic is
+proxied. Coordinates are spoofed in this app's window, in the eight Chromium browsers and in
+the five Gecko browsers; for Internet Explorer, WebView hosts and native Windows applications
+the position is withheld rather than faked, because Windows exposes no supported way to inject
+coordinates.</desc>
+<!--
+  docs/media/geo-coverage.svg
+  This table is the one in lib/geo-spoof.js's own header comment, drawn.
+  Nothing in it is aspirational: the app reads each route back at runtime and
+  prints the same breakdown in the log (main.js reportGeoCoverage), which is
+  why the two right-hand rows say "withheld" and not "spoofed". If a future
+  build finds a supported way to inject coordinates into the Windows location
+  provider, this file changes at the same commit as that code.
+-->
+<defs>
+  <linearGradient id="gbg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0d1020"/><stop offset="1" stop-color="#120f1e"/>
+  </linearGradient>
+  <linearGradient id="ghead" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#a78bfa"/>
+  </linearGradient>
+  <g id="yes">
+    <circle r="12" fill="#0f2a1a" stroke="#22c55e" stroke-width="1.8"/>
+    <path d="M-5 0 L-1.5 3.6 L5.2 -3.6" fill="none" stroke="#4ade80"
+          stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g id="shield">
+    <circle r="12" fill="#2a2008" stroke="#f59e0b" stroke-width="1.8"/>
+    <path d="M0 -6 L5 -3.6 V1 Q5 4.6 0 6.4 Q-5 4.6 -5 1 V-3.6 Z" fill="none"
+          stroke="#fbbf24" stroke-width="1.7" stroke-linejoin="round"/>
+  </g>
+  <!-- the row highlight that walks down the table -->
+  <linearGradient id="gscan" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#a78bfa" stop-opacity="0"/>
+    <stop offset=".25" stop-color="#a78bfa" stop-opacity=".13"/>
+    <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+  </linearGradient>
+</defs>
+<rect width="1180" height="462" rx="16" fill="url(#gbg)" stroke="#241d3d" stroke-width="1.5"/>
+<text x="40" y="40" font-size="12.5" fill="#6f7c96" letter-spacing="2.2">GEOLOCATION</text>
+<text x="40" y="70" font-size="21" fill="#e7ecf7">Five surfaces, and one this app refuses to fake
+  <tspan fill="#6f7c96" font-size="15"> &#8212; blocking is not spoofing</tspan></text>
+<rect x="34" y="140" width="1112" height="52" rx="8" fill="url(#gscan)">
+  <animate attributeName="y" dur="9s" repeatCount="indefinite"
+           values="140;196;252;308;364;140" calcMode="discrete"/>
+</rect>
+<g font-size="11" fill="#66738c" letter-spacing="1.6">
+  <text x="44" y="122">SURFACE</text>
+  <text x="415" y="122" text-anchor="middle">EXIT COUNTRY</text>
+  <text x="525" y="122" text-anchor="middle">COORDINATES</text>
+  <text x="596" y="122">HOW</text>
+</g>
+<path d="M34 132 H1146" stroke="#241d3d" stroke-width="1.2"/>
+
+<g font-size="16.5" fill="#e7ecf7">
+  <g>
+    <text x="44" y="163">This app&#8217;s own window</text>
+    <text x="44" y="181" font-size="12" fill="#7d8aa5">the globe, the badge, any page it loads</text>
+    <use href="#yes" x="415" y="166"/><use href="#yes" x="525" y="166"/>
+    <text x="596" y="161" font-size="13.5" fill="#9fb0c9">Chrome DevTools Protocol,
+      Emulation.setGeolocationOverride, on this app&#8217;s own session.</text>
+    <text x="596" y="180" font-size="13.5" fill="#7d8aa5">Set the moment a country is
+      pinned, cleared the moment the tunnel comes down.</text>
+  </g>
+  <g>
+    <text x="44" y="219">Chromium browsers</text>
+    <text x="44" y="237" font-size="12" fill="#7d8aa5">Edge, Chrome, Brave, Vivaldi,
+      Opera, Opera GX, Yandex, Chromium</text>
+    <use href="#yes" x="415" y="222"/><use href="#yes" x="525" y="222"/>
+    <text x="596" y="217" font-size="13.5" fill="#9fb0c9">A bundled MV3 extension replaces
+      navigator.geolocation in the page&#8217;s own JS world.</text>
+    <text x="596" y="236" font-size="13.5" fill="#7d8aa5">Installed per browser, read back
+      per browser, and reported by name in the log.</text>
+  </g>
+  <g>
+    <text x="44" y="275">Gecko browsers</text>
+    <text x="44" y="293" font-size="12" fill="#7d8aa5">Firefox, Waterfox, LibreWolf,
+      Pale Moon, SeaMonkey</text>
+    <use href="#yes" x="415" y="278"/><use href="#yes" x="525" y="278"/>
+    <text x="596" y="273" font-size="13.5" fill="#9fb0c9">geo.provider.network.url, a
+      documented pref, pointed at fixed coordinates.</text>
+    <text x="596" y="292" font-size="13.5" fill="#7d8aa5">Written into every profile that
+      belongs to a browser actually installed here.</text>
+  </g>
+  <g>
+    <text x="44" y="331">Internet Explorer, WebView hosts</text>
+    <text x="44" y="349" font-size="12" fill="#7d8aa5">installed, but with no extension
+      model at all</text>
+    <use href="#yes" x="415" y="334"/><use href="#shield" x="525" y="334"/>
+    <text x="596" y="329" font-size="13.5" fill="#9fb0c9">Traffic is proxied, so the country
+      is right. The position comes from Windows.</text>
+    <text x="596" y="348" font-size="13.5" fill="#7d8aa5">It is withheld, not faked, and these
+      hosts are named in the log so you know.</text>
+  </g>
+  <g>
+    <text x="44" y="387">Native Windows applications</text>
+    <text x="44" y="405" font-size="12" fill="#7d8aa5">anything that asks the OS instead
+      of a web page</text>
+    <use href="#yes" x="415" y="390"/><use href="#shield" x="525" y="390"/>
+    <text x="596" y="385" font-size="13.5" fill="#9fb0c9">Windows exposes no supported way to
+      inject coordinates into its provider.</text>
+    <text x="596" y="404" font-size="13.5" fill="#7d8aa5">So lfsvc is stopped and the sensor
+      denied. A shield, never a claim.</text>
+  </g>
+</g>
+<path d="M34 424 H1146" stroke="#241d3d" stroke-width="1.2"/>
+<g font-size="12.5">
+  <g transform="translate(52 444) scale(.62)"><use href="#yes"/></g>
+  <text x="70" y="448" fill="#7d8aa5">spoofed = the connected country&#8217;s real
+    coordinates, city and accuracy</text>
+  <g transform="translate(676 444) scale(.62)"><use href="#shield"/></g>
+  <text x="694" y="448" fill="#7d8aa5">withheld = no position is given out, and the log
+    names those surfaces</text>
+</g>
+
+</svg>

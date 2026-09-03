@@ -1,0 +1,320 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 620" width="1180" height="620"
+     role="img" aria-labelledby="wkt wkd" font-family="'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif">
+<title id="wkt">The whole app in six moves, from the installer to checking its claims</title>
+<desc id="wkd">An animated six panel walkthrough. One: run the installer, per machine, requiring
+administrator, with the Visual C++ redistributable inside it, and it asks for one restart. Two:
+pick where to come out, from 74 countries on the globe or in the popup, or let it take the
+fastest exit the live relay list offers. Three: press Connect, seven stages in the app's own
+words with Tor's bootstrap forwarded verbatim, and the exit read back through the circuit. Four:
+the machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 853 shut
+elsewhere, IPv6 blocked both ways, 14 browsers told the same country. Five: switching country
+re-pins the exit and clears each browser's cache, cookies and history browser wide, and a list of
+domains can bypass the tunnel live. Six: check it yourself, from the plain text log and the 111
+probe scripts.</desc>
+<!--
+  docs/media/walkthrough.svg
+  The animated tour. Every figure in it is one the rest of this repository
+  already had to prove: 74 is Object.keys(GEO_COORDS).length in main.js, 14 is
+  the browser table in lib/browsers.js (8 chromium, 5 gecko, 1 wininet), 7 is
+  the firewall rule count, 111 is the number of test/probe scripts in .build/,
+  and the seven connect stages are the sendProgress calls flow-connect.svg
+  spells out one by one.
+
+  Two deliberate choices about the animation itself. Nothing that carries a
+  word ever fades or moves: the six panels are laid out side by side and all
+  their text is painted once, because the art gate renders this file one frame
+  into its animation and a caption that is mid crossfade at that instant is a
+  caption nobody can read. Only the scrubber, the travelling light, the bars
+  and the ring move. And no gradient is used on anything whose width animates
+  from zero, which paints nothing and reads as a missing fill.
+-->
+<defs>
+  <linearGradient id="wkbg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0d1020"/><stop offset="1" stop-color="#12101f"/>
+  </linearGradient>
+  <linearGradient id="wkpanel" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#161327"/><stop offset="1" stop-color="#100e1e"/>
+  </linearGradient>
+</defs>
+<rect width="1180" height="620" rx="16" fill="url(#wkbg)" stroke="#241d3d" stroke-width="1.5"/>
+
+<g font-size="12.5" fill="#6f7c96" letter-spacing="2.2">
+  <text x="44" y="42">WALKTHROUGH</text>
+</g>
+<text x="44" y="78" font-size="21" fill="#e7ecf7">Installer to connected, and everything after it<tspan
+  fill="#6f7c96" font-size="15"> &#8212; six moves, in order</tspan></text>
+
+<!--  the scrubber: six chapters, one playhead stepping across them  -->
+<g fill="#241d3d">
+  <rect x="44"  y="104" width="178" height="4" rx="2"/>
+  <rect x="226" y="104" width="178" height="4" rx="2"/>
+  <rect x="408" y="104" width="178" height="4" rx="2"/>
+  <rect x="590" y="104" width="178" height="4" rx="2"/>
+  <rect x="772" y="104" width="178" height="4" rx="2"/>
+  <rect x="954" y="104" width="178" height="4" rx="2"/>
+</g>
+<g>
+  <rect x="44"  y="104" width="178" height="4" rx="2" fill="#a78bfa"/>
+  <rect x="226" y="104" width="178" height="4" rx="2" fill="#a78bfa" opacity="0">
+    <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+      keyTimes="0;.1657;.1667;.99;1" values="0;0;1;1;0"/></rect>
+  <rect x="408" y="104" width="178" height="4" rx="2" fill="#c026d3" opacity="0">
+    <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+      keyTimes="0;.3323;.3333;.99;1" values="0;0;1;1;0"/></rect>
+  <rect x="590" y="104" width="178" height="4" rx="2" fill="#c026d3" opacity="0">
+    <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+      keyTimes="0;.499;.5;.99;1" values="0;0;1;1;0"/></rect>
+  <rect x="772" y="104" width="178" height="4" rx="2" fill="#f59e0b" opacity="0">
+    <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+      keyTimes="0;.6657;.6667;.99;1" values="0;0;1;1;0"/></rect>
+  <rect x="954" y="104" width="178" height="4" rx="2" fill="#22c55e" opacity="0">
+    <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+      keyTimes="0;.8323;.8333;.99;1" values="0;0;1;1;0"/></rect>
+</g>
+<circle cx="133" cy="106" r="6" fill="#241d3d" opacity=".55">
+  <animate attributeName="cx" dur="12s" repeatCount="indefinite"
+    keyTimes="0;.1657;.1667;.3323;.3333;.499;.5;.6657;.6667;.8323;.8333;1"
+    values="133;133;315;315;497;497;679;679;861;861;1043;1043"/>
+  <animate attributeName="r" dur="2s" repeatCount="indefinite" values="6;13;6"/>
+  <animate attributeName="opacity" dur="2s" repeatCount="indefinite" values=".55;0;.55"/>
+</circle>
+<circle cx="133" cy="106" r="5.5" fill="#f0f4fb">
+  <animate attributeName="cx" dur="12s" repeatCount="indefinite"
+    keyTimes="0;.1657;.1667;.3323;.3333;.499;.5;.6657;.6667;.8323;.8333;1"
+    values="133;133;315;315;497;497;679;679;861;861;1043;1043"/>
+</circle>
+<!--  1. the installer  -->
+<rect x="44" y="140" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
+<rect x="62" y="158" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
+<text x="75" y="174" font-size="12.5" fill="#a78bfa" text-anchor="middle">1</text>
+<text x="98" y="174" font-size="15.5" fill="#e7ecf7">Run the installer once</text>
+<g>
+  <rect x="62" y="198" width="150" height="28" rx="5" fill="#0f1424" stroke="#2a2247"/>
+  <g fill="#3a3357"><circle cx="70" cy="205" r="2"/><circle cx="78" cy="205" r="2"/><circle cx="86" cy="205" r="2"/></g>
+  <rect x="70" y="214" width="134" height="4" rx="2" fill="#241d3d"/>
+  <rect x="70" y="214" width="0" height="4" rx="2" fill="#a78bfa">
+    <animate attributeName="width" dur="6s" repeatCount="indefinite"
+      keyTimes="0;.08;.55;.8;.9;1" values="0;10;74;134;134;0"/></rect>
+  <circle cx="249" cy="212" r="16" fill="none" stroke="#a78bfa" stroke-width="1.2" opacity=".5">
+    <animate attributeName="r" dur="2.6s" repeatCount="indefinite" values="16;20;16"/>
+    <animate attributeName="opacity" dur="2.6s" repeatCount="indefinite" values=".5;0;.5"/></circle>
+  <path d="M249 196 l13 5 v10 c0 8 -6 13 -13 16 c-7 -3 -13 -8 -13 -16 v-10 z"
+        fill="#1b1730" stroke="#a78bfa" stroke-width="1.4"/>
+  <path d="M243 211 l4.5 4.5 l8 -9" fill="none" stroke="#c4b5fd" stroke-width="1.8"
+        stroke-linecap="round" stroke-dasharray="19" stroke-dashoffset="0">
+    <animate attributeName="stroke-dashoffset" dur="6s" repeatCount="indefinite"
+      keyTimes="0;.66;.74;.88;1" values="0;0;19;0;0"/></path>
+  <circle cx="316" cy="212" r="11" fill="none" stroke="#6f7c96" stroke-width="1.4" stroke-dasharray="42 12">
+    <animateTransform attributeName="transform" type="rotate" dur="4s"
+      repeatCount="indefinite" from="0 316 212" to="360 316 212"/></circle>
+</g>
+<g font-size="12.5" fill="#7d8aa5">
+  <text x="62" y="250">Per-machine NSIS setup, marked</text>
+  <text x="62" y="269"><tspan fill="#c4b5fd">requireAdministrator</tspan>. The Visual C++</text>
+  <text x="62" y="288">redistributable is inside it. Then it asks</text>
+  <text x="62" y="307">for one restart, and waits for a yes.</text>
+</g>
+<rect x="62" y="326" width="211" height="24" rx="7" fill="#1b1730" stroke="#2f2650"/>
+<text x="76" y="342" font-size="11.5" fill="#9fb0c9">one elevated setup, one restart</text>
+
+<!--  2. pick a country  -->
+<rect x="416" y="140" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
+<rect x="434" y="158" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
+<text x="447" y="174" font-size="12.5" fill="#a78bfa" text-anchor="middle">2</text>
+<text x="470" y="174" font-size="15.5" fill="#e7ecf7">Pick where to come out</text>
+<g>
+  <circle cx="452" cy="212" r="15" fill="#0f1424" stroke="#2f2650"/>
+  <ellipse cx="452" cy="212" rx="15" ry="5.5" fill="none" stroke="#2f2650"/>
+  <ellipse cx="452" cy="212" rx="6" ry="15" fill="none" stroke="#2f2650"/>
+  <circle cx="452" cy="212" r="19.5" fill="none" stroke="#a78bfa" stroke-width="1.2"
+          stroke-dasharray="7 9" opacity=".85">
+    <animateTransform attributeName="transform" type="rotate" dur="14s"
+      repeatCount="indefinite" from="0 452 212" to="360 452 212"/></circle>
+  <g fill="#1b1730" stroke="#2f2650">
+    <rect x="484" y="205" width="18" height="13" rx="2"/><rect x="508" y="205" width="18" height="13" rx="2"/>
+    <rect x="532" y="205" width="18" height="13" rx="2"/><rect x="556" y="205" width="18" height="13" rx="2"/>
+    <rect x="580" y="205" width="18" height="13" rx="2"/><rect x="604" y="205" width="18" height="13" rx="2"/>
+    <rect x="628" y="205" width="18" height="13" rx="2"/><rect x="652" y="205" width="18" height="13" rx="2"/>
+  </g>
+  <rect x="484" y="205" width="18" height="13" rx="2" fill="#a78bfa" opacity=".9">
+    <animate attributeName="x" dur="8s" repeatCount="indefinite"
+      keyTimes="0;.115;.125;.24;.25;.365;.375;.49;.5;.615;.625;.74;.75;.865;.875;1"
+      values="484;484;508;508;532;532;556;556;580;580;604;604;628;628;652;652"/></rect>
+</g>
+<g font-size="12.5" fill="#7d8aa5">
+  <text x="434" y="250"><tspan fill="#c4b5fd">74 countries</tspan>, on a globe you can spin,</text>
+  <text x="434" y="269">or in the popup inside your browser.</text>
+  <text x="434" y="288">Choose nothing and it takes the fastest</text>
+  <text x="434" y="307">one the live relay list can offer.</text>
+</g>
+<rect x="434" y="326" width="258" height="24" rx="7" fill="#1b1730" stroke="#2f2650"/>
+<text x="448" y="342" font-size="11.5" fill="#9fb0c9">pinned in the torrc with StrictNodes 1</text>
+
+<!--  3. connect  -->
+<rect x="788" y="140" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
+<rect x="806" y="158" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
+<text x="819" y="174" font-size="12.5" fill="#e879f9" text-anchor="middle">3</text>
+<text x="842" y="174" font-size="15.5" fill="#e7ecf7">Press Connect</text>
+<g>
+  <path d="M812 212 H1037" stroke="#7c3aed" stroke-width="2"/>
+  <path d="M1037 212 H1112" stroke="#5f6b83" stroke-width="2" stroke-dasharray="4 4"/>
+  <g fill="#241d3d" stroke="#7c3aed" stroke-width="1.6">
+    <circle cx="887" cy="212" r="6"/><circle cx="962" cy="212" r="6"/>
+  </g>
+  <circle cx="1037" cy="212" r="6.5" fill="#241d3d" stroke="#e879f9" stroke-width="1.8"/>
+  <g fill="#1b1730" stroke="#3a3357" stroke-width="1.4">
+    <circle cx="812" cy="212" r="5.5"/><circle cx="1112" cy="212" r="5.5"/>
+  </g>
+  <circle cy="212" r="3.6" fill="#f0f4fb">
+    <animate attributeName="cx" dur="3.2s" repeatCount="indefinite" values="812;1112"/>
+    <animate attributeName="opacity" dur="3.2s" repeatCount="indefinite"
+      keyTimes="0;.06;.9;1" values="0;1;1;0"/></circle>
+</g>
+<g font-size="12.5" fill="#7d8aa5">
+  <text x="806" y="250">Seven stages in the app&#8217;s own words,</text>
+  <text x="806" y="269">with Tor&#8217;s bootstrap forwarded verbatim.</text>
+  <text x="806" y="288">The exit is then read back through the</text>
+  <text x="806" y="307">circuit it just built, not assumed.</text>
+</g>
+<rect x="806" y="326" width="187" height="24" rx="7" fill="#1b1730" stroke="#2f2650"/>
+<text x="820" y="342" font-size="11.5" fill="#9fb0c9">exit read back, not assumed</text>
+
+<!--  4. the machine follows  -->
+<rect x="44" y="380" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
+<rect x="62" y="398" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
+<text x="75" y="414" font-size="12.5" fill="#e879f9" text-anchor="middle">4</text>
+<text x="98" y="414" font-size="15.5" fill="#e7ecf7">The whole machine follows</text>
+<g>
+  <g fill="#241d3d">
+    <rect x="62" y="436" width="200" height="4" rx="2"/><rect x="62" y="447" width="200" height="4" rx="2"/>
+    <rect x="62" y="458" width="200" height="4" rx="2"/><rect x="62" y="469" width="200" height="4" rx="2"/>
+  </g>
+  <g fill="#c026d3">
+    <rect x="62" y="436" width="0" height="4" rx="2"><animate attributeName="width" dur="6s"
+      repeatCount="indefinite" keyTimes="0;.05;.35;.9;1" values="0;0;200;200;0"/></rect>
+    <rect x="62" y="447" width="0" height="4" rx="2"><animate attributeName="width" dur="6s"
+      repeatCount="indefinite" keyTimes="0;.15;.45;.9;1" values="0;0;200;200;0"/></rect>
+    <rect x="62" y="458" width="0" height="4" rx="2"><animate attributeName="width" dur="6s"
+      repeatCount="indefinite" keyTimes="0;.25;.55;.9;1" values="0;0;200;200;0"/></rect>
+    <rect x="62" y="469" width="0" height="4" rx="2"><animate attributeName="width" dur="6s"
+      repeatCount="indefinite" keyTimes="0;.35;.65;.9;1" values="0;0;200;200;0"/></rect>
+  </g>
+  <g fill="#0f1424" stroke="#2f2650" stroke-width="1">
+    <rect x="290" y="438" width="8" height="8" rx="1.5"/><rect x="302" y="438" width="8" height="8" rx="1.5"/>
+    <rect x="314" y="438" width="8" height="8" rx="1.5"/><rect x="326" y="438" width="8" height="8" rx="1.5"/>
+    <rect x="338" y="438" width="8" height="8" rx="1.5"/><rect x="350" y="438" width="8" height="8" rx="1.5"/>
+    <rect x="362" y="438" width="8" height="8" rx="1.5"/><rect x="290" y="450" width="8" height="8" rx="1.5"/>
+    <rect x="302" y="450" width="8" height="8" rx="1.5"/><rect x="314" y="450" width="8" height="8" rx="1.5"/>
+    <rect x="326" y="450" width="8" height="8" rx="1.5"/><rect x="338" y="450" width="8" height="8" rx="1.5"/>
+    <rect x="350" y="450" width="8" height="8" rx="1.5"/><rect x="362" y="450" width="8" height="8" rx="1.5"/>
+  </g>
+  <rect x="290" y="438" width="8" height="8" rx="1.5" fill="#a78bfa">
+    <animate attributeName="x" dur="3.5s" repeatCount="indefinite"
+      keyTimes="0;.13;.143;.27;.285;.41;.428;.55;.571;.69;.714;.83;.857;1"
+      values="290;290;302;302;314;314;326;326;338;338;350;350;362;362"/>
+    <animate attributeName="y" dur="7s" repeatCount="indefinite"
+      keyTimes="0;.49;.5;1" values="438;438;450;450"/></rect>
+</g>
+<g font-size="12.5" fill="#7d8aa5">
+  <text x="62" y="490">System proxy on <tspan fill="#c4b5fd">127.0.0.1</tspan>, DNS pinned</text>
+  <text x="62" y="509">to Tor, ports 53 and 853 shut everywhere</text>
+  <text x="62" y="528">else, IPv6 blocked both ways, and 14</text>
+  <text x="62" y="547">browsers told the exit&#8217;s own country.</text>
+</g>
+<rect x="62" y="566" width="199" height="24" rx="7" fill="#1b1730" stroke="#2f2650"/>
+<text x="76" y="582" font-size="11.5" fill="#9fb0c9">14 browsers, 7 firewall rules</text>
+<!--  5. switch, or split  -->
+<rect x="416" y="380" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
+<rect x="434" y="398" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
+<text x="447" y="414" font-size="12.5" fill="#f59e0b" text-anchor="middle">5</text>
+<text x="470" y="414" font-size="15.5" fill="#e7ecf7">Switch country, or split it</text>
+<g>
+  <g>
+    <circle cx="452" cy="452" r="13" fill="none" stroke="#f59e0b" stroke-width="1.6"
+            stroke-dasharray="56 26"/>
+    <path d="M452 433 l6.5 6 l-6.5 6 z" fill="#f59e0b"/>
+    <animateTransform attributeName="transform" type="rotate" dur="3.4s"
+      repeatCount="indefinite" from="0 452 452" to="360 452 452"/>
+  </g>
+  <rect x="484" y="434" width="180" height="36" rx="4" fill="#0f1424" stroke="#2a2247"/>
+  <g fill="#3a3357">
+    <rect x="492" y="442" width="120" height="3" rx="1.5">
+      <animate attributeName="opacity" dur="5s" repeatCount="indefinite"
+        keyTimes="0;.34;.44;.86;.96;1" values="1;1;.12;.12;1;1"/></rect>
+    <rect x="492" y="451" width="150" height="3" rx="1.5">
+      <animate attributeName="opacity" dur="5s" repeatCount="indefinite"
+        keyTimes="0;.38;.48;.86;.96;1" values="1;1;.12;.12;1;1"/></rect>
+    <rect x="492" y="460" width="96" height="3" rx="1.5">
+      <animate attributeName="opacity" dur="5s" repeatCount="indefinite"
+        keyTimes="0;.42;.52;.86;.96;1" values="1;1;.12;.12;1;1"/></rect>
+  </g>
+  <rect x="488" y="438" width="6" height="28" rx="3" fill="#f59e0b" opacity=".55">
+    <animate attributeName="x" dur="5s" repeatCount="indefinite"
+      keyTimes="0;.28;.56;1" values="488;488;654;654"/>
+    <animate attributeName="opacity" dur="5s" repeatCount="indefinite"
+      keyTimes="0;.28;.32;.52;.58;1" values="0;0;.55;.55;0;0"/></rect>
+  <path d="M672 452 H690" stroke="#5f6b83" stroke-width="1.6"/>
+  <path d="M690 452 C699 452 701 443 710 441 H734" fill="none" stroke="#f59e0b"
+        stroke-width="1.6" stroke-dasharray="5 4">
+    <animate attributeName="stroke-dashoffset" dur="1.6s" repeatCount="indefinite"
+      values="18;0"/></path>
+  <path d="M690 452 C699 452 701 461 710 463 H734" fill="none" stroke="#7c3aed"
+        stroke-width="1.6" stroke-dasharray="5 4">
+    <animate attributeName="stroke-dashoffset" dur="1.6s" repeatCount="indefinite"
+      values="18;0"/></path>
+</g>
+<g font-size="12.5" fill="#7d8aa5">
+  <text x="434" y="490">A switch re-pins the exit, then clears</text>
+  <text x="434" y="509">each browser&#8217;s cache, cookies and history</text>
+  <text x="434" y="528">browser-wide, so you are signed out.</text>
+  <text x="434" y="547">A domain list can bypass the tunnel live.</text>
+</g>
+<rect x="434" y="566" width="170" height="24" rx="7" fill="#2a1f10" stroke="#6b4a12"/>
+<text x="448" y="582" font-size="11.5" fill="#fcd34d">the wipe is browser-wide</text>
+<!--  6. check it yourself  -->
+<rect x="788" y="380" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
+<rect x="806" y="398" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
+<text x="819" y="414" font-size="12.5" fill="#22c55e" text-anchor="middle">6</text>
+<text x="842" y="414" font-size="15.5" fill="#e7ecf7">Check every claim yourself</text>
+<g>
+  <rect x="806" y="432" width="190" height="40" rx="4" fill="#0f1424" stroke="#2a2247"/>
+  <g fill="#2f3a52">
+    <rect x="814" y="440" width="150" height="3" rx="1.5"/>
+    <rect x="814" y="449" width="120" height="3" rx="1.5"/>
+    <rect x="814" y="458" width="168" height="3" rx="1.5"/>
+  </g>
+  <rect x="814" y="465" width="0" height="3" rx="1.5" fill="#6ee7a0">
+    <animate attributeName="width" dur="4s" repeatCount="indefinite"
+      keyTimes="0;.08;.62;.9;1" values="0;6;96;96;0"/></rect>
+  <circle cx="1050" cy="452" r="17" fill="#0f2a1a" stroke="#1c6b3a" stroke-width="1.4"/>
+  <path d="M1042 452.5 l5.5 5.5 l11.5 -13" fill="none" stroke="#6ee7a0" stroke-width="2.2"
+        stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="25" stroke-dashoffset="0">
+    <animate attributeName="stroke-dashoffset" dur="4s" repeatCount="indefinite"
+      keyTimes="0;.5;.58;.74;1" values="0;0;25;0;0"/></path>
+  <g fill="#1c6b3a">
+    <rect x="1082" y="446" width="3" height="12" rx="1.5"/><rect x="1089" y="442" width="3" height="16" rx="1.5"/>
+    <rect x="1096" y="449" width="3" height="9"  rx="1.5"/><rect x="1103" y="440" width="3" height="18" rx="1.5"/>
+    <rect x="1110" y="445" width="3" height="13" rx="1.5"/>
+  </g>
+  <rect x="1082" y="446" width="3" height="12" rx="1.5" fill="#6ee7a0">
+    <animate attributeName="x" dur="2.5s" repeatCount="indefinite"
+      keyTimes="0;.18;.2;.38;.4;.58;.6;.78;.8;1"
+      values="1082;1082;1089;1089;1096;1096;1103;1103;1110;1110"/>
+    <animate attributeName="y" dur="2.5s" repeatCount="indefinite"
+      keyTimes="0;.18;.2;.38;.4;.58;.6;.78;.8;1"
+      values="446;446;442;442;449;449;440;440;445;445"/>
+    <animate attributeName="height" dur="2.5s" repeatCount="indefinite"
+      keyTimes="0;.18;.2;.38;.4;.58;.6;.78;.8;1"
+      values="12;12;16;16;9;9;18;18;13;13"/></rect>
+</g>
+<g font-size="12.5" fill="#7d8aa5">
+  <text x="806" y="490">A plain-text log in ProgramData records</text>
+  <text x="806" y="509">what it wrote, and what a read-back then</text>
+  <text x="806" y="528">found. <tspan fill="#c4b5fd">111 probe scripts</tspan> drive the real</text>
+  <text x="806" y="547">registry, and the real browsers.</text>
+</g>
+<rect x="806" y="566" width="276" height="24" rx="7" fill="#0f2a1a" stroke="#1c6b3a"/>
+<text x="820" y="582" font-size="11.5" fill="#6ee7a0">no account, no telemetry, no update check</text>
+
+
+</svg>

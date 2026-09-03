@@ -67,4 +67,24 @@ function fallbackFromMainJs(root = path.join(__dirname, '..')) {
     return table;
 }
 
-module.exports = { geoFromMainJs, fallbackFromMainJs, literalAt };
+//  main.js's own haversine, lifted rather than retyped, for the same reason as
+//  the tables above. The README's screenshots print a distance -- the ask
+//  dialog says "the nearest country (India, about N km away)" -- and N has to
+//  be the number the app would put there, computed by the app's formula from
+//  the app's coordinates. A second implementation here could be off by a
+//  rounding and the picture would be showing a sentence the app never sends.
+function haversineFromMainJs(root = path.join(__dirname, '..')) {
+    const src = readMain(root);
+    const at  = src.indexOf('function haversineKm(a, b) {');
+    if (at < 0) throw new Error('main.js no longer declares haversineKm(a, b)');
+    const body = literalAt(src, at);
+    const fn   = new Function('a', 'b', body.slice(1, -1));
+    //  A known pair, so a formula that parsed but does not compute fails here:
+    //  London to Paris is 343 km.
+    const probe = Math.round(fn({ lat: 51.5074, lng: -0.1278 }, { lat: 48.8566, lng: 2.3522 }));
+    if (!(probe > 330 && probe < 355))
+        throw new Error(`haversineKm lifted from main.js returned ${probe} km for London-Paris`);
+    return fn;
+}
+
+module.exports = { geoFromMainJs, fallbackFromMainJs, haversineFromMainJs, literalAt };

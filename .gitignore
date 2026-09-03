@@ -28,6 +28,16 @@ release/
 # read main.js's data literals, and the harness test-geo-e2e.js loads.
 !.build/geo-from-main.js
 !.build/policy-apply.js
+# The three the documentation tells people to run, or that a committed probe
+# require()s. Without these a fresh clone cannot regenerate the README's own
+# pictures: probe-readme-shots.js and probe-readme-popup.js both
+# require('./readme-fixtures.js') and die on the first line, and
+# `node .build/make-badges.js` -- which CONTRIBUTING.md asks for by name after
+# any change to a counted value -- is not there at all. Same mistake as the
+# comment above, one directory further in.
+!.build/make-badges.js
+!.build/readme-fixtures.js
+!.build/readme-popup-preload.js
 
 # Editor directories and files
 .vscode/
