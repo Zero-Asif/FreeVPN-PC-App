@@ -574,7 +574,7 @@ async function refreshLogContent(level = 'ALL') {
 //  main.js no longer picks a country for the user when the one they chose
 //  has no reachable exit relay. It stops and asks, over IPC:
 //
-//      ask-user        { id, variant, cc, title, body, note?,
+//      ask-user        { id, variant, cc, title, body, note?, foot?,
 //                        options: [{ id, label, hint? }] }
 //      ask-user-close  { id }                -- take it down, it was answered
 //                                               somewhere else or it resolved
@@ -656,8 +656,13 @@ function openAskDialog(ask) {
     });
 
     //  A live card IS the app still working; a choice is the app waiting.
+    //  `foot` overrides the sentence for a question that is not about a connect
+    //  at all -- the first-open browser card is one -- because "no country has
+    //  been chosen for you" under a list of browsers is an answer to a question
+    //  nobody asked. main.js sends the words; this file still invents none.
     dotsEl.classList.toggle('show', live);
-    footEl.textContent = live
+    footEl.textContent = ask.foot ? ask.foot
+        : live
         ? 'Nothing is connected while this runs.'
         : 'Nothing is connected right now, and no country has been chosen for you.';
 

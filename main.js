@@ -394,13 +394,65 @@ function reportGeoCoverage(coord) {
             'send a fresh real fix, so no native app is given ' + where + ' either: ' +
             'Windows has no coordinate-injection API' : 'NOT shielded'}`);
 
+    //  The REASON decides what can honestly be said next, so it is read rather
+    //  than assumed. This used to say "one switch, once, and it is permanent"
+    //  about every switched-off browser. That is true for exactly one reason --
+    //  EXTERNAL_EXTENSION (8192), the prompt Chromium shows for anything an
+    //  installer offered, which the user's acceptance clears for good. For the
+    //  reasons the browser raises BY ITSELF (256 NOT_VERIFIED, 512 GREYLIST,
+    //  1048576 NOT_ALLOWLISTED, 1024 CORRUPTED, the unsupported-manifest and
+    //  developer-extension ones) the same switch can be undone by the browser at
+    //  its next enforcement pass, and promising permanence there is a claim this
+    //  app cannot keep. ExtensionInstallAllowlist is written to pre-empt those,
+    //  and whether it worked is read back here -- never assumed.
     if (pending.length) {
-        Logger.warn(`${pending.join(' and ')} already has the extension downloaded and ` +
-                    'unpacked, switched off: Chromium keeps anything an installer offered ' +
-                    'disabled until the user accepts it once, and the record holding that ' +
-                    'bit is signed with the profile\'s own key, so nothing this app writes ' +
-                    'can flip it. One switch on the extensions page, once, and it is ' +
-                    'permanent -- until then the real location is what those browsers report');
+        let detail = {};
+        try { detail = geoExt().states(); } catch (e) {}
+        const pendingIds = Object.keys(seen).filter(b => seen[b] === 'needs-enable');
+        const byAuthor = new Map();
+        for (const id of pendingIds) {
+            const why = (detail[id] && detail[id].disabled) || [];
+            const author = browsers.disableAuthor(why) || 'unknown';
+            if (!byAuthor.has(author)) byAuthor.set(author, { ids: [], why: new Set() });
+            const g = byAuthor.get(author);
+            g.ids.push(id);
+            for (const w of why) g.why.add(w);
+        }
+        const signed = 'the record holding that bit is signed with the profile\'s own ' +
+                       'key, so nothing this app writes can flip it';
+        for (const [author, g] of byAuthor) {
+            const who = browsers.names(g.ids).join(' and ');
+            const why = [...g.why].join(', ') || 'no reason recorded';
+            if (author === 'prompt') {
+                Logger.warn(`${who}: the extension is downloaded and unpacked, switched off ` +
+                            `(${why}). Chromium keeps anything an installer offered disabled ` +
+                            `until the user accepts it once, and ${signed}. One switch on the ` +
+                            'extensions page, once, and it stays on for this reason -- until ' +
+                            'then the real location is what those browsers report');
+            } else if (author === 'browser') {
+                Logger.warn(`${who}: the extension is in the profile and the BROWSER switched ` +
+                            `it off by itself (${why}), not the user. ${signed}. ` +
+                            'ExtensionInstallAllowlist is written for this browser to stop that ' +
+                            'happening again; if it is still off after a restart, that policy ' +
+                            'is not being honoured here and the honest answer is that this ' +
+                            'browser reports the real location. Switching it on by hand works ' +
+                            'until the browser\'s next check -- this app will not call that ' +
+                            'permanent');
+            } else if (author === 'admin') {
+                Logger.warn(`${who}: an administrator policy on this machine has the extension ` +
+                            `switched off (${why}). ${signed}, and this app does not overrule ` +
+                            'a policy it did not write. Those browsers report the real location');
+            } else if (author === 'user') {
+                Logger.warn(`${who}: the extension is present and the user switched it off ` +
+                            `(${why}). That is left exactly as it is -- the switch belongs to ` +
+                            'the user. Those browsers report the real location until it is ' +
+                            'switched back on');
+            } else {
+                Logger.warn(`${who}: the extension is present and switched off for a reason ` +
+                            `this build does not have a name for (${why}). ${signed}. Reported ` +
+                            'as not spoofed, because that is all that can be verified');
+            }
+        }
     }
 
     if (waiting.length) {
@@ -542,12 +594,24 @@ if (installerTasks.installerTask(process.argv)) {
 
 // Must be set BEFORE app.getPath() is ever called
 const APPDATA_PATH = 'C:\\ProgramData\\freeproxy-vpn';
+//  If this throws, userData silently stays at %APPDATA%\freeproxy-vpn -- and on
+//  this very machine that is C:\Users\User pc\..., a path with a space in it,
+//  under a profile a SYSTEM boot task cannot even see. Everything downstream
+//  then writes its state, its Tor bundle and its log somewhere the elevated half
+//  of the app will not find them, and the only symptom is that nothing works.
+//  It was being swallowed whole. Logger does not exist yet (Logger.init runs
+//  inside whenReady, from this very path), so the reason is kept here and
+//  logged the moment there is a log to write it to.
+let userDataFallback = null;
 try {
     if (!require('fs').existsSync(APPDATA_PATH)) {
         require('fs').mkdirSync(APPDATA_PATH, { recursive: true });
     }
     app.setPath('userData', APPDATA_PATH);
-} catch(e) { /* fallback to default if setPath fails */ }
+} catch (e) {
+    userDataFallback = e.message;
+    try { console.error(`FATAL: could not use ${APPDATA_PATH} -- ${e.message}`); } catch (e2) {}
+}
 
 //  ── The delivery port, bound before Electron finishes starting ──
 //  MEASURED 2026-09-01: this task's action started at 21:37:27 and
@@ -573,6 +637,12 @@ if (installerTasks.installerTask(process.argv) === 'deliver') {
 app.whenReady().then(() => {
     Logger.init(app.getPath('userData'));
     Logger.info('app.whenReady() fired');
+    if (userDataFallback) {
+        Logger.error(`userData could NOT be set to ${APPDATA_PATH} -- using ` +
+                     `${app.getPath('userData')} instead. The boot task and the ` +
+                     `installer look in ${APPDATA_PATH}, so this build will not ` +
+                     `find its own state.`, { err: userDataFallback });
+    }
 
     //  --fp-setup / --fp-teardown / --fp-boot: do that job and exit. No
     //  window, no Tor, and no elevation dance -- the installer is already
@@ -1329,6 +1399,17 @@ function runAdminApp() {
                 e.preventDefault(); shell.openExternal(url);
             }
         });
+
+        //  The first-open browser card, on did-finish-load: renderer.js's
+        //  ask-user listener exists from the moment its script has run, and this
+        //  is the event that says it has. `once`, so a reload later in the
+        //  session cannot bring it back -- and if this send were ever to lose a
+        //  race, the renderer pulls whatever question is outstanding through
+        //  get-pending-ask on boot anyway.
+        mainWindow.webContents.once('did-finish-load', () => {
+            browserIntroCard().catch(e =>
+                Logger.warn('First-open browser card failed: ' + e.message));
+        });
     }
 
     // ── WebSocket server ──────────────────────────────────
@@ -1439,7 +1520,7 @@ function runAdminApp() {
         wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
     }
 
-    //  @param question {{title, body, options: [{id, label, hint}], note?, variant?}}
+    //  @param question {{title, body, options: [{id, label, hint}], note?, foot?, variant?}}
     //  @returns {{ id, answered: Promise<string|null>, close: () => void }}
     //
     //  Two shapes come out of this. askUser() below is the ordinary one: put a
@@ -1516,6 +1597,186 @@ function runAdminApp() {
     //  window has gone.
     function cancelAllAsks(answer = null) {
         for (const [, rec] of [...pendingAsks]) rec.finish(answer);
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  THE FIRST-OPEN BROWSER CARD
+    //
+    //  Asked for in these words: on first open, tell the user the extension has
+    //  to be enabled or the browsers will not give the right result; list the
+    //  browsers that are really on THIS machine, by name; and clicking a name
+    //  opens that browser.
+    //
+    //  WHAT A CLICK CAN AND CANNOT DO, MEASURED
+    //  .build/probe-open-extpage.js started Edge, Chrome and Brave with their
+    //  own extensions URL as the only argument, in a throwaway profile, and read
+    //  the answer off each window title: "New tab - ... Edge", "New Tab - Google
+    //  Chrome", "New Tab - Brave". Chromium filters those URLs off the command
+    //  line, so a click can open the BROWSER and nothing more. The card
+    //  therefore names the page in words -- edge://extensions, brave://extensions,
+    //  each fork's own, which is why lib/browsers.js carries a `settings` field
+    //  per browser instead of one generic URL -- and never claims to open it.
+    //
+    //  WHO IS LISTED
+    //    * Chromium forks: the browsers this app's extension is for.
+    //    * Gecko (Firefox and its forks): listed, because the user asked to see
+    //      Firefox, and clicking it opens Firefox -- but its row says there is
+    //      nothing to enable, because Gecko is spoofed by writing
+    //      geo.provider.network.url into the profile, not by an add-on. Telling
+    //      someone to go and enable an extension that was never installed there
+    //      would be an instruction that cannot be followed.
+    //    * NOT the wininet family. iexplore.exe on this Windows opens Edge, so
+    //      an "Internet Explorer" row would be a second Edge button under a name
+    //      that no longer opens anything of its own.
+    //
+    //  WHAT EACH ROW MAY SAY ABOUT STATE. Only what the browser's own profile
+    //  says, read through the id this app journalled when it staged the
+    //  extension. If that id is not on disk yet -- a first open before any
+    //  connect has packaged anything -- the rows say what to do and claim
+    //  nothing about state, because with no id there was no measurement.
+    //
+    //  ONE SHOT, and it never interrupts. It goes up once (see INTRO_MARKER),
+    //  only while nothing is connected, and it stands aside for the restart card
+    //  when the install really deferred something. The same fact keeps its
+    //  permanent home in reportGeoCoverage(), which names every browser still
+    //  waiting for the switch on every launch, for as long as it is true.
+    // ════════════════════════════════════════════════════════
+
+    //  An ARGS ARRAY and no shell, deliberately. Three separate bugs in this
+    //  repo came from a command string with a space in a path, and every one of
+    //  these lives under "C:\Program Files".
+    function openBrowser(row) {
+        try {
+            const child = spawn(row.exePath, [], { detached: true, stdio: 'ignore' });
+            child.unref();
+            child.on('error', e => Logger.warn(`${row.name} did not start: ${e.message}`));
+            Logger.info(`Opening ${row.name} for the user`, { exe: row.exePath });
+            return true;
+        } catch (e) {
+            Logger.warn(`${row.name} could not be started: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * One row per browser that is installed here, in table order, each with the
+     * hint it has earned.
+     *
+     * `state` is only ever set from a real read. extensionState() is the same
+     * function the coverage report and the delivery helper use, so a row can
+     * never disagree with the log about whether a browser is running it.
+     *
+     * The id is asked PER BROWSER. A store re-signs the CRX, so once this
+     * extension is published in a browser's own store that browser holds a
+     * different id from the one this machine signed -- and reading its profile for
+     * ours would print "open the extensions page and turn it on" about an
+     * extension already switched on in front of the user. knownId(b.id) answers
+     * with the store's id where there is one and the journalled one otherwise.
+     */
+    function introRows() {
+        let idOf = () => null;
+        try {
+            const ext = geoExt();
+            idOf = b => { try { return ext.knownId(b.id); } catch (e) { return null; } };
+        } catch (e) {}
+        return browsers.detect()
+            .filter(b => b.family === 'chromium' || b.family === 'gecko')
+            .map(b => {
+                const row = { id: b.id, name: b.name, exePath: b.exePath,
+                              family: b.family, settings: b.settings || null };
+                if (b.family === 'gecko') {
+                    row.hint = 'Set up automatically -- there is nothing to enable here.';
+                    return row;
+                }
+                const where = b.settings || 'the extensions page';
+                const id = idOf(b);
+                if (!id || !b.dataDir) {
+                    row.hint = `Open ${where} and turn FreeProxy VPN on.`;
+                    return row;
+                }
+                const st = browsers.extensionState(b.dataDir, id);
+                row.hint = st.enabled
+                    ? 'Already on here -- nothing to do.'
+                    : st.removedByUser
+                    ? `You removed it here, so ${b.name} will not offer it again.`
+                    : st.present
+                    ? `It is in ${b.name} but switched off -- turn it on at ${where}.`
+                    : `Open ${where} and turn FreeProxy VPN on.`;
+                return row;
+            });
+    }
+
+    /**
+     * Put it up, once, and keep it up until the user is finished with it.
+     *
+     * The loop is the point: "clicking the browser names opens that browser" is
+     * plural, and a card that vanished on the first click would let someone set
+     * up one of their three browsers. So a browser answer opens it and the card
+     * comes straight back, naming what was opened. `later` -- or a timeout, a
+     * cancel, or the window going away, all of which resolve to `later` -- is
+     * the only thing that ends it.
+     */
+    async function browserIntroCard() {
+        if (introShown()) return;
+        //  The restart card is the more urgent of the two and owns the first
+        //  screen when it appears at all. Deferred, not dropped: no marker is
+        //  written, so this card is offered at the next open.
+        if (pendingRestart()) {
+            Logger.info('First-open browser card deferred -- the restart card comes first');
+            return;
+        }
+        const rows = introRows();
+        if (!rows.length) {
+            Logger.warn('First-open browser card: no browser detected on this machine, so ' +
+                        'there is nothing to list -- it will be offered again next open');
+            return;
+        }
+
+        const byId = new Map(rows.map(r => [r.id, r]));
+        let shown = false, opened = null;
+        for (;;) {
+            //  Asked only where it can actually be seen. With no window and no
+            //  popup, openAsk() would answer itself with the default and the
+            //  card would be marked shown without anyone reading it.
+            if (!BrowserWindow.getAllWindows()[0] && !wss.clients.size) {
+                Logger.info('First-open browser card: no window to show it in yet -- ' +
+                            'it will be offered again next open');
+                return;
+            }
+            const q = openAsk({
+                variant: 'choice',
+                title: 'One thing to do in your browsers',
+                body: 'This app spoofs your location in the browser through its own ' +
+                      'extension, and the extension has to be switched ON in each browser ' +
+                      'you use. Until it is, that browser can still hand a website your ' +
+                      'real location, and what it reports will not match the country you ' +
+                      'are connected to. Click a browser to open it.',
+                note: opened
+                    ? `${opened.name} is opening. Open another if you want, or choose Later.`
+                    : '',
+                foot: 'You can do this later -- the app says which browsers are still ' +
+                      'waiting every time it starts.',
+                options: [
+                    ...rows.map(r => ({ id: r.id, label: r.name, hint: r.hint })),
+                    { id: 'later', label: 'Later',
+                      hint: 'Nothing is changed. This card is not shown again.' },
+                ],
+            }, { defaultAnswer: 'later' });
+
+            //  Marked the moment it is really on screen, not when it is
+            //  answered: a user who reads it and closes the app has been told.
+            if (!shown) shown = markIntroShown();
+
+            const answer = await q.answered;
+            const row = byId.get(answer);
+            if (!row) {
+                Logger.info(`First-open browser card closed with "${answer}"`,
+                            { opened: opened ? opened.id : null });
+                return;
+            }
+            openBrowser(row);
+            opened = row;
+        }
     }
 
     wss.on('connection', ws => {
@@ -1747,6 +2008,17 @@ function runAdminApp() {
     const DNS_PORT           = 53;
     const DNS_FALLBACK_PORT  = 9053;
 
+    //  How many rounds of the engine loop a FIRST bootstrap is allowed to take
+    //  on its own, with nothing on screen but progress. Only ever spent when the
+    //  consensus cache is missing and only on 'stall'/'timeout' -- see the latch
+    //  in establishConnection(). Two, because each round banks its download and
+    //  the measured recovery took exactly one: 40.4 s of cold consensus, killed,
+    //  then 22.9 s to 100%. COLD_AUTO_MS is the wall-clock stop on top of the
+    //  count, so a machine that is slow in some way nobody has measured cannot
+    //  turn "must connect" into an unbounded wait.
+    const COLD_AUTO_ROUNDS   = 2;
+    const COLD_AUTO_MS       = 300000;
+
     //  How many exit relays one round of "keep trying this country" walks
     //  through. A normal attempt takes the best 5, which is the right budget
     //  when a failure hands the user a choice a few seconds later. This is the
@@ -1902,7 +2174,46 @@ function runAdminApp() {
 
         if (useBridges && fs.existsSync(P.lyre)) {
             lines.push(`UseBridges 1`);
-            lines.push(`ClientTransportPlugin obfs4 exec "${q(P.lyre)}"`);
+            //  NOT quoted, and that is the whole difference between bridge mode
+            //  working and bridge mode never having run once. MEASURED,
+            //  .build/probe-obfs4-quotes.txt -- four real tor processes, same
+            //  binaries, same three Bridge lines, only this one line changed:
+            //
+            //    quoted, no space in path -> tor reports
+            //         Managed proxy at '"C:/.../lyrebird.exe"' failed at launch
+            //         CreateProcessA() failed: The system cannot find the file
+            //       then x6 "there is no configured transport called obfs4"
+            //    bare,   no space in path -> Bootstrapped 2% (conn_done_pt):
+            //         Connected to pluggable transport
+            //    quoted, space in path    -> fails, and tor prints the value cut
+            //         off at the space, so it splits on whitespace AND keeps the
+            //         quote characters
+            //    bare,   space in path    -> LAUNCHES anyway
+            //
+            //  tor does not strip these quotes: it hands them to CreateProcessA,
+            //  and no file is named `"C:/...exe"`. That is the exact pair of WARN
+            //  lines in the 2026-09-01 log, so bridge mode has been dead in every
+            //  build that ever tried it. verify-torrc.js passing says nothing
+            //  about this -- --verify-config parses the line and never spawns it.
+            //
+            //  A space in the path needs no guard here (arm D above launched with
+            //  one), so none is added; the deployed path has none anyway, because
+            //  main.js:544 pins userData to C:\ProgramData\freeproxy-vpn.
+            //
+            //  Those four arms were hand-written torrc files. The line THIS
+            //  function generates was then run on its own, at the real deployed
+            //  ProgramData path, and reported the same 2% (conn_done_pt) --
+            //  .build/probe-obfs4-shipped.txt. The same probe also recorded that
+            //  all three bridges below refused every handshake for 25 s, so a
+            //  launched transport is not a usable bridge and the first connect
+            //  must never depend on this branch.
+            //
+            //  This is NOT inconsistent with DataDirectory / GeoIPFile /
+            //  CookieAuthFile above, which are quoted and must stay quoted. Those
+            //  are single-value options and tor unquotes them itself. This one's
+            //  value is a whole command line that tor re-splits on whitespace
+            //  after the option is read, and nothing unquotes it on the way.
+            lines.push(`ClientTransportPlugin obfs4 exec ${q(P.lyre)}`);
             lines.push(`Bridge obfs4 146.57.248.225:22 10A6CD36A537FCE513A322361547444B393989F0 cert=K1gAVGcKRMVJaRJGaFoMK0IQWY9HfRRmRPf6VWB7uIKwFoiX3y7GFhRvmFMKOgA3FScOQ iat-mode=0`);
             lines.push(`Bridge obfs4 109.105.109.165:10527 8DFCD8FB3285E855F5A55BDCD4E1DB1AEDB3F8B6 cert=XCHbbbz2aO5B8iVKQV+sNqz8CxCaU7FHWNiQyPFKXYZBiQFHpOq73VKwIq0KPrOJYA iat-mode=0`);
             lines.push(`Bridge obfs4 45.145.95.6:27015 C5B7CD6946FF10C5B3E89691A7D3F2C122D2117C cert=TD7bwPBhFCFRlSPaG/dPFRhTbT14q4ExKb0C1Jze8P7WRvDJW9nWz9wWe4xdGEi+5u5yqA iat-mode=0`);
@@ -2778,6 +3089,27 @@ function runAdminApp() {
             return { status: 'unavailable', serverCode, verified: false };
         }
 
+        //  ── Is this the first bootstrap this machine has ever done? ─────
+        //  MEASURED, the 2026-09-01 log of a fresh install: tor sat flat at
+        //  "50% -- Loading relay descriptors" for 40.4 s, tripped startTor's
+        //  hardcoded 40 s stall budget, and the bar fell 50% -> 0% under a red
+        //  "Server unavailable". The identical direct attempt 10 s later reached
+        //  100% in 22.9 s -- because killTor() deliberately keeps the consensus
+        //  cache, so the round that "failed" had already banked the download.
+        //
+        //  So the first connect after an install was never a broken connect. It
+        //  was a connect cut off in the middle of the one slow thing it only has
+        //  to do once. The installer ships no cache on purpose
+        //  (.build/test-vendor.js:710 excludes Tor/data/cached-*), which is why
+        //  "new installation er por ... must connect" lands exactly here.
+        //
+        //  Latched ONCE, here, before anything spawns tor: after the first round
+        //  the cache exists whatever the outcome was, so asking again later would
+        //  answer "warm" and take the extra budget away from the very connect
+        //  that needs it.
+        const coldCache = !fs.existsSync(path.join(P.torData, 'cached-microdesc-consensus'));
+        if (coldCache) Logger.info('No consensus cached yet -- this is the first bootstrap on this machine');
+
         // ── 1. Decide which relays to try, BEFORE tearing down Tor ─────
         //  On a switch the existing connection is still up, so the relay
         //  list can be refreshed through it.
@@ -2937,15 +3269,45 @@ function runAdminApp() {
         //  reaches Tor through obfs4 would lose the tunnel the moment the app
         //  tried to change its exit.
         let res = null, engineRound = 0, engineNote = null, usedBridges = false;
+        //  The highest percent ANY attempt in this connect reached. The bar was
+        //  driven by res.percent, which is the LAST attempt's number -- so the
+        //  round that got to 50% and a retry that died at 0% showed the user 0%,
+        //  and a bar that goes backwards reads as "it is getting worse". The
+        //  reason string stays the latest one, which is the accurate answer to
+        //  "what went wrong"; only the number becomes the best one reached.
+        let bestPct = 0;
+        //  Automatic rounds spent so far. These are rounds the user is never
+        //  asked about, and they exist only for the cold-cache case above.
+        let autoRounds = 0;
+        const engineStart = Date.now();
         for (;;) {
             engineRound += 1;
             usedBridges  = false;
+            //  Back to :53 at the top of every round. dnsPort is declared outside
+            //  this loop, so one round's fallback used to survive into every later
+            //  one -- and the commonest reason :53 will not bind is this app's own
+            //  tor from the previous round not having let go of it yet. Keeping
+            //  9053 after that makes dnsViaTor false below, which takes the DNS
+            //  lock off for the rest of the connect while the UI reads Connected.
+            //  A machine with a real local resolver simply fails the bind again
+            //  and pays one extra attempt for it.
+            dnsPort = DNS_PORT;
+            if (coldCache && engineRound === 1) {
+                sendProgress(5, 'First connection: building the relay list (one time only)...');
+            }
             res = await startTor({
                 exitSpec: firstSpec, dnsPort,
+                //  A cold consensus looks exactly like a censored connection --
+                //  flat at 50% while several MB of microdescriptors come down --
+                //  so the first bootstrap gets a longer "no progress" budget
+                //  instead of being failed for the one thing it cannot do fast.
+                //  Every warm connect keeps the original 40 s / 120 s numbers.
+                ...(coldCache && engineRound === 1 ? { stallMs: 90000, maxMs: 180000 } : {}),
                 onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
             });
+            if (res.percent > bestPct) bestPct = res.percent;
 
-            if (!res.ok && res.reason === 'dns-bind') {
+            if (!res.ok && res.reason === 'dns-bind' && res.port === DNS_PORT) {
                 //  Something other than dnscache owns :53 (a local resolver,
                 //  Docker, Pi-hole...). Retry on 9053 instead of failing --
                 //  and do NOT point the adapters at 127.0.0.1 afterwards,
@@ -2957,19 +3319,77 @@ function runAdminApp() {
                     exitSpec: firstSpec, dnsPort,
                     onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
                 });
+                if (res.percent > bestPct) bestPct = res.percent;
+            } else if (!res.ok && res.reason === 'dns-bind') {
+                //  The bind that failed was NOT :53. startTor derives this reason
+                //  from "Could not bind to 127.0.0.1:<port>", which tor prints for
+                //  its SocksPort and ControlPort too -- so a stale tor.exe still
+                //  holding :9050 arrived here as 'dns-bind' and was answered by
+                //  moving the DNS port, which cannot free :9050. Named instead of
+                //  retried.
+                Logger.error(`Tor could not bind 127.0.0.1:${res.port} -- ` +
+                             `that is not the DNS port, so moving DNSPort would not help`);
             }
 
-            if (!res.ok && (res.reason === 'stall' || res.reason === 'timeout') && fs.existsSync(P.lyre)) {
+            //  Is there an automatic round left? Latched here, once, and read by
+            //  BOTH decisions below -- otherwise the two could disagree in the
+            //  same round: the wall-clock cap could refuse the retry after the
+            //  bridge branch had already stepped aside for it, and a cold connect
+            //  would reach the user's question having never tried bridges at all.
+            //  The cap gates the START of a round, so the last round to begin can
+            //  overrun it by its own budget; that is deliberate, since killing a
+            //  bootstrap at 99% to honour a stopwatch would fail the ask.
+            const autoLeft = coldCache && autoRounds < COLD_AUTO_ROUNDS &&
+                             Date.now() - engineStart < COLD_AUTO_MS;
+
+            //  Bridges are the last automatic move, never an early one. MEASURED
+            //  the same day as the quote fix above (.build/probe-obfs4-quotes.txt):
+            //  with the quotes gone lyrebird does launch, and all three hardcoded
+            //  bridges then answered "general SOCKS server failure" for 25 s
+            //  straight -- so this round is a maybe, not a rescue, and a first
+            //  connect must not depend on it. On a cold cache the automatic direct
+            //  rounds below are spent first, because those are the ones measured
+            //  to work.
+            if (!res.ok && (res.reason === 'stall' || res.reason === 'timeout') &&
+                fs.existsSync(P.lyre) && !autoLeft) {
                 Logger.warn('Direct connection stalled -- retrying with obfs4 bridges');
-                sendProgress(res.percent, 'Switching to bridge mode...');
+                sendProgress(bestPct, 'Switching to bridge mode...');
                 res = await startTor({
                     exitSpec: firstSpec, dnsPort, useBridges: true,
                     onProgress: (pct, msg) => sendProgress(Math.min(pct, 95), msg),
                 });
+                if (res.percent > bestPct) bestPct = res.percent;
                 usedBridges = res.ok;
             }
 
             if (res.ok) break;
+
+            //  ── The retry a first connect is owed, taken without asking ──
+            //  "jei country tei connect korar try koruk na keno sei country te
+            //  must connect hoy jeno kono rokom fail charai" -- and the measured
+            //  cause of that first failure is a download that the failed round
+            //  itself banked. Retrying is therefore not hope: every round starts
+            //  from strictly more cached consensus than the one before it, which
+            //  is exactly why the manual retry in the log succeeded in 22.9 s.
+            //
+            //  Only 'stall' and 'timeout' qualify. 'config', 'spawn', 'exit' and
+            //  'dns-bind' are not "it needed more time" and repeating them would
+            //  just spend the user's minutes on the same failure.
+            if (autoLeft && (res.reason === 'stall' || res.reason === 'timeout')) {
+                autoRounds += 1;
+                Logger.warn(`First bootstrap did not finish (${res.reason} at ${res.percent}%) -- ` +
+                            `automatic retry ${autoRounds}/${COLD_AUTO_ROUNDS}`);
+                //  The same kill the failure path below does, for the same
+                //  reason: a half-bootstrapped tor still holding :9050 with the
+                //  machine already pointed at it is the one state in this
+                //  function where a page could leave through a route nobody
+                //  chose. killTor keeps the consensus cache on purpose, so the
+                //  next round starts from whatever this one managed to download.
+                await killTor({ blocking: false });
+                sendProgress(Math.max(bestPct, 5),
+                    `Still connecting to ${ccName(serverCode)} (attempt ${engineRound + 1})...`);
+                continue;
+            }
 
             // ── Detection point C: the engine itself would not come up ──
             //
@@ -2980,7 +3400,8 @@ function runAdminApp() {
             //  path that used to log one line, return `unavailable`, and let the
             //  switch handler revert on its own with no question on screen.
             Logger.error('Connection failed', { serverCode, reason: res.reason,
-                                                percent: res.percent, round: engineRound });
+                                                percent: res.percent, best: bestPct,
+                                                round: engineRound, autoRounds });
             //  Killed BEFORE the question goes up, not after it is answered. A
             //  half-bootstrapped Tor still holding :9050 with the machine
             //  already pointed at it is the one state in this function where a
@@ -2988,7 +3409,7 @@ function runAdminApp() {
             //  true on purpose: the tunnel that was working has been replaced,
             //  so cancelConnect must not claim it is still up.
             await killTor({ blocking: false });
-            sendProgress(res.percent,
+            sendProgress(bestPct,
                 res.reason === 'config' ? 'Tor configuration error. Check the log.'
                                         : `Could not connect through ${ccName(serverCode)}.`,
                 'unavailable');
@@ -2998,7 +3419,13 @@ function runAdminApp() {
             const nearNow = nearestExitCountries(requestedCode, exitCapacityStats(),
                                                  { exclude: [...tried] })[0] || null;
             const pick = await askEngineFailed(serverCode, {
-                reason: res.reason, percent: res.percent,
+                //  The reason is the latest attempt's, because that is what
+                //  actually stopped this connect. The percent is the best any
+                //  attempt reached, because "it stopped at 0%" was being said to
+                //  a user whose first round got to 50% -- and that number is what
+                //  the question's own text uses to tell "this network blocks Tor"
+                //  apart from "it nearly made it".
+                reason: res.reason, percent: bestPct,
                 oldCc: backTo, nearest: nearNow, note: engineNote,
             });
             engineNote = null;
@@ -4080,6 +4507,44 @@ function pendingRestart() {
 function clearPendingRestart() {
     try { if (fs.existsSync(RESTART_MARKER)) fs.unlinkSync(RESTART_MARKER); return true; }
     catch (e) { Logger.warn('Could not clear the pending-restart marker: ' + e.message); return false; }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  THE FIRST-OPEN BROWSER CARD  --  its marker
+//
+//  The card itself is browserIntroCard() further up; this is the one bit of it
+//  that has to survive the process, and it is the same marker-file pattern as
+//  the restart card above for the same reason: a "have I shown this yet" flag
+//  kept in memory is a flag that says no on every launch.
+//
+//  ONE SHOT, and deliberately not version-gated. Re-raising it after every
+//  update would turn a welcome into a nag, and the ongoing surface for the same
+//  fact already exists -- reportGeoCoverage() logs which browsers still need
+//  the switch, every launch, for as long as it is true. So the file records
+//  when it was shown and the app version that showed it, for the log, and its
+//  mere EXISTENCE is the answer.
+//
+//  Written only once the card has really been put up (a window or a popup was
+//  there to receive it). An app opened and killed before the card could appear
+//  has not been told anything, and must be told next time.
+const INTRO_MARKER = path.join(APPDATA_PATH, 'browser-intro-shown.json');
+
+function introShown() {
+    try { return fs.existsSync(INTRO_MARKER); } catch (e) { return false; }
+}
+
+function markIntroShown() {
+    try {
+        fs.mkdirSync(APPDATA_PATH, { recursive: true });
+        fs.writeFileSync(INTRO_MARKER,
+            JSON.stringify({ at: Date.now(), version: app.getVersion() }, null, 2), 'utf8');
+        return true;
+    } catch (e) {
+        //  Not fatal, and not silent: the only consequence is that the card is
+        //  offered again next launch, which is far better than never.
+        Logger.warn('Could not record that the browser card was shown: ' + e.message);
+        return false;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════

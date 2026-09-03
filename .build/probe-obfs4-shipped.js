@@ -1,0 +1,117 @@
+'use strict';
+// ════════════════════════════════════════════════════════════════════
+//  .build/probe-obfs4-shipped.js  --  READ-ONLY, temp data dir, no proxy
+//
+//  probe-obfs4-quotes.js proved the physics on a hand-written plugin line.
+//  This one proves the SHIPPED line: buildTorrc() is pulled verbatim out of
+//  main.js (the same textual extraction verify-torrc.js uses, so there is no
+//  retyped copy to drift), asked for a bridge-mode torrc with the real
+//  deployed lyrebird path, and handed to a real tor.exe.
+//
+//  Only the parts that would disturb the running app are rewritten -- the
+//  listening ports, the DataDirectory and the cookie file all move into
+//  os.tmpdir(). Every Bridge line and the ClientTransportPlugin line go in
+//  byte for byte as the app writes them.
+//
+//  PASS is one line and nothing else will do:
+//      Bootstrapped 2% (conn_done_pt): Connected to pluggable transport
+//  Whether those three hardcoded bridges then answer is a separate question
+//  this probe also reports but does not judge -- a dead bridge is not a
+//  broken transport.
+// ════════════════════════════════════════════════════════════════════
+const { spawn, execFileSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const ROOT = path.join(__dirname, '..');
+const SOCKS_PORT = 9050, HTTP_PORT = 9080, CTRL_PORT = 9051, DNS_PORT = 53;
+const ud = path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'freeproxy-vpn');
+const torDir = path.join(ud, 'Tor', 'tor');
+const getScriptPath = f => path.join(ud, f);
+const Logger = { warn: () => {} };
+
+const src = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8');
+function extract(header) {
+    const a = src.indexOf(header);
+    if (a < 0) throw new Error('not found: ' + header);
+    const close = src.indexOf('\r\n    }', a);
+    if (close < 0) throw new Error('unterminated: ' + header);
+    return src.slice(a, close + '\r\n    }'.length);
+}
+const fnSrc = extract('function torPaths()') + '\n' + extract('function buildTorrc(');
+const make = new Function('fs', 'path', 'torDir', 'getScriptPath', 'Logger',
+    'SOCKS_PORT', 'HTTP_PORT', 'CTRL_PORT', 'DNS_PORT',
+    fnSrc + '\nreturn { torPaths, buildTorrc };');
+const { torPaths, buildTorrc } = make(fs, path, torDir, getScriptPath, Logger,
+    SOCKS_PORT, HTTP_PORT, CTRL_PORT, DNS_PORT);
+
+const P = torPaths();
+const TOR_EXE = fs.existsSync(P.torExe) ? P.torExe : path.join(ROOT, 'Tor', 'tor', 'tor.exe');
+if (!fs.existsSync(TOR_EXE)) { console.log('no tor.exe to run: ' + TOR_EXE); process.exit(0); }
+if (!fs.existsSync(P.lyre)) { console.log('lyrebird not deployed: ' + P.lyre); process.exit(0); }
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'fp-shipped-'));
+const DATA = path.join(TMP, 'data');
+fs.mkdirSync(DATA, { recursive: true });
+const q = s => s.replace(/\\/g, '/');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+//  The app's own bridge torrc, with only the machine-disturbing lines moved.
+const shipped = buildTorrc({ exitSpec: '{de}', dnsPort: 9053, useBridges: true });
+const safe = shipped.split('\n').map(l => {
+    if (/^SocksPort /.test(l))       return l.replace('9050', '19660');
+    if (/^HTTPTunnelPort /.test(l))  return l.replace('9080', '19661');
+    if (/^DNSPort /.test(l))         return l.replace('9053', '19662');
+    if (/^ControlPort /.test(l))     return l.replace('9051', '19663');
+    if (/^DataDirectory /.test(l))   return `DataDirectory "${q(DATA)}"`;
+    if (/^CookieAuthFile /.test(l))  return `CookieAuthFile "${q(path.join(DATA, 'cac'))}"`;
+    if (/^Log /.test(l))             return 'Log notice stdout';
+    return l;
+}).join('\n');
+
+const plugin = safe.split('\n').find(l => /^ClientTransportPlugin/.test(l)) || '(none)';
+const torrcFile = path.join(TMP, 'torrc');
+fs.writeFileSync(torrcFile, safe, 'utf8');
+
+(async () => {
+    let out = '';
+    const child = spawn(TOR_EXE, ['-f', torrcFile], {
+        cwd: path.dirname(TOR_EXE), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', d => { out += d.toString(); });
+    child.stderr.on('data', d => { out += d.toString(); });
+    let exited = null;
+    child.on('exit', c => { exited = c; });
+    await sleep(25000);
+    if (exited === null) {
+        try { execFileSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' }); } catch (e) {}
+    }
+    await sleep(600);
+    try { execFileSync('taskkill', ['/F', '/IM', 'lyrebird.exe'], { stdio: 'ignore' }); } catch (e) {}
+
+    const launched = /conn_done_pt|Connected to pluggable transport/.test(out);
+    const failed = /CreateProcessA\(\) failed|failed at launch|no configured transport called/.test(out);
+    const bridgeAnswered = /Bootstrapped (?:[1-9]\d|100)%/.test(out);
+
+    const L = [];
+    L.push(`tor.exe        : ${TOR_EXE}`);
+    L.push(`lyrebird       : ${P.lyre}`);
+    L.push(`plugin line    : ${plugin}`);
+    L.push(`   (generated by the buildTorrc() in main.js, not retyped here)`);
+    L.push('');
+    L.push(`TRANSPORT      : ${launched ? 'LAUNCHED -- tor connected through lyrebird'
+                                        : failed ? 'DID NOT LAUNCH' : 'inconclusive'}`);
+    L.push(`bridges usable : ${bridgeAnswered ? 'at least one answered (bootstrap moved past 10%)'
+                                             : 'no -- none of the three answered in 25 s'}`);
+    L.push('');
+    L.push('tor said:');
+    for (const l of out.split(/\r?\n/).filter(l =>
+        /CreateProcessA|managed proxy|pluggable transport|conn_pt|no configured transport|Bootstrapped|obfs4|Proxy Client|Failed to parse/i.test(l)
+    ).slice(0, 30)) L.push('   ' + l.trim());
+
+    const text = L.join('\n');
+    fs.writeFileSync(path.join(__dirname, 'probe-obfs4-shipped.txt'), text);
+    console.log(text);
+    try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
+})().catch(e => { console.log('probe failed: ' + e.message); process.exit(1); });

@@ -4,6 +4,18 @@
 //  userData/Tor layout, and run tor.exe --verify-config on the result.
 //  Extracting the function textually (rather than retyping it) means this
 //  tests the shipped code, not a copy that has drifted from it.
+//
+//  WHAT A PASS HERE DOES NOT MEAN. --verify-config parses the file and
+//  exits; it never spawns a pluggable transport. The 'bridge mode' case
+//  below passed for every build that shipped
+//      ClientTransportPlugin obfs4 exec "C:/.../lyrebird.exe"
+//  and bridge mode was dead in all of them: tor keeps those quote
+//  characters and hands them to CreateProcessA, which has no such file
+//  (MEASURED four ways in .build/probe-obfs4-quotes.txt). Only a real
+//  `Bootstrapped 2% (conn_done_pt)` from a running tor is evidence that
+//  the transport launches -- run .build/probe-obfs4-shipped.js, which
+//  feeds THIS buildTorrc()'s own bridge output to a real tor.exe, or
+//  .build/probe-obfs4-quotes.js for the quoted-vs-bare comparison.
 // ════════════════════════════════════════════════════════════════════
 const fs = require('fs');
 const path = require('path');
@@ -57,6 +69,8 @@ const cases = [
         { exitSpec: '{lu}', dnsPort: DNS_PORT }],
     ['pinned fingerprint, DNSPort 9053 fallback',
         { exitSpec: '$A53C4E9D3B2F1A0C8E7D6B5A4938271605F4E3D2', dnsPort: DNS_FALLBACK_PORT }],
+    //  Parses only -- see the header. A PASS here means the file is valid
+    //  syntax, not that lyrebird.exe ever starts.
     ['bridge mode',
         { exitSpec: '{de}', dnsPort: DNS_FALLBACK_PORT, useBridges: true }],
 ];
