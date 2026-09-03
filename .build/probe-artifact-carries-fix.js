@@ -85,9 +85,13 @@ const CHANGED = [
     'main.js', 'renderer.js', 'index.html', 'globe-controller.js',
     'lib/exit-selector.js', 'lib/geo-ext.js', 'lib/installer-tasks.js',
     'lib/socks-fetch.js', 'lib/tor-control.js', 'lib/offthread.js',
+    'lib/ext-deliver.js',
     'Extension/background.js', 'Extension/geo-bridge.js', 'Extension/geo-spoof.js',
     'Extension/manifest.json',
 ];
+//  installer.nsh is modified too and is deliberately NOT here: NSIS consumes it
+//  while building the installer, so it is never part of the payload. Listing it
+//  would report "nowhere" for ever and teach a reader to skip the failures.
 
 console.log('── every changed source file, read back out of the artifact ──');
 for (const rel of CHANGED) {
@@ -116,7 +120,7 @@ for (const rel of CHANGED) {
        'and it is the stripped copy, so nothing in the artifact depends on the build config');
 }
 
-// ── and the two fixes, named, so a byte-compare passing for a stale pair of
+// ── and each fix, named, so a byte-compare passing for a stale pair of
 //    identical files cannot read as coverage ───────────────────────────
 const NAMED = [
     ['Extension/background.js', "chrome.proxy.settings.set({ value: { mode: 'direct' }, scope: 'regular' }, settled)",
@@ -138,6 +142,32 @@ const NAMED = [
      'and main.js calling it before Electron starts -- this is the delayed prompt'],
     ['lib/installer-tasks.js', '--fp-deliver',
      'the flag the logon task passes, which is what selects that path'],
+
+    //  Ask 1 -- the map must re-centre on the connected country after every
+    //  reload, not only after the user clicks "Your location".
+    ['Extension/background.js', 'repinMaps',
+     'the /maps/@lat,lng,zoom pin rewritten on each reload, which is what decides ' +
+     'Maps\' first-load centre (a conflicting UULE loses to it -- measured)'],
+
+    //  Ask 3 -- the first connect after a fresh install must not fail.
+    ['main.js', 'ClientTransportPlugin obfs4 exec ${q(P.lyre)}',
+     'the plugin path UNQUOTED. The needle fails on the shipped-for-years quoted ' +
+     'form, so this check is what tells a stale artifact from a fixed one'],
+    ['main.js', 'cached-microdesc-consensus',
+     'the cold-cache latch: the first bootstrap on a machine is recognised instead ' +
+     'of being timed as if a consensus were already on disk'],
+    ['main.js', 'COLD_AUTO_ROUNDS',
+     'the automatic cold rounds -- a banked consensus retried without asking the ' +
+     'user, which is the whole of "must not fail at first connection time"'],
+    ['main.js', 'bestPct',
+     'the progress bar reporting the best percent any round reached, so it stops ' +
+     'falling 50% -> 0% while a retry is still running'],
+    ['main.js', 'res.port === DNS_PORT',
+     'the dns-bind narrowing: a stale tor holding :9050 is no longer "answered" by ' +
+     'moving the DNS port'],
+    ['main.js', 'userDataFallback',
+     'the loud userData fallback -- the silent one shipped a build that looked fine ' +
+     'and could not find its own state'],
 ];
 
 console.log('\n── and the fixes are in it by name, not just by size ──');

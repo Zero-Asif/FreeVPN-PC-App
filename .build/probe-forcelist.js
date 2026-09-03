@@ -48,15 +48,13 @@ const WANT = ['chrome', 'brave'];
 const stamp = () => new Date().toISOString().slice(11, 19);
 const say = (...a) => console.log(stamp(), ...a);
 
-const REASON = { 1: 'USER_ACTION', 2: 'PERMISSIONS_INCREASE', 4: 'RELOAD',
-                 8: 'UNSUPPORTED_REQUIREMENT', 16: 'SIDELOAD_WIPEOUT', 256: 'NOT_VERIFIED',
-                 512: 'GREYLIST', 1024: 'CORRUPTED', 2048: 'REMOTE_INSTALL',
-                 8192: 'EXTERNAL_EXTENSION', 16384: 'UPDATE_REQUIRED_BY_POLICY',
-                 32768: 'CUSTODIAN_APPROVAL_REQUIRED', 65536: 'BLOCKED_BY_POLICY',
-                 262144: 'NOT_ALLOWLISTED', 524288: 'UNSUPPORTED_MANIFEST_VERSION' };
-const LOC = { 1: 'INTERNAL', 2: 'EXTERNAL_PREF', 3: 'EXTERNAL_REGISTRY', 4: 'UNPACKED',
-              5: 'COMPONENT', 6: 'EXTERNAL_PREF_DOWNLOAD', 7: 'EXTERNAL_POLICY_DOWNLOAD',
-              8: 'COMMAND_LINE', 9: 'EXTERNAL_POLICY', 10: 'EXTERNAL_COMPONENT' };
+//  One table, in lib/browsers.js. It had two wrong labels while these copies
+//  existed (262144 was called NOT_ALLOWLISTED, 524288 UNSUPPORTED_MANIFEST_
+//  VERSION -- they are 1<<18 retired and 1<<19 REINSTALL), and a probe that
+//  prints a different name from the app is a probe that cannot be used to
+//  diagnose the app.
+const REASON = browsers.DISABLE_REASON;
+const LOC = browsers.EXT_LOCATION;
 const reasons = v => {
     const flat = (Array.isArray(v) ? v : (typeof v === 'number' ? [v] : [])).reduce((a, n) => a | n, 0);
     if (!flat) return 'none';
