@@ -1,0 +1,5 @@
+# Build output. The zip is rebuilt from package/ by build-zip.js in seconds,
+# it is 885 KB of already-committed files, and a stale one in the tree is a
+# real hazard: it is the thing that gets uploaded, so the only copy that
+# should exist is one just built from the current package/.
+FreeProxy-VPN-Extension-*.zip

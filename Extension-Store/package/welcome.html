@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<!-- ══════════════════════════════════════════════════════════════════
+     welcome.html -- shown once, the first time this browser starts with the
+     FreeProxy VPN extension in it.
+
+     WHY THIS PAGE EXISTS
+     This is the Microsoft Edge Add-ons build, so the user reached the
+     extension by clicking Add on a store page -- they know it is here. What
+     they do NOT yet know is the part a store page cannot make obvious: this
+     extension is inert on its own, it needs the FreeProxy VPN desktop app
+     running on the same Windows PC, it takes over this browser's proxy
+     setting while connected, and it deletes this browser's browsing data
+     when the country changes. Every one of those is stated below, on the
+     first run, before the user has connected anything.
+
+     WHAT IT MAY AND MAY NOT SAY
+     Every claim on this page is checked against the app before it is shown:
+     the status row is fed by the live WebSocket state in background.js, not
+     by an assumption that the app is running. If the app is not running the
+     page says the extension is inert, because it is -- see the note in
+     background.js about the "only works while the app is running" rule.
+
+     WHAT DIFFERS FROM THE SIDELOADED BUILD OF THIS PAGE
+     Wording only, and only where that build's wording would be untrue or
+     unreviewable here: the app's installer did not put this copy in the
+     browser, uninstalling the app does not take this copy away with it, the
+     browser is named as Microsoft Edge throughout, and the data deletion has
+     a card of its own. No script, no style, no layout -- both builds of this
+     page are public in the repository linked at the foot of it.
+     ══════════════════════════════════════════════════════════════════ -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FreeProxy VPN -- extension installed</title>
+<style>
+    /*  Same palette as popup.html, so this reads as one product. System font
+        stack only: a web font here would be a third-party request on a page
+        whose entire subject is not leaking anything.  */
+    :root {
+        --ink:       #e8eaf2;
+        --ink-dim:   #9aa3bd;
+        --bg:        #0b0d17;
+        --surface:   #151827;
+        --surface-2: #1c2032;
+        --line:      rgba(255,255,255,.07);
+        --purple:    #5031b2;
+        --violet:    #7c3aed;
+        --green:     #22c55e;
+        --amber:     #f59e0b;
+        --red:       #ef4444;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+        background:
+            radial-gradient(900px 520px at 15% -10%, rgba(124,58,237,.20), transparent 60%),
+            radial-gradient(700px 460px at 100% 0%, rgba(162,21,102,.16), transparent 55%),
+            var(--bg);
+        color: var(--ink);
+        font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+        font-size: 14.5px;
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
+        display: flex; justify-content: center;
+        padding: 44px 20px 60px;
+    }
+    .wrap { width: 100%; max-width: 720px; }
+
+    /* ── hero ───────────────────────────────────────────────────── */
+    .hero {
+        display: flex; align-items: center; gap: 15px;
+        padding: 18px 20px;
+        border-radius: 16px 16px 0 0;
+        background: linear-gradient(145deg, #6b21a8 0%, #a21566 100%);
+        position: relative; overflow: hidden;
+    }
+    .hero::after {
+        content: ''; position: absolute; top: -60%; left: -30%;
+        width: 40%; height: 220%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,.16), transparent);
+        transform: rotate(18deg);
+        animation: sheen 6s ease-in-out infinite;
+    }
+    @keyframes sheen {
+        0%, 65%  { transform: translateX(0) rotate(18deg); opacity: 0; }
+        70%      { opacity: 1; }
+        100%     { transform: translateX(700%) rotate(18deg); opacity: 0; }
+    }
+    .hero img { width: 46px; height: 46px; border-radius: 11px; flex: none;
+                filter: drop-shadow(0 3px 8px rgba(0,0,0,.4)); }
+    .hero h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: .2px; }
+    .hero p  { margin: 2px 0 0; font-size: 12.5px; color: rgba(255,255,255,.78); }
+    .badge-new {
+        margin-left: auto; flex: none;
+        font-size: 10.5px; font-weight: 700; letter-spacing: .8px;
+        padding: 4px 9px; border-radius: 999px;
+        background: rgba(255,255,255,.16);
+        border: 1px solid rgba(255,255,255,.28);
+    }
+
+    /* ── card shell ─────────────────────────────────────────────── */
+    .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-top: none;
+        padding: 20px;
+    }
+    .card:last-of-type { border-radius: 0 0 16px 16px; }
+    h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; letter-spacing: .3px;
+         color: var(--ink); text-transform: uppercase; }
+    p  { margin: 0 0 10px; color: var(--ink-dim); }
+    p:last-child { margin-bottom: 0; }
+    b, strong { color: var(--ink); font-weight: 600; }
+
+    /* ── live status row ────────────────────────────────────────── */
+    .status {
+        display: flex; align-items: center; gap: 11px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 13px 15px;
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #64748b; }
+    .dot.on  { background: var(--green); animation: pulse-green 1.6s infinite; }
+    .dot.mid { background: var(--amber); animation: pulse-amber 1s infinite; }
+    .dot.off { background: var(--red); }
+    @keyframes pulse-green {
+        0%   { box-shadow: 0 0 0 0 rgba(34,197,94,.55); }
+        70%  { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+        100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+    @keyframes pulse-amber {
+        0%   { box-shadow: 0 0 0 0 rgba(245,158,11,.55); }
+        70%  { box-shadow: 0 0 0 8px rgba(245,158,11,0); }
+        100% { box-shadow: 0 0 0 0 rgba(245,158,11,0); }
+    }
+    .status .txt { flex: 1; min-width: 0; }
+    .status .txt b { display: block; font-size: 13.5px; }
+    .status .txt span { display: block; font-size: 12px; color: var(--ink-dim); }
+
+    /* ── numbered steps ─────────────────────────────────────────── */
+    ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; }
+    ol.steps li {
+        counter-increment: s;
+        position: relative;
+        padding: 0 0 14px 40px;
+        color: var(--ink-dim);
+    }
+    ol.steps li:last-child { padding-bottom: 0; }
+    ol.steps li::before {
+        content: counter(s);
+        position: absolute; left: 0; top: 0;
+        width: 26px; height: 26px; border-radius: 50%;
+        display: grid; place-items: center;
+        font-size: 12.5px; font-weight: 700; color: #fff;
+        background: linear-gradient(145deg, var(--violet), var(--purple));
+        box-shadow: 0 2px 8px rgba(124,58,237,.35);
+    }
+    ol.steps li b { display: block; margin-bottom: 1px; }
+
+    /* ── the "where is the icon" pointer ────────────────────────── */
+    .toolbar-hint {
+        display: flex; align-items: center; gap: 9px;
+        margin-top: 12px; padding: 10px 13px;
+        background: rgba(124,58,237,.10);
+        border: 1px dashed rgba(124,58,237,.45);
+        border-radius: 10px;
+        font-size: 12.5px; color: var(--ink-dim);
+    }
+    .toolbar-hint img { width: 20px; height: 20px; border-radius: 5px; flex: none; }
+    .toolbar-hint .arrow { font-size: 15px; color: var(--violet); animation: nudge 1.4s ease-in-out infinite; }
+    @keyframes nudge {
+        0%, 100% { transform: translateY(0); }
+        50%      { transform: translateY(-3px); }
+    }
+
+    /* ── facts list ─────────────────────────────────────────────── */
+    ul.facts { margin: 0; padding-left: 20px; color: var(--ink-dim); }
+    ul.facts li { margin-bottom: 7px; }
+    ul.facts li:last-child { margin-bottom: 0; }
+
+    /* ── footer ─────────────────────────────────────────────────── */
+    .foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    button {
+        font: inherit; font-size: 13.5px; font-weight: 600;
+        color: #fff; cursor: pointer;
+        padding: 10px 20px; border-radius: 10px;
+        border: 1px solid rgba(255,255,255,.10);
+        background: linear-gradient(145deg, var(--violet), var(--purple));
+        transition: transform .12s ease, box-shadow .12s ease;
+    }
+    button:hover  { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(124,58,237,.35); }
+    button:active { transform: translateY(0); }
+    button.ghost {
+        background: var(--surface-2);
+        color: var(--ink-dim);
+        border-color: var(--line);
+    }
+    button.ghost:hover { color: var(--ink); box-shadow: none; }
+    .foot .spacer { flex: 1; }
+    .tiny { font-size: 11.5px; color: var(--ink-dim); }
+    .note { margin-top: 12px; }
+    /*  Links are new in this build: the store copy has to point at the app
+        download and the privacy policy, which the sideloaded copy never had to.
+        Palette colours only -- nothing else in the page moves.  */
+    a {
+        color: var(--violet); text-decoration: none;
+        border-bottom: 1px solid rgba(124,58,237,.45);
+    }
+    a:hover { color: var(--ink); border-bottom-color: var(--ink); }
+    code {
+        font-family: 'Cascadia Mono', Consolas, monospace;
+        font-size: 12px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 5px; padding: 1px 5px;
+    }
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <img src="icon.png" alt="">
+    <div>
+      <h1>The FreeProxy VPN extension is now in this browser</h1>
+      <p>It works with the FreeProxy VPN desktop app on this PC. Here is what
+         it does, and what it needs.</p>
+    </div>
+    <div class="badge-new">NEW</div>
+  </div>
+
+  <!--  The live row. Everything in it comes from the app over the WebSocket;
+        welcome.js leaves it on "checking" until an answer actually arrives
+        rather than guessing at a state.  -->
+  <div class="card">
+    <div class="status">
+      <div class="dot" id="dot"></div>
+      <div class="txt">
+        <b id="st-main">Checking the desktop app...</b>
+        <span id="st-sub">Asking the app what it is doing right now.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>What it does</h2>
+    <ul class="facts">
+      <li>Sets <b>this browser's proxy</b> to the Tor engine inside the desktop
+          app while you are connected, using the same split-tunnel exceptions
+          you set in the app. It is handed back the moment you disconnect,
+          close the app, or remove this extension.</li>
+      <li>Reports the <b>connected country's</b> location to websites that ask
+          for your position, instead of your real one. Microsoft Edge normally
+          works your location out from the Wi-Fi networks around you, which a
+          proxy cannot change -- so this part has to be done in the browser.</li>
+      <li><b>Clears this browser's cache, cookies and history when you switch
+          to a different country</b>, along with the stored site data of the
+          sites that were given the country you are leaving. Without it those
+          sites keep reporting the old country -- Google, for example, keeps
+          the location in a cookie. <b>Because the cookies go too, you are
+          signed out of sites you were signed in to</b>: that is the price of
+          being certain nothing is still holding the country you left. It
+          happens only when you change country, never on an ordinary
+          disconnect and never on its own.</li>
+      <li>Gives you the whole app in the toolbar: every country, connect,
+          disconnect, the kill switch and the split-tunnel list, in sync with
+          the app window in both directions.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Three things worth knowing</h2>
+    <ol class="steps">
+      <li>
+        <b>It only works while the FreeProxy VPN desktop app is running.</b>
+        The extension has no VPN of its own -- it points this browser at the
+        app's engine. The app is free, open source and Windows 10/11 only; if
+        it is not on this PC yet, get it from
+        <a href="https://github.com/Zero-Asif/FreeVPN-PC-App" target="_blank"
+           rel="noreferrer">github.com/Zero-Asif/FreeVPN-PC-App</a>.
+        With the app closed this extension goes inert and hands the browser
+        straight back to your normal connection.
+      </li>
+      <li>
+        <b>Pin it, so it is one click away.</b>
+        Open the extensions button in the toolbar and use the pin next to
+        <b>FreeProxy VPN Extension</b>.
+      </li>
+      <li>
+        <b>You do not have to use it.</b>
+        The desktop app already routes the whole PC. This extension is what
+        makes the <i>location</i> a website reads match the country you picked,
+        and what lets you drive the app without leaving the browser.
+      </li>
+    </ol>
+    <div class="toolbar-hint">
+      <span class="arrow">&#9650;</span>
+      <img src="icon.png" alt="">
+      <span>This icon, up in the toolbar, is the extension. Click it any time
+            to connect, switch country or turn the kill switch on.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="foot">
+      <button id="ok">Got it</button>
+      <span class="spacer"></span>
+      <span class="tiny" id="ver"></span>
+    </div>
+    <p class="tiny note">
+      Nothing here is collected, logged or sent anywhere: the only address this
+      extension ever talks to is the FreeProxy VPN app on your own PC, over
+      <code>127.0.0.1</code>. No account, no login, no ads, no analytics --
+      read the
+      <a href="https://github.com/Zero-Asif/FreeVPN-PC-App/blob/main/Extension-Store/PRIVACY_POLICY.md"
+         target="_blank" rel="noreferrer">privacy policy</a>.
+      You can switch this extension off or remove it at any time from
+      <code>edge://extensions</code>; it is never installed in a way that takes
+      that switch away from you. Removing the desktop app releases every proxy,
+      DNS, IPv6 and location setting the app changed.
+    </p>
+  </div>
+
+</div>
+
+<script src="welcome.js"></script>
+</body>
+</html>

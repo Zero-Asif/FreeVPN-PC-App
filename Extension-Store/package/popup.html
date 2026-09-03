@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<!-- ══════════════════════════════════════════════════════════════════
+     popup.html -- the browser-side face of the desktop app.
+
+     Everything it shows comes from the app over the WebSocket: the country
+     list, the connect progress, the kill switch, the split-tunnel list, the
+     coordinates being reported and the moment the tunnel came up. Nothing here
+     invents a number. When the app is not running the whole panel goes inert
+     on purpose -- the extension cannot route a browser by itself, and a
+     control that looks alive but cannot act is worse than one that says so.
+
+     No external resource is referenced. No web font, no flag CDN: a popup
+     that fetches an image per country would announce the country to a third
+     party on every open, which is the opposite of what this app is for.
+     ══════════════════════════════════════════════════════════════════ -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FreeProxy VPN</title>
+<style>
+    /*  System stack only -- see the header comment about web fonts.  */
+    :root {
+        --ink:        #e8eaf2;
+        --ink-dim:    #9aa3bd;
+        --bg:         #0b0d17;
+        --surface:    #151827;
+        --surface-2:  #1c2032;
+        --line:       rgba(255,255,255,.07);
+        --purple:     #5031b2;
+        --violet:     #7c3aed;
+        --green:      #22c55e;
+        --amber:      #f59e0b;
+        --red:        #ef4444;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+        width: 340px;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+        font-size: 13px;
+        -webkit-font-smoothing: antialiased;
+        overflow-x: hidden;
+    }
+
+    /* ── header ─────────────────────────────────────────────────── */
+    .header {
+        position: relative;
+        display: flex; align-items: center; gap: 10px;
+        padding: 13px 14px;
+        background: linear-gradient(145deg, #6b21a8 0%, #a21566 100%);
+        overflow: hidden;
+    }
+    /*  Slow diagonal sheen, the same idea as the app's connect button.  */
+    .header::after {
+        content: ''; position: absolute; top: -60%; left: -30%;
+        width: 40%; height: 220%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,.16), transparent);
+        transform: rotate(18deg);
+        animation: sheen 6s ease-in-out infinite;
+    }
+    @keyframes sheen {
+        0%, 65%  { transform: translateX(0) rotate(18deg); opacity: 0; }
+        70%      { opacity: 1; }
+        100%     { transform: translateX(700%) rotate(18deg); opacity: 0; }
+    }
+    .header img { width: 30px; height: 30px; border-radius: 8px; flex: none;
+                  filter: drop-shadow(0 2px 5px rgba(0,0,0,.35)); }
+    .brand { flex: 1; min-width: 0; }
+    .brand b { display: block; font-size: 14px; font-weight: 600; letter-spacing: .2px; }
+    .brand span { display: block; font-size: 10.5px; color: rgba(255,255,255,.72);
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* ── status pulse, same three states as the app window ──────── */
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--red); }
+    .dot.connected   { background: var(--green); animation: pulse-green 1.6s infinite; }
+    .dot.connecting  { background: var(--amber); animation: pulse-amber 1s infinite; }
+    .dot.offline     { background: #64748b; }
+    @keyframes pulse-green {
+        0%   { box-shadow: 0 0 0 0 rgba(34,197,94,.55); }
+        70%  { box-shadow: 0 0 0 7px rgba(34,197,94,0); }
+        100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+    @keyframes pulse-amber {
+        0%   { box-shadow: 0 0 0 0 rgba(245,158,11,.6); }
+        70%  { box-shadow: 0 0 0 7px rgba(245,158,11,0); }
+        100% { box-shadow: 0 0 0 0 rgba(245,158,11,0); }
+    }
+
+    .wrap { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+
+    /* ── the app-not-running gate ───────────────────────────────── */
+    .gate {
+        display: none;
+        background: linear-gradient(160deg, #2a1327, #1b1020);
+        border: 1px solid rgba(239,68,68,.35);
+        border-left: 3px solid var(--red);
+        border-radius: 11px; padding: 12px 13px;
+        animation: gate-in .25s ease both;
+    }
+    .gate.show { display: block; }
+    @keyframes gate-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+    .gate b { display: block; font-size: 12.5px; color: #fecaca; margin-bottom: 3px; }
+    .gate p { margin: 0; font-size: 11.5px; line-height: 1.5; color: #d6b7c6; }
+
+    /* ── status card ────────────────────────────────────────────── */
+    .card {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 12px; padding: 12px 13px;
+    }
+    .card .row { display: flex; align-items: center; gap: 9px; }
+    .card .row b { font-size: 13px; font-weight: 600; }
+    .timer {
+        margin-left: auto; font-variant-numeric: tabular-nums; letter-spacing: .4px;
+        font-size: 12px; color: var(--ink-dim);
+    }
+    .geo {
+        margin-top: 8px; padding-top: 9px; border-top: 1px dashed var(--line);
+        font-size: 11.5px; color: var(--ink-dim); line-height: 1.55; display: none;
+    }
+    .geo.show { display: block; }
+    .geo .coords { font-variant-numeric: tabular-nums; color: #b9c2dd; }
+
+    /* ── country selector ───────────────────────────────────────── */
+    .dd { position: relative; }
+    .picked {
+        display: flex; align-items: center; gap: 9px;
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 11px; padding: 10px 12px; cursor: pointer;
+        transition: border-color .2s, background .2s, box-shadow .2s;
+    }
+    .picked:hover { border-color: rgba(124,58,237,.55); background: var(--surface-2); }
+    .picked.locked { opacity: .55; cursor: not-allowed; }
+    .picked .name { flex: 1; min-width: 0; font-weight: 600; font-size: 12.5px;
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .picked .caret { color: var(--ink-dim); font-size: 9px; transition: transform .2s; }
+    .dd.open .picked .caret { transform: rotate(180deg); }
+
+    /*  The real flag, from this package's own flags/<cc>.svg -- no network and
+        no host permission for it. The two-letter badge is still drawn
+        UNDERNEATH (Windows has no flag-emoji glyphs), and the flag is
+        layered over it, so a missing file degrades to the badge instead of a
+        broken-image icon. Same hue formula as the app window, so one country
+        looks the same in both surfaces.  */
+    .cc {
+        position: relative; overflow: hidden;
+        flex: none; width: 30px; height: 21px; border-radius: 4px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 10px; font-weight: 700; letter-spacing: .5px; color: #fff;
+        text-shadow: 0 1px 2px rgba(0,0,0,.4);
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), 0 1px 3px rgba(0,0,0,.35);
+    }
+    .cc img {
+        position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+        object-fit: cover; pointer-events: none;
+    }
+
+    .list {
+        position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 40;
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 12px; overflow: hidden; display: none;
+        box-shadow: 0 14px 34px rgba(0,0,0,.55);
+    }
+    .dd.open .list { display: block; animation: dropDown .18s ease both; }
+    @keyframes dropDown { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; } }
+    .list .search { padding: 8px; border-bottom: 1px solid var(--line); }
+    .list .search input {
+        width: 100%; padding: 7px 9px; font-size: 12px; color: var(--ink);
+        background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+        outline: none; font-family: inherit;
+    }
+    .list .search input:focus { border-color: rgba(124,58,237,.6); }
+    .list ul { list-style: none; margin: 0; padding: 4px; max-height: 208px; overflow-y: auto; }
+    .list li {
+        display: flex; align-items: center; gap: 9px; padding: 7px 8px;
+        border-radius: 8px; cursor: pointer; font-size: 12px;
+    }
+    .list li:hover { background: var(--surface-2); }
+    .list li.active { background: rgba(124,58,237,.16); }
+    .list li .name { flex: 1; min-width: 0; white-space: nowrap;
+                     overflow: hidden; text-overflow: ellipsis; }
+    .list li.note { justify-content: center; color: var(--ink-dim); cursor: default;
+                    font-size: 11.5px; padding: 12px; }
+    .list li.note:hover { background: none; }
+    .list ul::-webkit-scrollbar { width: 8px; }
+    .list ul::-webkit-scrollbar-thumb { background: #2a3049; border-radius: 8px; }
+
+    /*  Same three capacity classes the app window uses, and the same colours.
+        The label is the exit-relay count the app reported -- a real number
+        from the live relay index, not a latency this popup never measured.  */
+    .chip {
+        flex: none; font-size: 9.5px; font-weight: 700; padding: 2.5px 6px;
+        border-radius: 6px; letter-spacing: .2px; white-space: nowrap;
+    }
+    .chip.fast { background: #dcfce7; color: #166534; }
+    .chip.busy { background: #fef9c3; color: #854d0e; }
+    .chip.slow { background: #fee2e2; color: #991b1b; }
+    .chip.live { background: linear-gradient(90deg, var(--purple), var(--violet)); color: #fff; }
+
+    /* ── progress ───────────────────────────────────────────────── */
+    .prog { display: none; }
+    .prog.show { display: block; animation: gate-in .2s ease both; }
+    .prog .bar {
+        height: 7px; border-radius: 6px; background: #1f2437; overflow: hidden;
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.4);
+    }
+    .prog .fill {
+        height: 100%; width: 0%; border-radius: 6px;
+        background: linear-gradient(90deg, var(--purple), var(--violet));
+        background-size: 22px 22px;
+        transition: width .45s cubic-bezier(.4,0,.2,1);
+        animation: stripes 1s linear infinite;
+    }
+    .prog.done .fill { background: linear-gradient(90deg, #15803d, var(--green)); animation: none; }
+    .prog.failed .fill { background: linear-gradient(90deg, #b91c1c, var(--red)); animation: none; }
+    @keyframes stripes { to { background-position: 22px 0; } }
+    .prog .msg {
+        margin-top: 6px; font-size: 11px; color: var(--ink-dim);
+        display: flex; gap: 8px; align-items: baseline;
+    }
+    .prog .msg span:first-child { flex: 1; min-width: 0; }
+    .prog .pct { font-variant-numeric: tabular-nums; color: #c4b5fd; font-weight: 600; }
+
+    /* ── the action button ──────────────────────────────────────── */
+    .act {
+        position: relative; overflow: hidden;
+        width: 100%; padding: 13px; border: 0; border-radius: 11px;
+        font-family: inherit; font-size: 13px; font-weight: 700;
+        letter-spacing: .8px; text-transform: uppercase; color: #fff; cursor: pointer;
+        background: linear-gradient(135deg, var(--purple) 0%, var(--violet) 100%);
+        box-shadow: 0 6px 18px rgba(80,49,178,.35);
+        transition: transform .18s, box-shadow .18s, filter .18s;
+    }
+    .act::after {
+        content: ''; position: absolute; top: 0; left: -120%; width: 45%; height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,.22), transparent);
+        transform: skewX(-20deg); animation: shimmer 3.2s ease-in-out infinite;
+    }
+    @keyframes shimmer { 0%, 60% { left: -120%; } 100% { left: 160%; } }
+    .act:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 9px 24px rgba(80,49,178,.45); }
+    .act:active:not(:disabled) { transform: translateY(0); }
+    .act.on { background: linear-gradient(135deg, #dc2626, var(--red));
+              box-shadow: 0 6px 18px rgba(220,38,38,.35); }
+    .act:disabled { filter: grayscale(.65) brightness(.75); cursor: not-allowed; box-shadow: none; }
+    .act:disabled::after { animation: none; }
+
+    /* ── advanced block ─────────────────────────────────────────── */
+    .adv {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 12px; padding: 12px 13px;
+    }
+    .adv .line { display: flex; align-items: center; gap: 10px; }
+    .adv .line .lbl { flex: 1; font-size: 12.5px; font-weight: 600; }
+    .adv .hint { font-size: 10.5px; color: var(--ink-dim); margin-top: 3px; line-height: 1.45; }
+    .adv .sep { height: 1px; background: var(--line); margin: 11px 0; }
+    .adv label.cap {
+        display: block; font-size: 10px; font-weight: 700; letter-spacing: .6px;
+        text-transform: uppercase; color: var(--ink-dim); margin-bottom: 6px;
+    }
+    .adv input[type=text] {
+        width: 100%; padding: 9px 10px; font-size: 12px; font-family: inherit;
+        color: var(--ink); background: var(--bg);
+        border: 1px solid var(--line); border-radius: 9px; outline: none;
+        transition: border-color .2s, box-shadow .2s;
+    }
+    .adv input[type=text]:focus {
+        border-color: rgba(124,58,237,.6); box-shadow: 0 0 0 3px rgba(124,58,237,.14);
+    }
+    .adv input[type=text]:disabled { opacity: .5; cursor: not-allowed; }
+
+    /*  36x20, the app window's switch.  */
+    .sw { position: relative; display: inline-block; width: 36px; height: 20px; flex: none; }
+    .sw input { opacity: 0; width: 0; height: 0; }
+    .sl {
+        position: absolute; inset: 0; cursor: pointer; border-radius: 20px;
+        background: #333a52; transition: background .25s;
+    }
+    .sl::before {
+        content: ''; position: absolute; height: 16px; width: 16px; left: 2px; top: 2px;
+        background: #fff; border-radius: 50%; transition: transform .25s;
+        box-shadow: 0 1px 3px rgba(0,0,0,.35);
+    }
+    .sw input:checked + .sl { background: var(--green); }
+    .sw input:checked + .sl::before { transform: translateX(16px); }
+    .sw input:disabled + .sl { opacity: .45; cursor: not-allowed; }
+
+    /* ── the ask card ───────────────────────────────────────────────
+       The app stops and asks when the country the user picked has no
+       reachable exit relay, and this popup is a full surface for that
+       question -- not a notice telling them to go and find the app window.
+       Everything in it is written in by popup.js from what the app sent.
+
+       It sits where the country selector and the action button are and hides
+       them while it is up: the question IS the only thing to do at that
+       moment, and a live Connect button next to it would be a second answer
+       to the same question.                                              */
+    .ask {
+        display: none;
+        background: linear-gradient(160deg, #1a1430, #141225);
+        border: 1px solid rgba(124,58,237,.42);
+        border-left: 3px solid var(--violet);
+        border-radius: 12px; padding: 12px 13px;
+        animation: gate-in .25s ease both;
+    }
+    .ask.show { display: block; }
+    .ask .top { display: flex; gap: 9px; align-items: flex-start; }
+    .ask .top .cc { margin-top: 1px; }
+    .ask .head { flex: 1; min-width: 0; }
+    .ask b.title { display: block; font-size: 12.5px; font-weight: 700;
+                   color: #e9e4ff; line-height: 1.4; }
+    .ask p.body { margin: 4px 0 0; font-size: 11px; line-height: 1.55;
+                  color: var(--ink-dim); }
+    /*  What an earlier round of the same question already ruled out.  */
+    .ask .note {
+        display: none; margin-top: 9px; padding: 7px 9px;
+        background: rgba(245,158,11,.09); border: 1px solid rgba(245,158,11,.3);
+        border-left: 3px solid var(--amber); border-radius: 8px;
+        font-size: 10.5px; line-height: 1.5; color: #fcd9a0;
+    }
+    .ask .note.show { display: block; }
+    .ask .opts { display: flex; flex-direction: column; gap: 7px; margin-top: 11px; }
+    .ask .opt {
+        display: block; width: 100%; text-align: left; cursor: pointer;
+        font-family: inherit; padding: 9px 10px; border-radius: 10px;
+        background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.1);
+        transition: background .16s, border-color .16s, transform .16s;
+    }
+    .ask .opt:hover:not(:disabled) {
+        background: rgba(124,58,237,.16); border-color: rgba(124,58,237,.55);
+        transform: translateY(-1px);
+    }
+    .ask .opt:disabled { opacity: .45; cursor: default; transform: none; }
+    .ask .opt .lb { display: block; font-size: 11.5px; font-weight: 650;
+                    color: var(--ink); line-height: 1.4; }
+    .ask .opt .ht { display: block; margin-top: 3px; font-size: 10px;
+                    line-height: 1.45; color: #7d8aa5; }
+    .ask .opt.primary { background: rgba(80,49,178,.22); border-color: rgba(124,58,237,.42); }
+    .ask .opt.primary .lb { color: #c9b8ff; }
+    .ask .opt.danger:hover:not(:disabled) {
+        background: rgba(239,68,68,.14); border-color: rgba(239,68,68,.5);
+    }
+    .ask .opt.danger .lb { color: #fca5a5; }
+    .ask .foot {
+        display: flex; align-items: center; gap: 7px; margin-top: 10px;
+        padding-top: 8px; border-top: 1px solid var(--line);
+        font-size: 10px; line-height: 1.45; color: #5f6b85;
+    }
+    /*  Shown only for the app's "still trying" card, where the app really is
+        working while the card is up.  */
+    .ask .dots { display: none; gap: 3px; flex: none; }
+    .ask .dots.show { display: inline-flex; }
+    .ask .dots i {
+        width: 4px; height: 4px; border-radius: 50%; background: var(--violet);
+        animation: ask-dot 1.05s ease-in-out infinite;
+    }
+    .ask .dots i:nth-child(2) { animation-delay: .16s; }
+    .ask .dots i:nth-child(3) { animation-delay: .32s; }
+    @keyframes ask-dot {
+        0%, 80%, 100% { opacity: .25; transform: translateY(0); }
+        40%           { opacity: 1;   transform: translateY(-3px); }
+    }
+
+    /* ── footer + toast ─────────────────────────────────────────── */
+    .foot { font-size: 10px; color: #5c6480; text-align: center; line-height: 1.5; }
+    .toast {
+        position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 90;
+        padding: 10px 12px; border-radius: 10px; font-size: 11.5px; line-height: 1.45;
+        background: #241426; border: 1px solid rgba(239,68,68,.4); color: #fecaca;
+        box-shadow: 0 10px 26px rgba(0,0,0,.5);
+        opacity: 0; transform: translateY(8px); pointer-events: none;
+        transition: opacity .2s, transform .2s;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    @media (prefers-reduced-motion: reduce) {
+        .header::after, .act::after, .prog .fill, .dot { animation: none !important; }
+        .ask, .ask .dots i { animation: none !important; }
+    }
+
+
+
+
+</style>
+</head>
+<body>
+<div class="header">
+    <img src="icon.png" alt="">
+    <div class="brand">
+        <b>FreeProxy VPN</b>
+        <span id="hdrSub">Connecting to the app…</span>
+    </div>
+    <div class="dot offline" id="dot" title="status"></div>
+</div>
+
+<div class="wrap">
+
+    <!--  Shown whenever the desktop app is not answering on 127.0.0.1:8080.
+          Every control below is disabled at the same time: this extension
+          routes the browser through the app's Tor engine, so without the app
+          there is nothing for a Connect button to do.  -->
+    <div class="gate" id="gate">
+        <b>The FreeProxy VPN app is not running</b>
+        <p>Start FreeProxy VPN on this PC, then come back — this panel will
+           connect to it by itself. The extension cannot route the browser on
+           its own.</p>
+    </div>
+
+    <div class="card">
+        <div class="row">
+            <div class="dot offline" id="dot2"></div>
+            <b id="stateText">Waiting for the app…</b>
+            <span class="timer" id="timer"></span>
+        </div>
+        <div class="geo" id="geoBox">
+            Websites in this browser are told you are in
+            <b id="geoPlace">—</b>
+            <div class="coords" id="geoCoords"></div>
+        </div>
+    </div>
+
+    <!--  The app stops and asks when the country the user picked has no
+          reachable exit node, instead of quietly substituting another one.
+          This is that question, and the "still trying" card that replaces it
+          when they choose to keep trying.
+
+          Empty on purpose: popup.js writes every string in here from the
+          question the app sent, so this popup can never show a question that
+          differs from the one the app is actually waiting on. While it is up
+          the country selector and the action button are hidden -- answering
+          the question IS the only thing to do, and a live Connect button
+          beside it would be a second answer to the same question.  -->
+    <div class="ask" id="ask">
+        <div class="top">
+            <span class="cc" id="askCc"></span>
+            <div class="head">
+                <b class="title" id="askTitle"></b>
+                <p class="body" id="askBody"></p>
+            </div>
+        </div>
+        <div class="note" id="askNote"></div>
+        <div class="opts" id="askOpts"></div>
+        <div class="foot">
+            <span class="dots" id="askDots"><i></i><i></i><i></i></span>
+            <span id="askFoot"></span>
+        </div>
+    </div>
+
+    <div class="dd" id="dd">
+        <div class="picked" id="picked">
+            <span class="cc" id="pickedCc">US</span>
+            <span class="name" id="pickedName">United States</span>
+            <span class="caret">▼</span>
+        </div>
+        <div class="list">
+            <div class="search"><input type="text" id="search" placeholder="Search country…"></div>
+            <ul id="list"></ul>
+        </div>
+    </div>
+
+    <div class="prog" id="prog">
+        <div class="bar"><div class="fill" id="fill"></div></div>
+        <div class="msg"><span id="progMsg"></span><span class="pct" id="progPct"></span></div>
+    </div>
+
+    <button class="act" id="act" disabled>Connect</button>
+
+    <div class="adv">
+        <div class="line">
+            <span class="lbl">Kill Switch</span>
+            <label class="sw"><input type="checkbox" id="ks"><span class="sl"></span></label>
+        </div>
+        <div class="hint">Blocks this PC's internet if the tunnel drops.</div>
+        <div class="sep"></div>
+        <label class="cap" for="bypass">Split tunneling — bypass list</label>
+        <input type="text" id="bypass" placeholder="e.g. mybank.example; intranet.local">
+        <div class="hint">These hosts skip the VPN, in the browser and system-wide.</div>
+    </div>
+
+    <!--  The disclosure line. Connecting sets this browser's proxy, and
+          changing country deletes this browser's browsing data -- both are
+          stated on the welcome page at install, in the store listing and in
+          the privacy policy, and this is the copy that is in front of the user
+          at the moment they press the button.  -->
+    <div class="foot">Controls the FreeProxy VPN app — changes apply here and in
+        the app window at the same time. Connecting sets this browser's proxy to
+        the app's engine; changing country clears this browser's cache, cookies
+        and history — which signs you out of sites — so the country you left
+        stops being reported.</div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="popup.js"></script>
+
+</body>
+</html>
