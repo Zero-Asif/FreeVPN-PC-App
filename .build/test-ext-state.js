@@ -206,6 +206,56 @@ ok(browsers.DISABLE_REASON[65536] === 'BLOCKED_BY_POLICY', '65536 is BLOCKED_BY_
 ok(browsers.EXT_LOCATION[7] === 'EXTERNAL_POLICY_DOWNLOAD' &&
    browsers.EXT_LOCATION[6] === 'EXTERNAL_PREF_DOWNLOAD', 'locations 6 and 7 are right');
 
+//  The two bits below were wrong in this table until 2026-09-02, and both wrong
+//  labels sat on reasons Chromium really can set for an off-store MV3 extension,
+//  so the coverage report would have named the wrong cause. Values come from
+//  extensions/browser/disable_reason.h, which forbids reordering because they
+//  feed histograms -- so these are safe to pin.
+ok(browsers.DISABLE_REASON[256] === 'NOT_VERIFIED', '256 is NOT_VERIFIED (1<<8), not the greylist');
+ok(browsers.DISABLE_REASON[512] === 'GREYLIST', '512 is GREYLIST (1<<9)');
+ok(browsers.DISABLE_REASON[524288] === 'REINSTALL',
+   '524288 is REINSTALL (1<<19) -- it was labelled UNSUPPORTED_MANIFEST_VERSION');
+ok(browsers.DISABLE_REASON[1048576] === 'NOT_ALLOWLISTED',
+   '1048576 is NOT_ALLOWLISTED (1<<20) -- it was read off 262144');
+ok(browsers.DISABLE_REASON[8388608] === 'UNSUPPORTED_MANIFEST_VERSION',
+   '8388608 is UNSUPPORTED_MANIFEST_VERSION (1<<23)');
+ok(browsers.DISABLE_REASON[16777216] === 'UNSUPPORTED_DEVELOPER_EXTENSION',
+   '16777216 is UNSUPPORTED_DEVELOPER_EXTENSION (1<<24)');
+ok(browsers.DISABLE_REASON[67108864] === 'BLOCKED_BY_CLOUD_POLICY_CHECK',
+   '67108864 is BLOCKED_BY_CLOUD_POLICY_CHECK (1<<26)');
+ok(browsers.DISABLE_REASON[262144] === undefined,
+   '262144 (1<<18) is retired in Chromium and is claimed by nothing here');
+
+console.log('── a bit with no label still counts as disabled ──');
+{
+    const p = path.join(TMP, 'unnamed');
+    fs.mkdirSync(path.join(p, 'Default'), { recursive: true });
+    fs.writeFileSync(path.join(p, 'Default', 'Secure Preferences'), JSON.stringify({
+        extensions: { settings: { [ID]: { location: 6, state: 1, disable_reasons: [1 << 27] } } },
+    }));
+    const st = browsers.extensionState(p, ID);
+    ok(st.present === true, 'the record is still an install');
+    ok(st.enabled === false,
+       'and it is NOT enabled -- enabled is decided by bits === 0, never by whether a label was found');
+    ok(st.disabled.length === 1 && /^UNNAMED_BIT_/.test(st.disabled[0]),
+       `the unnamed bit is reported as itself (${st.disabled.join(',')}), not dropped`);
+}
+
+console.log('── who switched it off, per reason ──');
+ok(browsers.disableAuthor(['EXTERNAL_EXTENSION']) === 'prompt',
+   'EXTERNAL_EXTENSION is a prompt waiting for the user -- the one reason a single click settles for good');
+ok(browsers.disableAuthor(['NOT_VERIFIED']) === 'browser',
+   'NOT_VERIFIED is the browser deciding by itself');
+ok(browsers.disableAuthor(['NOT_ALLOWLISTED']) === 'browser', 'so is NOT_ALLOWLISTED');
+ok(browsers.disableAuthor(['BLOCKED_BY_POLICY']) === 'admin', 'BLOCKED_BY_POLICY is an administrator');
+ok(browsers.disableAuthor(['USER_ACTION', 'NOT_VERIFIED']) === 'user',
+   'the user outranks everything -- re-enabling would override a choice this app promised to leave alone');
+ok(browsers.disableAuthor(['BLOCKED_BY_POLICY', 'NOT_VERIFIED']) === 'admin',
+   'an administrator outranks the browser');
+ok(browsers.disableAuthor(['EXTERNAL_EXTENSION', 'UNNAMED_BIT_134217728']) === 'unknown',
+   'an unnamed bit is never optimistically reported as merely waiting for a click');
+ok(browsers.disableAuthor([]) === null, 'nothing disabled has no author');
+
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (x) {}
 console.log(`\n${pass}/${pass + fail} checks passed`);
 process.exit(fail ? 1 : 0);
