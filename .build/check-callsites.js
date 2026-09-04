@@ -33,9 +33,15 @@ const targets = [
 //  Comments stripped first: a method named only in a doc comment -- and the
 //  comments here name the deleted ones on purpose, to explain why they went --
 //  is not a call site.
-const src = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^[ \t]*\/\/.*$/gm, '');
+//
+//  Through .build/srcstrip.js, not the obvious one-liner: stripping block
+//  comments before line comments paired the `/*` in a prose `Tun/**` with a
+//  `*/` inside a regex 890 lines later, and this file scanned a main.js with
+//  those 890 lines missing -- including two geoExt() call sites. A call site
+//  that has been deleted from the text cannot fail this check, which is the
+//  one direction a gate must never fail in.
+const { stripComments } = require('./srcstrip.js');
+const src = stripComments(fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8'), 'main.js');
 
 /**
  * Every receiver expression that resolves to `factory`. The factory call

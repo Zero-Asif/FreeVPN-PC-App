@@ -4,6 +4,7 @@ const { exec, execSync, execFile, fork, spawn, spawnSync } = require('child_proc
 const path = require('path');
 const fs   = require('fs');
 const os   = require('os');
+const crypto = require('crypto');
 
 // ════════════════════════════════════════════════════════════
 //  LOCAL ENGINE MODULES
@@ -32,6 +33,19 @@ const installerTasks                               = require('./lib/installer-ta
 //  that no remote host has to be named in index.html's connect-src -- and so
 //  that the kill switch can refuse the question outright. See the module head.
 const { lookupHomeLocation }                       = require('./lib/home-location');
+//  v2.0.5, the two halves of "whole machine" that v2.0.0 did not have:
+//  Containment is default-deny outbound, so nothing can leave except through
+//  the tunnel; Tunnel is Wintun + tun2socks, so applications that have never
+//  heard of a proxy have their TCP carried by Tor anyway. Neither replaces the
+//  other -- one stops leaks, the other provides coverage. Read the head of
+//  each module for exactly what it can and cannot do.
+const { Containment, RECOVERY_LNK }                = require('./lib/containment');
+const { Tunnel, TUN_NAME }                         = require('./lib/tunnel');
+//  The state directory this app executes out of. Measured: it inherits
+//  C:\ProgramData's ACL, which lets any local user drop a file in it -- and
+//  this app runs elevated and runs tor.exe and eight .bat files from there.
+//  See the head of the module; it is a privilege escalation, not untidiness.
+const { secureStateDir }                           = require('./lib/state-dir');
 
 // ════════════════════════════════════════════════════════════
 //  LOGGER  (ASCII-only output — no Unicode, no garbled chars)
@@ -44,7 +58,23 @@ const Logger = (() => {
 
     function init(ud) {
         logDir = path.join(ud, 'logs');
-        if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+        //  Guarded, because this is the FIRST thing whenReady() does and it now
+        //  runs against a directory that lib/state-dir.js has locked down to
+        //  administrators. The unelevated bootstrapper -- the copy whose only
+        //  job is to relaunch this exe with RunAs -- reaches here too, and a
+        //  throw would become an unhandled rejection inside whenReady().then()
+        //  with the elevation never requested: the app would appear to start
+        //  and then do nothing at all. write() already tolerates a log file it
+        //  cannot append to, so losing the file costs those three handover
+        //  lines and nothing else; the elevated copy writes its own.
+        try {
+            if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+        } catch (e) {
+            logDir = ''; logFile = '';
+            try { console.error(`log directory unavailable (${e.message}) -- ` +
+                                'this run logs to the console only'); } catch (e2) {}
+            return;
+        }
         rotateLogs();
         logFile = path.join(logDir, `freeproxy-${dateStr()}.log`);
         write('INFO', '======================================');
@@ -93,6 +123,11 @@ const Logger = (() => {
         };
         process.stdout.write((colours[level] || '') + line + '\x1b[0m');
         if (logFile) { try { fs.appendFileSync(logFile, line); } catch(e) {} }
+        //  Rolls the file over at midnight. Skipped when there is no log
+        //  directory at all -- path.join('', name) is a RELATIVE path, and
+        //  writing it would drop a log file in whatever the current working
+        //  directory happens to be.
+        if (!logDir) return;
         const nf = path.join(logDir, `freeproxy-${dateStr()}.log`);
         if (nf !== logFile) logFile = nf;
     }
@@ -199,6 +234,43 @@ const GEO_COORDS = {
     'sc':{ lat:-4.6191,  lng:55.4513,   accuracy:12, city:'Victoria'          },
 };
 
+//  ── the ONE way to read that table ──────────────────────────────────
+//  `GEO_COORDS[cc]` was read directly in eight places, all of them gated on
+//  the truthiness of the result, and two strings get past a gate like that
+//  without being countries: 'constructor' and '__proto__'. Both survive
+//  .toLowerCase() unchanged, both resolve on Object.prototype, and both are
+//  truthy -- so `if (!coord) return` passes, and then coord.lat is undefined.
+//  What that produced downstream: a CDP geolocation override of NaN, a toast
+//  reading "undefined, CONSTRUCTOR", and the same undefined coordinates handed
+//  to the browser extension over the WebSocket.
+//
+//  Reachable without any injection at all: settings.json is loaded with
+//  `typeof s.serverCode === 'string'` as its only check, so a state file
+//  holding "__proto__" -- which any process running as this user can write --
+//  is enough.
+//
+//  hasOwnProperty via Object.prototype.call, not coord.hasOwnProperty: the
+//  table is a plain object literal here, but calling a method THROUGH the
+//  object being validated is the same mistake one level up.
+//
+//  The two-letter test is not redundant with it. It is what keeps this
+//  function's contract the same as isCc() in lib/exit-selector.js and
+//  ccName() in renderer.js, so "a country code" means one thing everywhere in
+//  the app.
+function geoCoord(cc) {
+    //  A string, not something that STRINGIFIES to one. `['us']` coerces to
+    //  'us' through String(), so an array is otherwise a country here -- and
+    //  settings.json is JSON, where an array is one keystroke away from a
+    //  string. Nothing in this app calls geoCoord with anything but a string,
+    //  so requiring one costs nothing and makes the contract exact.
+    if (typeof cc !== 'string') return null;
+    const k = cc.toLowerCase();
+    if (!/^[a-z]{2}$/.test(k)) return null;
+    return Object.prototype.hasOwnProperty.call(GEO_COORDS, k) ? GEO_COORDS[k] : null;
+}
+//  Same table, asked as a question. Used where only the yes/no matters.
+const isSpoofableCc = cc => geoCoord(cc) !== null;
+
 // ════════════════════════════════════════════════════════════
 //  GEOLOCATION SPOOF ENGINE
 // ════════════════════════════════════════════════════════════
@@ -217,7 +289,7 @@ function spoofableOnly(stats) {
     const out = {};
     const dropped = [];
     for (const [cc, v] of Object.entries(stats)) {
-        if (GEO_COORDS[cc]) out[cc] = v; else dropped.push(cc);
+        if (isSpoofableCc(cc)) out[cc] = v; else dropped.push(cc);
     }
     if (dropped.length) {
         Logger.warn(`Hiding ${dropped.length} exit country/ies with no coordinates: ` +
@@ -257,12 +329,13 @@ function haversineKm(a, b) {
 //  appears here if it currently HAS exit capacity -- offering a neighbour with
 //  no exits would just move the same failure one country sideways.
 function nearestExitCountries(cc, stats, { exclude = [] } = {}) {
-    const home = GEO_COORDS[cc];
+    const home = geoCoord(cc);
     if (!home) return [];
     const skip = new Set([cc, ...exclude]);
     return Object.keys(stats || {})
-        .filter(k => !skip.has(k) && GEO_COORDS[k] && (stats[k]?.count || 0) > 0)
-        .map(k => ({ cc: k, km: Math.round(haversineKm(home, GEO_COORDS[k])) }))
+        .map(k => ({ k, c: geoCoord(k) }))
+        .filter(({ k, c }) => !skip.has(k) && c && (stats[k]?.count || 0) > 0)
+        .map(({ k, c }) => ({ cc: k, km: Math.round(haversineKm(home, c)) }))
         .sort((a, b) => a.km - b.km);
 }
 
@@ -499,7 +572,7 @@ function reportGeoCoverage(coord) {
 }
 
 function applyGeolocationSpoof(win, serverCode) {
-    const coord = GEO_COORDS[serverCode.toLowerCase()];
+    const coord = geoCoord(serverCode);
     if (!coord) { Logger.warn('No geo coords for code', { serverCode }); return; }
 
     //  Set here rather than inside the CDP .then(): if attaching the
@@ -634,6 +707,50 @@ if (installerTasks.installerTask(process.argv) === 'deliver') {
     catch (e) { /* whenReady still runs the job the ordinary way */ }
 }
 
+// ════════════════════════════════════════════════════════════
+//  STAYING ALIVE  --  the four ways this process could die quietly
+//
+//  None of these was handled before. Node's default for an uncaught exception
+//  in the main process is to print to stderr and exit(1) -- in a packaged app
+//  that is the window vanishing with nothing in the log, which is the reported
+//  "installation er por app crash". Electron's default for a dead renderer or
+//  a dead utility child is the opposite failure: the process lives on behind a
+//  blank window that answers nothing, which is the "hang".
+//
+//  So each one is logged AND sent to the window. Nothing is swallowed: a fault
+//  the user cannot see is worse than one they can, and this app runs elevated.
+let _reloadsAfterCrash = 0;
+function reportFault(kind, detail, meta = null) {
+    try { Logger.error(`${kind}: ${detail}`, meta); } catch (e) {}
+    try { BrowserWindow.getAllWindows()[0]?.webContents?.send(
+              'app-fault', { kind, detail }); } catch (e) {}
+}
+const firstLines = e => (e && e.stack) ? String(e.stack).split('\n').slice(0, 6) : null;
+
+process.on('uncaughtException', err => {
+    reportFault('Uncaught exception', (err && err.message) || String(err),
+                { stack: firstLines(err) });
+});
+process.on('unhandledRejection', reason => {
+    reportFault('Unhandled rejection', (reason && reason.message) || String(reason),
+                { stack: firstLines(reason) });
+});
+app.on('render-process-gone', (_e, _wc, d) => {
+    if (d.reason === 'clean-exit') return;
+    reportFault('Renderer gone', d.reason, { exitCode: d.exitCode });
+    //  Bounded, because a renderer that crashes on load would otherwise
+    //  reload forever. Two tries, then the window is left as it is with the
+    //  reason already in the log rather than spun in a loop.
+    if (_reloadsAfterCrash++ < 2) {
+        try { BrowserWindow.getAllWindows()[0]?.reload(); } catch (e) {}
+    }
+});
+app.on('child-process-gone', (_e, d) => {
+    if (d.reason === 'clean-exit') return;
+    reportFault('Child process gone', `${d.type}: ${d.reason}`,
+                { exitCode: d.exitCode, name: d.name || null });
+});
+
 app.whenReady().then(() => {
     Logger.init(app.getPath('userData'));
     Logger.info('app.whenReady() fired');
@@ -680,9 +797,89 @@ app.whenReady().then(() => {
         });
     } else {
         Logger.success('Running with admin privileges');
+        //  ── One instance ──
+        //  Asked for HERE and nowhere else, deliberately. The unelevated
+        //  bootstrapper just above spawns an elevated copy of this same exe
+        //  against this same userData path; a lock taken before that hand-off
+        //  would be held by the process that is about to exit, and the elevated
+        //  copy -- the one that does all the work -- would be the one denied.
+        //  So the lock belongs to the branch that actually runs the app.
+        //
+        //  What it prevents is concrete: two elevated instances mean two
+        //  firewall writers, two tor.exe fighting over :9050 and :8080, and two
+        //  teardown paths racing to restore this machine's proxy on the way out.
+        //  The installer/boot jobs above return before reaching here, so an
+        //  uninstall teardown is never blocked by a running window.
+        if (!app.requestSingleInstanceLock()) {
+            Logger.warn('Another instance already holds the single-instance ' +
+                        'lock -- focusing it and exiting.');
+            app.quit();
+            return;
+        }
+        app.on('second-instance', () => {
+            Logger.info('second-instance -- focusing the existing window');
+            const w = BrowserWindow.getAllWindows()[0];
+            if (!w) return;
+            if (w.isMinimized()) w.restore();
+            w.show(); w.focus();
+        });
         runAdminApp();
     }
 });
+
+// ════════════════════════════════════════════════════════════
+//  THE SPLIT-TUNNEL LIST, made safe for an elevated .bat
+//
+//  Two separate faults, in a mapping that used to be written out twice (in
+//  the WinINET writer and again in update-live-bypass) and could drift.
+//
+//  1. INJECTION. This value is interpolated into a .bat that the app then
+//     runs elevated through cmd.exe. The old sanitiser stripped `*`,
+//     whitespace, a leading scheme and any path -- but not `"`, `&`, `|`,
+//     `^`, `%`, `<` or `>`. An entry of  x" /f & <command>  closes the reg
+//     quote and starts a second ELEVATED command. The string arrives from
+//     the UI textarea and from UPDATE_BYPASS over the WebSocket, so it is
+//     not trusted input. Fixed by an ALLOWLIST rather than escaping: a host
+//     is letters/digits/dot/hyphen, or an IPv4 literal. Anything else is
+//     dropped and named in the log. A character that means something to
+//     cmd.exe cannot survive to reach the file.
+//
+//  2. OVER-MATCH -- a leak, not just untidiness. `*entry*` also matched
+//     `notentry.attacker.example`, so a host the user never listed went
+//     DIRECT instead of through Tor. WinINET's own form for "this host and
+//     its subdomains" is `host;*.host`, which is what is emitted now.
+//
+//  At MODULE scope, and there is one copy of it, because THREE writers need
+//  the identical answer: the WinINET .bat and netsh winhttp inside
+//  runAdminApp(), and Chromium's ProxyBypassList in
+//  forceAllBrowsersOntoProxy(), which is out here. A browser bypassing a
+//  host that Windows tunnels -- or the reverse -- is a split-tunnel list
+//  that does not mean what the user typed.
+// ════════════════════════════════════════════════════════════
+const BP_HOST = /^(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})*$/;
+const BP_IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+function bypassToProxyOverride(bypassList) {
+    const out = [], dropped = [];
+    for (const raw of String(bypassList || '').replace(/,/g, ';').split(';')) {
+        const e = raw.trim()
+            .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')   // scheme
+            .replace(/\/.*$/, '')                      // path
+            .replace(/:\d+$/, '')                      // port
+            .replace(/^\*\./, '').replace(/\.$/, '')   // leading *., trailing dot
+            .toLowerCase();
+        if (!e || e === '<local>') continue;            // <local> added below
+        if (BP_IPV4.test(e))      { out.push(e); continue; }
+        if (e.length <= 253 && BP_HOST.test(e)) { out.push(e, `*.${e}`); continue; }
+        dropped.push(raw.trim().slice(0, 40));
+    }
+    if (dropped.length) {
+        Logger.warn('Split-tunnel entries dropped -- not a hostname or an IPv4 ' +
+                    'address', { dropped });
+    }
+    //  De-duplicated, so pressing Save twice cannot grow the registry value.
+    const uniq = [...new Set(out)];
+    return uniq.length ? uniq.join(';') + ';<local>' : '<local>';
+}
 
 // ════════════════════════════════════════════════════════════
 //  MAIN APP
@@ -692,6 +889,46 @@ function runAdminApp() {
     let torDir = '';
     let mainWindow = null;
 
+    //  ── The two whole-machine layers ──
+    //  Assigned in setupWholeMachineLayers(), which runs before anything can
+    //  connect. Declared here because every handler below closes over them and
+    //  a `const` at the assignment site would not be visible to code that is
+    //  defined earlier in this function but runs later.
+    //
+    //    containment -- lib/containment.js. Default-deny outbound, so nothing
+    //                   leaves this PC except through the tunnel. Armed with
+    //                   the Kill Switch, never on its own.
+    //    tunnel      -- lib/tunnel.js. A Wintun adapter plus tun2socks, so apps
+    //                   that have never heard of a proxy also ride Tor. Up
+    //                   whenever the VPN is connected, if this build carries
+    //                   the binaries.
+    let containment = null;
+    let tunnel      = null;
+    //  Set true once tor.exe has bootstrapped, false again on disconnect. It is
+    //  what tells the tor-death handler whether it is watching a failed connect
+    //  (the connect path reports that itself) or a live session dropping out
+    //  from under the user (which has to fail closed).
+    let sessionLive = false;
+
+    //  ── What a .bat run is now allowed to tell us ──
+    //
+    //  The old version resolved with `undefined` on ANY exit code, so every
+    //  caller was structurally unable to notice a failure. Worse, `cmd.exe /c`
+    //  reports only the LAST command's exit code, so in a ten-line script the
+    //  first nine failures were invisible even to a caller that did look. And
+    //  stdio was 'pipe' with nobody reading it, so netsh's and reg's own error
+    //  text went nowhere.
+    //
+    //  Two changes, with the remaining limit stated rather than papered over:
+    //    * the result is { ok, code, out } and the output is logged, so a
+    //      failure is at least visible and diagnosable;
+    //    * runBatLines() chains a command LIST with `|| exit /b 1`, which does
+    //      make one exit code mean "every command worked" -- but only for
+    //      scripts that are one command per line, and only where every command
+    //      is mandatory (a `delete rule` for a rule that is absent returns
+    //      non-zero and is not a failure). The scripts with `for /f` blocks
+    //      cannot be chained that way, so those verify by READING BACK the
+    //      state they were supposed to produce. Nothing here claims more.
     function runBat(filePath, content) {
         // ─────────────────────────────────────────────────────
         //  ROOT CAUSE FIX: exec() path-with-spaces bug
@@ -706,24 +943,150 @@ function runAdminApp() {
         //  a separate OS argument → Windows handles spaces → works.
         // ─────────────────────────────────────────────────────
         return new Promise(resolve => {
-            fs.writeFileSync(filePath, content, 'utf8');
+            //  Removed before it is written, and this is a security fix rather
+            //  than tidiness. Until lib/state-dir.js ran, ANY local user could
+            //  create files in this directory (measured: BUILTIN\Users held
+            //  0x116 = add-file, container-inherited from C:\ProgramData). One
+            //  of the things they could create is a HARD LINK at one of these
+            //  eight .bat names pointing at a file they cannot write but this
+            //  elevated process can -- the hosts file, a service binary -- and
+            //  writeFileSync() on a hard link writes THROUGH it. Unlinking
+            //  first removes the directory entry and leaves the link target
+            //  alone, so what gets written is always a new file this process
+            //  owns. Failure is ignored on purpose: a missing file is the
+            //  normal case, and anything else is reported by the write below.
+            try { fs.rmSync(filePath, { force: true }); } catch (e) {}
+            try { fs.writeFileSync(filePath, content, 'utf8'); }
+            catch (e) {
+                //  Controlled Folder Access and a read-only ProgramData both
+                //  land here. Silently continuing would have the caller believe
+                //  a script it never wrote had run.
+                Logger.error('bat could not be written', { filePath, err: e.message });
+                return resolve({ ok: false, code: -1, out: '', error: e.message });
+            }
+            let out = '';
             const proc = spawn('cmd.exe', ['/c', filePath], {
                 windowsHide: true,
                 stdio: 'pipe'
             });
+            proc.stdout?.on('data', d => { out += d.toString(); });
+            proc.stderr?.on('data', d => { out += d.toString(); });
             proc.on('exit', (code) => {
-                if (code !== 0) Logger.warn(`bat exit code ${code}`, { filePath });
-                else Logger.debug(`bat OK`, { filePath });
-                resolve();
+                const tail = out.trim().split(/\r?\n/).filter(Boolean).slice(-8);
+                if (code !== 0) Logger.warn(`bat exit code ${code}`, { filePath, out: tail });
+                else {
+                    Logger.debug('bat OK', { filePath });
+                    if (tail.length) Logger.debug('bat output', { filePath, out: tail });
+                }
+                resolve({ ok: code === 0, code, out });
             });
             proc.on('error', (err) => {
                 Logger.error(`bat spawn error`, { filePath, err: err.message });
-                resolve(); // always resolve so Promise chain continues
+                resolve({ ok: false, code: -1, out, error: err.message });
             });
         });
     }
 
-    function setupWritableTor() {
+    //  All-or-nothing, and it names the command that failed. Use ONLY for lists
+    //  where every single command is required to succeed.
+    function runBatLines(filePath, lines) {
+        const cmds = lines.filter(l => l && !/^@echo off$/i.test(String(l).trim()));
+        const body = ['@echo off', 'setlocal'];
+        cmds.forEach((c, i) => body.push(`${c} || (echo FP_FAIL_LINE=${i}&exit /b 1)`));
+        body.push('echo FP_ALL_OK', 'exit /b 0');
+        return runBat(filePath, body.join('\r\n')).then(r => {
+            if (r.ok) return r;
+            const m = /FP_FAIL_LINE=(\d+)/.exec(r.out || '');
+            const at = m ? Number(m[1]) : null;
+            Logger.error('bat command failed', { filePath, at, code: r.code,
+                command: at !== null ? cmds[at] : null });
+            return { ...r, failedIndex: at,
+                     failedCommand: at !== null ? cmds[at] : null };
+        });
+    }
+
+    //  ── Read-back ──
+    //  This project's recurring failure mode is a write that reports success
+    //  and changes nothing (the empty extension record; the unmanaged-Edge
+    //  force-list that reads back perfectly and installs nothing). So the
+    //  claims that matter are verified by reading the value out again, and a
+    //  read-back that disagrees is logged as an error, not smoothed over.
+    //
+    //  Async on purpose: a cold connect once froze this window for ~5758 ms,
+    //  and reg.exe/netsh.exe are 30-60 ms each. Nothing here runs on the main
+    //  thread synchronously.
+    function regRead(key, value) {
+        return new Promise(resolve => {
+            if (!/^[A-Za-z0-9_]+$/.test(value)) return resolve(null);
+            execFile('reg.exe', ['query', key, '/v', value],
+                     { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+                if (err) return resolve(null);
+                //  "    ProxyOverride    REG_SZ    a;b;<local>" -- anchored on
+                //  the type, because the DATA can contain runs of spaces too.
+                const m = new RegExp(`^\\s*${value}\\s+REG_[A-Z_]+\\s+(.*)$`, 'im')
+                            .exec(stdout || '');
+                resolve(m ? m[1].trim() : null);
+            });
+        });
+    }
+
+    //  Present-or-absent for one firewall rule, by name. netsh exits non-zero
+    //  with "No rules match the specified criteria" when there is none.
+    function fwRuleExists(name) {
+        return new Promise(resolve => {
+            execFile('netsh.exe', ['advfirewall', 'firewall', 'show', 'rule',
+                                   `name=${name}`],
+                     { windowsHide: true, timeout: 15000 }, (err, stdout) => {
+                resolve(!err && /Rule Name:/i.test(stdout || ''));
+            });
+        });
+    }
+
+    //  ── Is the bundle on disk the bundle this build ships? ──────────
+    //  Every file of the source bundle, by SHA-256. Extra files in the
+    //  destination are fine and expected -- Tor\data is tor's own writable
+    //  DataDirectory and fills up with cached descriptors, a lock and the
+    //  control cookie -- EXCEPT under Tor\tor, which ships four files and
+    //  gains none at runtime. An unexpected .dll beside tor.exe is a DLL
+    //  planting attack, so that half of the tree is compared both ways.
+    function bundleDiff(src, dst) {
+        const bad = [];
+        const sha = p => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+        const walk = (rel) => {
+            const s = path.join(src, rel), d = path.join(dst, rel);
+            for (const e of fs.readdirSync(s, { withFileTypes: true })) {
+                const r = path.join(rel, e.name);
+                if (e.isDirectory()) {
+                    if (!fs.existsSync(path.join(dst, r))) { bad.push(`${r}: missing`); continue; }
+                    walk(r);
+                    continue;
+                }
+                if (!fs.existsSync(path.join(dst, r))) { bad.push(`${r}: missing`); continue; }
+                if (sha(path.join(src, r)) !== sha(path.join(dst, r)))
+                    bad.push(`${r}: contents differ`);
+            }
+            //  The executable half only: no runtime state is written here, so
+            //  anything the bundle does not ship has been put there by someone.
+            if (rel === 'tor' || rel.startsWith('tor' + path.sep)) {
+                const shipped = new Set(fs.readdirSync(s));
+                for (const e of fs.readdirSync(d)) {
+                    if (!shipped.has(e)) bad.push(`${path.join(rel, e)}: not part of the bundle`);
+                }
+            }
+        };
+        walk('');
+        return bad;
+    }
+
+    //  `verify` comes from lib/state-dir.js: it is true when the state
+    //  directory was writable by non-administrators at the moment this app
+    //  looked. Hardening the permissions is what stops the NEXT attempt; it
+    //  does nothing about a tor.exe that is already sitting there, and
+    //  `if (!existsSync(dst))` below would keep it forever. So on exactly that
+    //  machine the bundle is hashed against the one inside the app, and
+    //  replaced if it does not match. ~1 s, on the one start where the answer
+    //  can still be no.
+    function setupWritableTor({ verify = false } = {}) {
         const ud  = app.getPath('userData');
         const dst = path.join(ud, 'Tor');
         const src = app.isPackaged
@@ -734,6 +1097,30 @@ function runAdminApp() {
                 Logger.info('Copying Tor bundle...');
                 fs.cpSync(src, dst, { recursive: true });
                 Logger.success('Tor bundle ready');
+            } else if (verify) {
+                const t0  = Date.now();
+                const bad = bundleDiff(src, dst);
+                if (!bad.length) {
+                    Logger.success('Tor bundle on disk matches this build, file for ' +
+                                   `file (${Date.now() - t0} ms)`);
+                } else {
+                    Logger.error('The Tor bundle in the state directory is NOT the one ' +
+                                 'this build ships, and that directory was writable by ' +
+                                 'non-administrators. Replacing it.', { differences: bad });
+                    //  tor.exe was killed by startupCleanup() immediately before
+                    //  this, so nothing here is locked. Losing Tor\data costs a
+                    //  slower first bootstrap and nothing else -- every file in
+                    //  it is a cache tor rebuilds.
+                    fs.rmSync(dst, { recursive: true, force: true });
+                    fs.cpSync(src, dst, { recursive: true });
+                    const again = bundleDiff(src, dst);
+                    if (again.length) {
+                        Logger.error('...and the replacement did not take either.',
+                                     { differences: again });
+                    } else {
+                        Logger.success('Tor bundle replaced from this build and verified');
+                    }
+                }
             } else {
                 Logger.debug('Tor bundle already present');
             }
@@ -763,9 +1150,36 @@ function runAdminApp() {
         const bat = getScriptPath('fp_startup_clean.bat');
         const content = [
             '@echo off',
+            //  ── FIRST LINE OF THE FIRST SCRIPT, on purpose ──
+            //  If the previous run was armed with containment (default-deny
+            //  outbound) and died without disarming -- Task Manager, a power
+            //  cut, a Windows update restart -- this machine currently has NO
+            //  internet at all, for any program, and nothing in any Windows
+            //  dialog says why. A firewall policy survives a reboot.
+            //
+            //  So the very first thing this app does on every start is hand the
+            //  internet back, unconditionally and before anything that could
+            //  fail. It is cheap when nothing was armed (netsh sets a policy
+            //  that is already set) and it is the difference between "the app
+            //  crashed" and "the PC is bricked" when something was.
+            //
+            //  The allow rules are left alone here: they permit traffic, so a
+            //  leftover is not dangerous, and Containment.installAllowRules()
+            //  deletes and rewrites each one by name before it arms anyway.
+            `netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound`,
             // Remove proxy
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f`,
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "" /f`,
+            //  ...and the OTHER proxy store. The two reg writes above are
+            //  WinINET (per-user); this is WinHTTP (per-machine), which is what
+            //  Windows Update, the Store, the update services and most
+            //  .NET/PowerShell HTTP clients read. It also survives a reboot, so
+            //  a session killed while connected leaves every one of those
+            //  pointing at a 127.0.0.1:9080 with no Tor behind it -- and unlike
+            //  the browser case there is no proxy dialog for the user to find.
+            //  `reset` is the documented way back to direct, and it is a no-op on
+            //  a machine that never had one.
+            `netsh winhttp reset proxy`,
             // Restore DNS: clear per-adapter + global NameServer
             `netsh interface portproxy delete v4tov4 listenport=53 listenaddress=127.0.0.1 2>nul`,
             `for /f %%i in ('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces"') do reg delete "%%i" /v NameServer /f 2>nul`,
@@ -982,28 +1396,73 @@ function runAdminApp() {
             Logger.success('First-run: tor.exe found');
         }
 
-        // Self-heal firewall rule
-        try {
-            const fwOut = execSync(
-                'netsh advfirewall firewall show rule name="FreeProxy Tor Engine"',
-                { windowsHide: true, encoding: 'utf8' }
-            );
-            if (fwOut.includes('FreeProxy Tor Engine')) {
-                Logger.debug('Firewall rule present');
-            } else {
-                throw new Error('not found');
+        //  Self-heal the firewall rule -- BY PROGRAM PATH, not by name.
+        //
+        //  This check used to ask "is there a rule called FreeProxy Tor Engine?"
+        //  and log "Firewall rule present" when there was. Up to v2.0.4 there
+        //  always was, and it named
+        //  $INSTDIR\resources\app.asar.unpacked\Tor\tor\tor.exe -- the copy
+        //  inside the install directory, which exists and never runs.
+        //  setupWritableTor() above copies the bundle to ProgramData and starts
+        //  THAT tor.exe, because tor needs a writable DataDirectory beside it.
+        //  WFP matches a process to a rule by image path, so a rule for the
+        //  wrong path is a rule for a different program: the check passed, the
+        //  log said present, and the binary that actually opened sockets was
+        //  covered by nothing this app had asked for. Four releases of a healthy
+        //  green line for a rule that did not apply.
+        //
+        //  So: read the rule back in verbose mode and require our own path to be
+        //  in it. The path is matched case-insensitively as a plain substring
+        //  rather than by parsing the "Program:" label, because that label is
+        //  localised and this must work on a Windows that is not in English.
+        const fwFix = (ruleName, exePath, what) => {
+            if (!exePath || !fs.existsSync(exePath)) {
+                Logger.debug('Firewall self-heal skipped, no such binary',
+                             { rule: ruleName, path: exePath });
+                return;
             }
-        } catch(e) {
-            Logger.warn('Firewall rule missing -- adding automatically');
-            const torExePath = path.join(torDir, 'tor.exe');
+            let out = '';
             try {
-                execSync(
-                    `netsh advfirewall firewall add rule name="FreeProxy Tor Engine" dir=out action=allow program="${torExePath}" enable=yes profile=any`,
-                    { windowsHide: true }
-                );
-                Logger.success('Firewall rule added');
-            } catch(e2) { Logger.warn('Could not add firewall rule (dev mode ok)', { err: e2.message }); }
-        }
+                out = execSync('netsh advfirewall firewall show rule ' +
+                               `name="${ruleName}" verbose`,
+                               { windowsHide: true, encoding: 'utf8' });
+            } catch (e) { out = ''; }          // netsh exits non-zero when absent
+            if (out.toLowerCase().includes(exePath.toLowerCase())) {
+                Logger.debug('Firewall rule present and pointing at the right ' +
+                             'binary', { rule: ruleName });
+                return;
+            }
+            const had = out.trim().length > 0;
+            Logger.warn(had
+                ? 'Firewall rule exists but does NOT name the binary that runs -- ' +
+                  'rebuilding it'
+                : 'Firewall rule missing -- adding automatically',
+                { rule: ruleName, shouldBe: exePath });
+            try {
+                //  Delete first: netsh happily keeps two rules under one name,
+                //  and leaving the stale one behind means the machine carries an
+                //  allow rule for a binary in Program Files that this app never
+                //  starts -- which is exactly the leftover being fixed here.
+                try {
+                    execSync(`netsh advfirewall firewall delete rule name="${ruleName}"`,
+                             { windowsHide: true, stdio: 'ignore' });
+                } catch (e) {}
+                execSync(`netsh advfirewall firewall add rule name="${ruleName}" ` +
+                         `dir=out action=allow program="${exePath}" enable=yes ` +
+                         `profile=any description="FreeProxy VPN -- ${what}"`,
+                         { windowsHide: true });
+                Logger.success('Firewall rule now names the running binary',
+                               { rule: ruleName, program: exePath });
+            } catch (e2) {
+                Logger.warn('Could not repair the firewall rule (dev mode ok)',
+                            { rule: ruleName, err: e2.message });
+            }
+        };
+        fwFix('FreeProxy Tor Engine', torExePath, 'Tor engine');
+        fwFix('FreeProxy Bridge Transport',
+              path.join(torDir, 'pluggable_transports', 'lyrebird.exe'),
+              'obfs4 bridge transport');
+        fwFix('FreeProxy App', process.execPath, 'application');
 
         //  Self-heal the boot pass, for the same reason and in the same spirit.
         //
@@ -1057,23 +1516,245 @@ function runAdminApp() {
     //  Giving http=/https= their own entry pointing at Tor's
     //  HTTPTunnelPort means those apps get a proxy that actually speaks
     //  their protocol, and their traffic goes through Tor as well.
+    //  One spelling of the WinINET key, so a read-back can never be pointed at
+    //  a different key from the write it is checking.
+    const INET_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+
+    //  ── The split-tunnel list ───────────────────────────────────────
+    //  bypassToProxyOverride() is at MODULE scope, just above runAdminApp().
+    //  It moved there when forceAllBrowsersOntoProxy() started writing the
+    //  user's list into Chromium's ProxyBypassList as well: that function is
+    //  at module scope and cannot see into this closure, and the comment on
+    //  the mapping itself already records what happened the last time this
+    //  app had two copies of it.
+
+    //  Returns the command LIST, not a joined script, so the caller can put it
+    //  through runBatLines() and get an exit code that means "all three reg
+    //  writes worked" rather than "the third one did".
     function buildProxyBat(socksPort, httpPort, bypassList) {
-        let fp = '<local>';
-        if (bypassList && bypassList.trim()) {
-            const parts = bypassList.split(';')
-                .map(s => { const c = s.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/[\*\s]/g, ''); return c ? `*${c}*` : ''; })
-                .filter(Boolean);
-            if (parts.length) fp = parts.join(';') + ';<local>';
-        }
+        const fp = bypassToProxyOverride(bypassList);
         const proxyValue =
             `http=127.0.0.1:${httpPort};https=127.0.0.1:${httpPort};socks=127.0.0.1:${socksPort}`;
-        return [
-            '@echo off',
-            `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "${proxyValue}" /f`,
-            `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f`,
-            `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyOverride /t REG_SZ /d "${fp}" /f`,
-        ].join('\r\n');
+        return {
+            proxyValue, fp,
+            lines: [
+                `reg add "${INET_KEY}" /v ProxyServer /t REG_SZ /d "${proxyValue}" /f`,
+                `reg add "${INET_KEY}" /v ProxyEnable /t REG_DWORD /d 1 /f`,
+                `reg add "${INET_KEY}" /v ProxyOverride /t REG_SZ /d "${fp}" /f`,
+            ],
+        };
     }
+
+    //  Write the WinINET proxy AND prove it landed. Three values, three
+    //  read-backs; anything that disagrees is returned to the caller so the
+    //  connect can report a real failure instead of a green tick.
+    async function applyWinInetProxy(socksPort, httpPort, bypassList) {
+        const b = buildProxyBat(socksPort, httpPort, bypassList);
+        const r = await runBatLines(getScriptPath('fp_conn.bat'), b.lines);
+        if (!r.ok) {
+            return { ok: false, reason: `reg add failed (exit ${r.code})`,
+                     failedCommand: r.failedCommand || null };
+        }
+        const [server, enable, override] = await Promise.all([
+            regRead(INET_KEY, 'ProxyServer'),
+            regRead(INET_KEY, 'ProxyEnable'),
+            regRead(INET_KEY, 'ProxyOverride'),
+        ]);
+        //  ProxyEnable is a DWORD, so reg prints it as 0x1.
+        const enableOk = /^0x0*1$/i.test(String(enable || ''));
+        if (server !== b.proxyValue || !enableOk || override !== b.fp) {
+            Logger.error('WinINET proxy read-back does NOT match what was written', {
+                wroteServer: b.proxyValue, readServer: server,
+                readEnable: enable, wroteOverride: b.fp, readOverride: override });
+            return { ok: false, reason: 'read-back mismatch',
+                     read: { server, enable, override } };
+        }
+        Logger.success('WinINET proxy set and verified', {
+            server: b.proxyValue, override: b.fp });
+        return { ok: true };
+    }
+
+    // ── The machine-wide proxy: WinHTTP ───────────────────────────────
+    //  A SECOND, SEPARATE STORE. Everything above lands in
+    //  HKCU\...\Internet Settings, which is WinINET and is per-user: browsers,
+    //  Office, anything built on the old wininet.dll. WinHTTP is the other half
+    //  of Windows' HTTP stack -- it is what services, scheduled tasks, the
+    //  Store, Windows Update and most .NET/PowerShell HTTP clients use, it is
+    //  per-MACHINE, and it does not read the per-user key at all. An app that
+    //  writes only the WinINET key and calls the result a VPN has left every
+    //  SYSTEM-context program on the box talking directly to the internet.
+    //
+    //  This was claimed in a comment block ("Also reinforced with: (1) netsh
+    //  winhttp machine proxy") from v2.0.1 onward and never written. It is
+    //  written now.
+    //
+    //  http= and https= only, deliberately: WinHTTP's SOCKS support is SOCKS4
+    //  and cannot carry a hostname, so pointing it at 9050 would send bare IPv4
+    //  addresses to Tor -- resolved locally first, which is the DNS leak this
+    //  whole layer exists to prevent. 9080 is Tor's own HTTPTunnelPort and does
+    //  resolve remotely.
+    //
+    //  It persists across reboots until something resets it, so every exit path
+    //  has to. Five do: resetWinHttpProxy() below (disconnect + kill switch),
+    //  startupCleanup(), reverseLeakProtection(), sweepNetwork() in
+    //  lib/installer-tasks.js, and restore-internet.bat.
+    //
+    //  runQuiet(), not runBatLines(): a .bat would put `<local>` through cmd.exe,
+    //  where `<` is a redirection operator and the whole bypass list becomes a
+    //  syntax error. An execFile args array never reaches a shell.
+    function winHttpBypass(bypassList) {
+        //  The same normaliser the WinINET override uses, so the two stores can
+        //  never disagree about which hosts skip Tor, then semicolons to spaces
+        //  because that is the form netsh's own documentation takes.
+        return bypassToProxyOverride(bypassList).split(';')
+               .filter(Boolean).join(' ');
+    }
+
+    //  Token sets, not string equality. netsh is free to reprint the bypass list
+    //  with the other separator, in another order, or with its padding -- none of
+    //  which changes what it means. Comparing the raw strings would make this
+    //  warn on every healthy machine, and a warning that always fires is a
+    //  warning nobody reads.
+    const winHttpTokens = s => new Set(String(s || '').toLowerCase()
+                                       .split(/[;\s]+/).filter(Boolean));
+
+    async function applyWinHttpProxy(httpPort, bypassList) {
+        const server = `http=127.0.0.1:${httpPort};https=127.0.0.1:${httpPort}`;
+        const bypass = winHttpBypass(bypassList);
+        const args   = ['winhttp', 'set', 'proxy', `proxy-server=${server}`];
+        if (bypass) args.push(`bypass-list=${bypass}`);
+        const set = await runQuiet('netsh.exe', args);
+        if (!set.ok) {
+            //  Measured unelevated on this machine: exit 1, "Error writing proxy
+            //  settings. (5) Access is denied." -- so the real reason reaches the
+            //  caller rather than a bare exit code.
+            return { ok: false, reason: 'netsh winhttp set proxy failed (exit ' +
+                     set.code + '): ' + String(set.out || '')
+                     .replace(/\s+/g, ' ').trim().slice(0, 200) };
+        }
+        //  Read it back out of Windows rather than trusting an exit code.
+        //
+        //  Matched as a substring of the whole output, never by parsing the
+        //  "Proxy Server(s) :" label -- that label is localised, and this has to
+        //  work on a Windows that is not in English.
+        //
+        //  The load-bearing assertion is that host:port is there AT ALL. The
+        //  pre-state, measured on this machine, prints "Direct access (no proxy
+        //  server)." and contains no address, so finding 127.0.0.1:<port> is
+        //  proof the write took. The per-scheme prefixes are checked too, but
+        //  only as a warning: an exit-0 netsh stores the string it was handed,
+        //  and failing the whole layer over a printing difference would report
+        //  lost coverage that was not lost.
+        const show = await runQuiet('netsh.exe', ['winhttp', 'show', 'proxy']);
+        const out  = String(show.out || '');
+        const low  = out.toLowerCase();
+        const addr = `127.0.0.1:${httpPort}`;
+        if (!low.includes(addr)) {
+            //  Half-applied is not an outcome this is allowed to leave behind.
+            //  netsh said it wrote something and the read-back cannot find our
+            //  address, so SOMETHING is in the machine-wide store and nobody
+            //  knows what -- possibly a partial value, possibly the user's own
+            //  from before. Either way it now points somewhere this app did not
+            //  choose, per-machine and across reboots. Reset it, then report the
+            //  failure: the same "nothing was left half-applied" contract the
+            //  WinINET path makes one function above.
+            await resetWinHttpProxy('read-back did not match, undoing');
+            return { ok: false, reason: 'netsh reported success but the read-back ' +
+                     'does not contain ' + addr + ' -- read: ' +
+                     out.replace(/\s+/g, ' ').trim().slice(0, 200) +
+                     ' (the machine proxy was reset, not left half-applied)' };
+        }
+        const miss = [`http=${addr}`, `https=${addr}`].filter(n => !low.includes(n));
+        if (miss.length) {
+            Logger.warn('WinHTTP has this app\'s proxy address but did not print it ' +
+                        'per scheme. Traffic is going to the tunnel; if a scheme is ' +
+                        'genuinely missing it would go direct instead.',
+                        { expected: miss,
+                          read: out.replace(/\s+/g, ' ').trim().slice(0, 200) });
+        }
+        if (bypass) {
+            const wrote = winHttpTokens(bypass), read = winHttpTokens(out);
+            const lost = [...wrote].filter(t => !read.has(t));
+            if (lost.length) {
+                //  A warning, not a failure. The proxy itself is in place, and
+                //  that is the part that decides whether traffic is tunnelled; a
+                //  bypass entry Windows dropped means that host goes THROUGH Tor
+                //  instead of around it, which is the safe direction to be wrong
+                //  in. Named anyway, because the user chose those hosts.
+                Logger.warn('Windows did not keep every split-tunnel entry in the ' +
+                            'machine-wide bypass list. Those hosts will go through ' +
+                            'Tor rather than around it.', { dropped: lost });
+            }
+        }
+        Logger.success('Machine-wide WinHTTP proxy set and verified -- Windows ' +
+                       'services and non-browser HTTP clients now go through Tor too',
+                       { server, bypass: bypass || '(none)' });
+        return { ok: true };
+    }
+
+    //  Unconditional and never fatal. It runs on disconnect, on the way out, and
+    //  at startup after a crash; in every one of those the alternative to
+    //  resetting is a machine whose services point at a port nothing answers.
+    async function resetWinHttpProxy(why) {
+        const r = await runQuiet('netsh.exe', ['winhttp', 'reset', 'proxy']);
+        if (r.ok) {
+            Logger.info('Machine-wide WinHTTP proxy reset to direct (' + why + ')');
+            return true;
+        }
+        Logger.warn('netsh winhttp reset proxy did not succeed. If Windows Update ' +
+                    'or the Store cannot connect, run "netsh winhttp reset proxy" ' +
+                    'from an administrator prompt, or use the Restore Internet ' +
+                    'shortcut in the Start Menu.',
+                    { why, code: r.code,
+                      out: String(r.out || '').replace(/\s+/g, ' ').trim().slice(0, 200) });
+        return false;
+    }
+
+    //  The fire-and-forget twin, for the paths that cannot await anything: a
+    //  Windows shutdown or logoff, Quit from the tray, app.quit() from anywhere
+    //  else. Detached and unref'd, so netsh outlives this process.
+    //
+    //  It matters more here than the firewall policy does, because a leftover
+    //  WinHTTP proxy is SILENT. The machine reboots, Windows Update and the Store
+    //  stop working, and nothing anywhere tells the user a proxy is set -- there
+    //  is no WinHTTP dialog the way there is for the browser proxy.
+    //  startupCleanup() clears it at the next launch, but "the next launch" is a
+    //  launch the user has no reason to perform.
+    function resetWinHttpProxyNoWait() {
+        try {
+            spawn('netsh.exe', ['winhttp', 'reset', 'proxy'],
+                  { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+        } catch (e) { /* startupCleanup() and restore-internet.bat are the backstops */ }
+    }
+
+    //  ── What is deliberately NOT done here: ProxySettingsPerUser ──
+    //  HKLM\SOFTWARE\Policies\...\Internet Settings\ProxySettingsPerUser = 0
+    //  moves WinINET's proxy from each user's HKCU to a single machine-wide HKLM
+    //  value, so a SECOND user logged on at the same time would inherit it. That
+    //  is the one gap the two functions above cannot close, and it is left open
+    //  on purpose:
+    //
+    //    * The residual gap is tiny. A second user's Chrome and Edge are already
+    //      covered machine-wide by the HKLM ProxySettings policy that
+    //      forceAllBrowsersOntoProxy() writes, their services by the WinHTTP
+    //      value above, and everything of theirs that speaks TCP by the
+    //      full-device tunnel, which is not per-user at all. What is left is
+    //      proxy-aware non-Chromium software, belonging to a second
+    //      simultaneously logged-on user, with the tunnel switched off.
+    //
+    //    * The cost of closing it is a bricking risk across every account. Once
+    //      the policy is 0, the per-user proxy UI stops being authoritative --
+    //      so a crash that loses the restore journal leaves every user on that PC
+    //      with a machine-wide proxy pointing at a dead port and no working
+    //      Settings page to clear it. That is a worse failure than the leak it
+    //      prevents, and it lands on people who never installed this app.
+    //
+    //    * It is a Group Policy value. On a domain-joined machine an admin may
+    //      own it already, and this app has a standing rule that a policy it did
+    //      not write survives untouched.
+    //
+    //  Said out loud rather than left as an absence, because "whole machine" has
+    //  to mean something checkable.
 
     // ════════════════════════════════════════════════════════
     //  LEAK PROTECTION
@@ -1102,7 +1783,7 @@ function runAdminApp() {
     //  milliseconds and takes effect immediately.
     // ════════════════════════════════════════════════════════
     // ── The DNS lock, defined once ────────────────────────────────────
-    //  Three code paths install or remove these two rules -- connect/switch
+    //  Three code paths install or remove these three rules -- connect/switch
     //  (applyLeakProtection), disconnect (reverseLeakProtection) and the Kill
     //  Switch (killSwitchLeakLock) -- so the netsh lines live here rather than
     //  being typed out three times. A rule NAME that drifts between the place
@@ -1110,13 +1791,27 @@ function runAdminApp() {
     //  off, and for a DNS block that means a machine that cannot resolve
     //  anything after the app is gone.
     //
-    //  The same two names are listed in FW_RULES in lib/installer-tasks.js and
-    //  in the customUnInstall firewall section of installer.nsh, which is what
-    //  removes them when the program files are already gone.
+    //  The same names are listed in FW_RULES in lib/installer-tasks.js, in the
+    //  customUnInstall firewall section of installer.nsh -- which is what removes
+    //  them when the program files are already gone -- and in the recovery
+    //  script Containment.writeRecovery() drops in ProgramData.
+    //  UDP/53 and TCP/53 are two rules with two names, not two rules sharing
+    //  one. They shared 'FreeProxy Block DNS Out' up to v2.0.4, and that made
+    //  dnsLockEnsure() below unable to do the one thing it exists for: a `show
+    //  rule` on the shared name succeeded as soon as EITHER protocol was
+    //  present, so a pair where the second `add` had failed read as healthy and
+    //  was never rebuilt -- TCP/53 open to the internet for the rest of the
+    //  session, and the check reporting "DNS lock already in place".
+    //
+    //  `legacyDns` is the pre-2.0.5 name. It is deleted, never added. An upgrade
+    //  inherits a machine that still has it, and a rule this build does not know
+    //  the name of is a rule that never comes off.
     const DNS_LOCK_RULES = {
-        dns: 'FreeProxy Block DNS Out',
-        dot: 'FreeProxy Block DoT Out',
+        dnsUdp: 'FreeProxy Block DNS Out UDP',
+        dnsTcp: 'FreeProxy Block DNS Out TCP',
+        dot:    'FreeProxy Block DoT Out',
     };
+    const DNS_LOCK_LEGACY = 'FreeProxy Block DNS Out';
     //  remoteip covers every unicast address EXCEPT 127/8, so the block can
     //  never reach Tor's own DNSPort on 127.0.0.1:53. Windows Firewall
     //  resolves block before allow, so a rule that did include loopback would
@@ -1125,12 +1820,14 @@ function runAdminApp() {
     //  means this does not silently depend on that.
     const NOT_LOOPBACK = '0.0.0.0-126.255.255.255,128.0.0.0-255.255.255.255';
     const dnsLockRemove = () => [
-        `netsh advfirewall firewall delete rule name="${DNS_LOCK_RULES.dns}" 2>nul`,
+        `netsh advfirewall firewall delete rule name="${DNS_LOCK_RULES.dnsUdp}" 2>nul`,
+        `netsh advfirewall firewall delete rule name="${DNS_LOCK_RULES.dnsTcp}" 2>nul`,
         `netsh advfirewall firewall delete rule name="${DNS_LOCK_RULES.dot}" 2>nul`,
+        `netsh advfirewall firewall delete rule name="${DNS_LOCK_LEGACY}" 2>nul`,
     ];
     const dnsLockAdd = () => [
-        `netsh advfirewall firewall add rule name="${DNS_LOCK_RULES.dns}" dir=out action=block protocol=UDP remoteport=53 remoteip=${NOT_LOOPBACK} enable=yes profile=any description="FreeProxy VPN -- DNS may only go to Tor on 127.0.0.1"`,
-        `netsh advfirewall firewall add rule name="${DNS_LOCK_RULES.dns}" dir=out action=block protocol=TCP remoteport=53 remoteip=${NOT_LOOPBACK} enable=yes profile=any description="FreeProxy VPN -- DNS may only go to Tor on 127.0.0.1"`,
+        `netsh advfirewall firewall add rule name="${DNS_LOCK_RULES.dnsUdp}" dir=out action=block protocol=UDP remoteport=53 remoteip=${NOT_LOOPBACK} enable=yes profile=any description="FreeProxy VPN -- DNS may only go to Tor on 127.0.0.1"`,
+        `netsh advfirewall firewall add rule name="${DNS_LOCK_RULES.dnsTcp}" dir=out action=block protocol=TCP remoteport=53 remoteip=${NOT_LOOPBACK} enable=yes profile=any description="FreeProxy VPN -- DNS may only go to Tor on 127.0.0.1"`,
         //  DNS-over-TLS has a port of its own and Tor cannot carry it, so a
         //  stub resolver that falls back to :853 would be a leak the SOCKS
         //  proxy never sees. DoH rides 443 and cannot be separated by port --
@@ -1149,13 +1846,13 @@ function runAdminApp() {
     //  be the moment the lock is missing.
     //
     //  So: look first, and only rebuild if something is actually wrong. netsh
-    //  exits non-zero when no rule matches the name, which also catches the
-    //  half-built pair (`add` succeeded for one protocol and failed for the
-    //  other) that a plain "add only if absent" would leave broken forever --
-    //  either name missing rebuilds both.
+    //  exits non-zero when no rule matches the name, and because UDP/53 and
+    //  TCP/53 now carry names of their own, "one of the three is missing" is
+    //  finally a question this can ask. Any miss rebuilds all three.
     const dnsLockEnsure = () => [
         'set FP_DNSLOCK=1',
-        `netsh advfirewall firewall show rule name="${DNS_LOCK_RULES.dns}" >nul 2>&1 || set FP_DNSLOCK=0`,
+        `netsh advfirewall firewall show rule name="${DNS_LOCK_RULES.dnsUdp}" >nul 2>&1 || set FP_DNSLOCK=0`,
+        `netsh advfirewall firewall show rule name="${DNS_LOCK_RULES.dnsTcp}" >nul 2>&1 || set FP_DNSLOCK=0`,
         `netsh advfirewall firewall show rule name="${DNS_LOCK_RULES.dot}" >nul 2>&1 || set FP_DNSLOCK=0`,
         'if "%FP_DNSLOCK%"=="1" echo DNS lock already in place',
         'if "%FP_DNSLOCK%"=="0" (',
@@ -1256,6 +1953,16 @@ function runAdminApp() {
     async function reverseLeakProtection() {
         Logger.info('Reversing DNS + IPv6 leak protection...');
 
+        //  First, because it is the one leftover that leaves the PC with no
+        //  internet at all rather than with a misconfiguration. Every caller of
+        //  this function wants the machine back to normal, and a default-deny
+        //  policy is the loudest way to be not-normal. Idempotent: disable()
+        //  reads the policy back and says so if it did not take.
+        if (containment && containment.armed) {
+            try { await containment.disable({ keepRules: false }); }
+            catch (e) { Logger.error('Containment disarm: ' + e.message); }
+        }
+
         // Remove hosts file entries left by older builds
         const hostsPath = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
         try {
@@ -1270,6 +1977,19 @@ function runAdminApp() {
         const bat = getScriptPath('fp_leak_off.bat');
         const content = [
             '@echo off',
+            //  ── The machine-wide proxy, back to direct ────────────────
+            //  Every caller of this function is a "put the PC back to normal"
+            //  path, and each of them clears the per-user WinINET keys in its own
+            //  little .bat first. None of them touched WinHTTP, because until
+            //  v2.0.5 nothing set it. Now applyWinHttpProxy() does, it is
+            //  per-machine, and it survives a reboot -- so it has to come off
+            //  here, in the one function they all share, rather than in four
+            //  separate scripts that can drift.
+            //
+            //  A no-op on a machine that never had one, which is why it is
+            //  unconditional instead of gated on a flag a killed process may
+            //  never have written.
+            `netsh winhttp reset proxy`,
             // ── DNS: back to DHCP (netsh, immediate) ──────────────────
             `for /f "tokens=3*" %%A in ('netsh interface show interface ^| findstr /i "connected"') do (`,
             `    netsh interface ipv4 set dnsserver "%%B" dhcp 2>nul`,
@@ -1311,6 +2031,16 @@ function runAdminApp() {
             // Dead proxy port -- blocks all internet traffic
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "socks=127.0.0.1:9999" /f`,
             `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f`,
+            //  ...and the same dead port in the OTHER proxy store, for the same
+            //  reason the DNS firewall rules below exist. The two reg writes above
+            //  are WinINET and cover browsers; Windows Update, the Store, the
+            //  telemetry services and every .NET/PowerShell HTTP client read
+            //  WinHTTP instead and would have carried on straight out to the
+            //  internet while the app displayed "all traffic blocked".
+            //
+            //  No bypass-list on purpose: this is the block state, so nothing is
+            //  meant to get out around it. reverseLeakProtection() resets it.
+            `netsh winhttp set proxy proxy-server="http=127.0.0.1:9999;https=127.0.0.1:9999"`,
             // DNS locked -- dnscache stopped, Tor gone, so DNS fails safely
             `net stop dnscache /y 2>nul`,
             `for /f %%i in ('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces"') do reg add "%%i" /v NameServer /t REG_SZ /d "127.0.0.1" /f 2>nul`,
@@ -1341,7 +2071,41 @@ function runAdminApp() {
             `reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f`,
         ].join('\r\n');
         await runBat(bat, content);
-        Logger.warn('Kill Switch LOCKED -- internet blocked, DNS locked, location blocked, IPv6 off');
+        //  ── The part that makes "internet blocked" true ──
+        //  Every line above depends on the program at the other end consulting
+        //  Windows: a WinINET proxy only binds proxy-aware apps, and a NameServer
+        //  only binds programs that use the system resolver. A game, a torrent
+        //  client or a mail client with its own hardcoded DNS sailed past all of
+        //  it, over the real IP, while this function logged "internet blocked".
+        //  That was the single least honest claim in this app.
+        //
+        //  Default-deny outbound is the same sentence enforced by the Windows
+        //  Filtering Platform, per process, for every process on the machine.
+        //  No tunLocalIp is passed: the Kill Switch fires when there is no
+        //  tunnel, so there is nothing to let through.
+        let sealed = false, why = 'this build has no containment layer';
+        if (containment) {
+            const r = containment.armed
+                ? { ok: true }
+                : await containment.enable({ allowLan: true });
+            sealed = !!r.ok;
+            if (!r.ok) why = r.reason || 'unknown';
+        }
+        if (sealed) {
+            Logger.warn('Kill Switch LOCKED -- the Windows firewall is now dropping ' +
+                'outbound traffic for every program on this PC. DNS locked, ' +
+                'location blocked, IPv6 off. If this app ever dies while locked, ' +
+                'run ' + containment.recoveryBat + ' as administrator.');
+        } else {
+            //  Named, not softened. The user turned on a switch called Kill
+            //  Switch; being told it half-worked is the only acceptable answer.
+            Logger.error('Kill Switch is PARTIAL: proxy-aware programs and the ' +
+                'system resolver are blocked, but a program that ignores both can ' +
+                'still reach the internet over your real IP. Reason: ' + why);
+            reportFault('Kill Switch could not block everything',
+                'Proxy-aware programs are blocked, but programs with their own ' +
+                'networking are not. Reason: ' + why);
+        }
     }
 
     //  Point the app's own window at Tor, at nothing, or at the open
@@ -1376,11 +2140,50 @@ function runAdminApp() {
     function createWindow() {
         Logger.info('Creating BrowserWindow...');
 
-        // Geolocation permission auto-grant
+        // ── Permissions ───────────────────────────────────
+        //  This used to be `callback(true)` for everything, and
+        //  setPermissionCheckHandler(() => true) beside it. The comment above
+        //  it said "Geolocation permission auto-grant", and geolocation IS the
+        //  one this app needs: the spoof in renderer.js replaces
+        //  navigator.geolocation, and a permission prompt in front of it would
+        //  be a prompt the user has to answer before their own VPN can show
+        //  them the country it put them in.
+        //
+        //  Everything else in that list was granted as a side effect --
+        //  'media' (camera and microphone), 'midi-sysex', 'hid', 'serial',
+        //  'usb', 'display-capture', 'clipboard-read', 'notifications',
+        //  'openExternal'. Nothing in this app asks for any of them, so
+        //  granting them bought nothing and the list only had to be wrong once.
+        //
+        //  Two conditions, not one: the permission has to be geolocation AND
+        //  the asking frame has to be this app's own file:// document. That
+        //  second half is what makes the rule hold if some future change ever
+        //  loads anything else into this session -- an allowlist keyed only on
+        //  the permission name would follow it wherever it went.
+        const ALLOWED_PERMISSIONS = new Set(['geolocation']);
+        const isOwnWindow = wc => {
+            try {
+                if (!wc) return false;
+                const u = wc.getURL() || '';
+                return u.startsWith('file://') &&
+                       u.toLowerCase().includes('index.html');
+            } catch (e) { return false; }
+        };
         session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => {
-            callback(true);
+            const allow = ALLOWED_PERMISSIONS.has(permission) && isOwnWindow(wc);
+            if (!allow) {
+                Logger.warn('Permission request DENIED', {
+                    permission, url: (() => { try { return wc && wc.getURL(); }
+                                              catch (e) { return '?'; } })() });
+            }
+            callback(allow);
         });
-        session.defaultSession.setPermissionCheckHandler(() => true);
+        //  The synchronous half, which is what navigator.permissions.query and
+        //  Chromium's own internal checks read. It has to agree with the
+        //  handler above -- a 'granted' here and a deny there is a page that is
+        //  told it may and then cannot.
+        session.defaultSession.setPermissionCheckHandler(
+            (wc, permission) => ALLOWED_PERMISSIONS.has(permission) && isOwnWindow(wc));
 
         mainWindow = new BrowserWindow({
             width: 1000, height: 670, resizable: false, autoHideMenuBar: true,
@@ -1413,11 +2216,127 @@ function runAdminApp() {
     }
 
     // ── WebSocket server ──────────────────────────────────
-    const wss = new WebSocket.Server({ port: 8080 });
-    Logger.info('WebSocket server started on :8080');
+    //  host: '127.0.0.1' -- a real exposure, not a theoretical one. ws.Server
+    //  with no host binds 0.0.0.0/::, so on any network this machine joins,
+    //  every other device on it could open this socket and send CONNECT /
+    //  DISCONNECT / CHANGE_SERVER / TOGGLE_KS / UPDATE_BYPASS. UPDATE_BYPASS is
+    //  the worst of the five: it feeds a string into an elevated registry write.
+    //  The extension has always dialled ws://127.0.0.1:8080
+    //  (Extension/background.js:18), so nothing legitimate loses its reach.
+    //
+    //  verifyClient then refuses any BROWSER PAGE origin. Same-origin policy
+    //  does not cover ws://, so a tab on any website can open a socket to
+    //  loopback -- without this, one visited page could drive the VPN. Browsers
+    //  always send Origin on a page-initiated handshake, and an extension
+    //  worker's origin is chrome-extension:// or moz-extension://, so the rule
+    //  is enforceable WITHOUT an extension-id allowlist -- which matters,
+    //  because this build ships no manifest `key`, the id is install-derived,
+    //  and a guessed id list would lock the extension out of its own app.
+    const EXT_ORIGIN = /^(chrome|moz|edge|safari-web)-extension:\/\//i;
+    const wss = new WebSocket.Server({
+        port: 8080,
+        host: '127.0.0.1',
+        //  A frame cap, so a hostile local client cannot make the main process
+        //  buffer without bound. The largest thing sent here is a bypass list.
+        maxPayload: 64 * 1024,
+        verifyClient: ({ origin }) => {
+            if (!origin || EXT_ORIGIN.test(origin)) return true;
+            Logger.warn('WS handshake refused -- not an extension origin', { origin });
+            return false;
+        },
+    });
+    //  An 'error' on a ws.Server with no listener is an unhandled 'error' event,
+    //  and that is a hard crash of the main process at startup -- the window
+    //  never appears. EADDRINUSE is the case that actually happens: a stale copy
+    //  of this app, or anything else holding :8080. The VPN does not need this
+    //  socket at all (only the browser extension does), so the right answer is
+    //  to say so and keep running, not to die.
+    wss.on('error', err => {
+        if (err && err.code === 'EADDRINUSE') {
+            reportFault('WebSocket port busy',
+                'Port 8080 is already in use, so the browser extension cannot ' +
+                'reach this app. The VPN itself still works. Close the other copy ' +
+                'of FreeProxy VPN (or whatever holds :8080) and restart.',
+                { port: 8080 });
+        } else {
+            reportFault('WebSocket server error', (err && err.message) || String(err),
+                        { code: err && err.code });
+        }
+    });
+    //  Logged from the event, not from the line after the constructor: ws binds
+    //  asynchronously, so the old "started on :8080" was printed before anything
+    //  was listening and printed identically when the bind went on to fail.
+    wss.on('listening', () =>
+        Logger.success('WebSocket server listening on 127.0.0.1:8080'));
 
-    let appState = { connected: false, serverCode: 'us', killSwitch: false, bypassList: '',
+    //  ── Settings that outlive the process ──
+    //  bypassList used to live only in this object, so a split-tunnel list the
+    //  user typed was gone the next time the app started -- while the registry
+    //  ProxyOverride it had produced was still on the machine. The two could
+    //  not be reconciled because one half was never written down. killSwitch
+    //  rides along for the same reason: it is a safety preference, and a safety
+    //  preference that silently resets to off on restart is a fault.
+    const SETTINGS_FILE = getScriptPath('settings.json');
+    function loadSettings() {
+        try {
+            const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+            return {
+                //  isSpoofableCc, not `typeof === 'string'`. This file is in
+                //  the app's own state directory, so it is writable by any
+                //  process running as this user, and serverCode read out of it
+                //  is what applyGeolocationSpoof(), stateForWire() and the
+                //  torrc's ExitNodes line are all built from. A string this
+                //  app cannot place on the map is not a country to fall back
+                //  to; 'us' is, and it is the same default a missing file
+                //  gets.
+                serverCode: isSpoofableCc(s.serverCode) ? String(s.serverCode).toLowerCase() : 'us',
+                killSwitch: s.killSwitch === true,
+                bypassList: typeof s.bypassList === 'string' ? s.bypassList : '',
+                //  ── The one escape hatch for the TUN layer ──
+                //  Default ON, because whole-device coverage is the point of
+                //  this release: without it, an app that ignores every proxy
+                //  setting is either leaking (Kill Switch off) or simply
+                //  blocked (Kill Switch on), and neither is a VPN.
+                //
+                //  It is settable only by editing settings.json, deliberately.
+                //  There is no new toggle in the window: the UI design is
+                //  frozen, and a user who needs UDP back -- a game, a video
+                //  call -- can turn it off in one line without waiting for a
+                //  rebuild. Absent or malformed reads as ON.
+                fullTunnel: s.fullTunnel !== false,
+            };
+        } catch (e) { return { serverCode: 'us', killSwitch: false, bypassList: '',
+                               fullTunnel: true }; }
+    }
+    let _saveTimer = null;
+    function saveSettings() {
+        //  Debounced: CHANGE_SERVER and UPDATE_BYPASS can arrive in bursts from
+        //  the popup, and this is a synchronous write on the main thread.
+        clearTimeout(_saveTimer);
+        _saveTimer = setTimeout(() => {
+            try {
+                fs.writeFileSync(SETTINGS_FILE, JSON.stringify({
+                    serverCode: appState.serverCode,
+                    killSwitch: appState.killSwitch,
+                    bypassList: appState.bypassList,
+                    fullTunnel: wantFullTunnel,
+                }, null, 2), 'utf8');
+            } catch (e) { Logger.warn('Could not save settings: ' + e.message); }
+        }, 400);
+    }
+
+    const _saved = loadSettings();
+    let appState = { connected: false, serverCode: _saved.serverCode,
+                     killSwitch: _saved.killSwitch, bypassList: _saved.bypassList,
                      servers: {}, since: null };
+    //  NOT part of appState, and not sent to the renderer or the extension:
+    //  appState is the wire format for both, and adding a field there means
+    //  changing what two other codebases receive. This is a main-process
+    //  preference only. See loadSettings() for why it exists at all.
+    let wantFullTunnel = _saved.fullTunnel;
+    Logger.info('Settings loaded', { serverCode: appState.serverCode,
+        killSwitch: appState.killSwitch, bypassChars: appState.bypassList.length,
+        fullTunnel: wantFullTunnel });
 
     //  The most recent connection-progress record, kept so a popup that
     //  opens in the middle of a 30-second bootstrap can be told where it
@@ -1439,7 +2358,7 @@ function runAdminApp() {
     //  precisely the mismatch the ipleak.net test exposed.
     function stateForWire() {
         const coord = appState.connected
-            ? GEO_COORDS[(appState.serverCode || '').toLowerCase()]
+            ? geoCoord(appState.serverCode)
             : null;
         return {
             ...appState,
@@ -1783,7 +2702,26 @@ function runAdminApp() {
         Logger.debug('Extension WS client connected');
         ws.send(JSON.stringify({ type: 'STATE_SYNC', state: stateForWire() }));
         ws.on('message', async raw => {
-            const d = JSON.parse(raw);
+            //  ── Everything below this line came off a socket ──
+            //  The server is bound to 127.0.0.1 and filtered by Origin, which
+            //  narrows the sender to a browser extension on this PC -- it does
+            //  not make the frame trustworthy. Any page that can reach loopback
+            //  can send bytes here, and this handler is `async`: an exception
+            //  thrown out of it is an unhandled rejection, not a caught error,
+            //  and one malformed frame would take the whole process down with
+            //  the tunnel still up. So: parse defensively, then validate the
+            //  shape of every field that is used, and drop anything else.
+            let d;
+            try { d = JSON.parse(raw); } catch (e) {
+                Logger.debug('Extension WS sent a frame that is not JSON; dropped',
+                             { bytes: raw && raw.length });
+                return;
+            }
+            if (!d || typeof d !== 'object' || Array.isArray(d) ||
+                typeof d.command !== 'string') {
+                Logger.debug('Extension WS frame has no string command; dropped');
+                return;
+            }
             //  ANSWERED, not swallowed. The extension pings every 20 s to hold
             //  its MV3 service worker above Chromium's ~30 s idle cut-off, and
             //  only WebSocket TRAFFIC resets that timer -- so a ping nothing
@@ -1808,11 +2746,62 @@ function runAdminApp() {
                 pendingAsks.get(d.id)?.finish(d.answer);
                 return;
             }
+
+            //  ── The two settings, also before the guard ──
+            //  These change appState and persist it; neither needs a window, and
+            //  both used to sit below `if (!wc) return` where a popup toggle made
+            //  with the app closed to the tray was accepted by the UI and then
+            //  silently dropped. The renderer is told only if it is there.
+            if (d.command === 'TOGGLE_KS') {
+                if (typeof d.enabled !== 'boolean') return;
+                appState.killSwitch = d.enabled;
+                saveSettings();
+                BrowserWindow.getAllWindows()[0]?.webContents
+                    ?.send('sync-ui-state', appState);
+                broadcastState();
+                Logger.info('Kill Switch ' + (d.enabled ? 'armed' : 'disarmed') +
+                            ' from the extension popup');
+                return;
+            }
+            if (d.command === 'UPDATE_BYPASS') {
+                //  A string, and capped. bypassToProxyOverride() splits this into
+                //  a ProxyOverride value and winHttpBypass() into netsh
+                //  arguments -- an unbounded string off a socket ends up in both.
+                if (typeof d.list !== 'string' || d.list.length > 4096) return;
+                //  applyLiveBypass() is what the renderer's own round trip calls:
+                //  it sets appState, persists, broadcasts, rewrites ProxyOverride
+                //  and keeps the WinHTTP copy in step. Called directly here so a
+                //  split-tunnel edit made from the popup with the app closed to
+                //  the tray reaches the registry instead of being dropped.
+                applyLiveBypass(d.list).catch(e =>
+                    Logger.warn('Split-tunnel update from the popup failed: ' + e.message));
+                BrowserWindow.getAllWindows()[0]?.webContents
+                    ?.send('sync-ui-state', appState);
+                return;
+            }
+
             const wc = BrowserWindow.getAllWindows()[0]?.webContents;
             if (!wc) return;
             if      (d.command === 'CONNECT')       wc.send('force-connect-ui');
             else if (d.command === 'DISCONNECT')    wc.send('force-disconnect-ui');
             else if (d.command === 'CHANGE_SERVER') {
+                //  A country this app actually has coordinates for, or nothing.
+                //  Off the wire this reaches establishConnection() and
+                //  GEO_COORDS[...] -- an unknown code would spoof `undefined`.
+                //
+                //  And it cannot reject a legitimate switch: the popup builds
+                //  its dropdown from appState.servers, which is only ever
+                //  assigned the output of spoofableOnly() -- both at the live
+                //  relay path and the built-in fallback -- and that function
+                //  drops every code GEO_COORDS has no entry for. So this test
+                //  is a superset of what the popup can offer. If servers ever
+                //  gets assigned something that has NOT been through
+                //  spoofableOnly, widen this to that set too.
+                if (typeof d.server !== 'string' || !isSpoofableCc(d.server)) {
+                    Logger.debug('Extension WS asked for an unknown server; dropped',
+                                 { server: String(d.server).slice(0, 32) });
+                    return;
+                }
                 //  Connected: this is a switch, not a re-label. Writing
                 //  serverCode here would make stateForWire() hand the browser
                 //  the new country's coordinates while the exit IP still
@@ -1824,18 +2813,410 @@ function runAdminApp() {
                     wc.send('force-switch-ui', d.server);
                 } else {
                     appState.serverCode = d.server;
+                    saveSettings();
                     wc.send('sync-ui-state', appState); broadcastState();
                 }
             }
-            else if (d.command === 'TOGGLE_KS')     { appState.killSwitch = d.enabled; wc.send('sync-ui-state', appState); broadcastState(); }
-            else if (d.command === 'UPDATE_BYPASS') { appState.bypassList = d.list; wc.send('sync-ui-state', appState); broadcastState(); }
         });
         ws.on('close', () => Logger.debug('Extension WS disconnected'));
     });
 
+    // ════════════════════════════════════════════════════════
+    //  THE TWO WHOLE-MACHINE LAYERS
+    //
+    //  Up to v2.0.0 this app set a WinINET proxy, a Chromium policy and an
+    //  extension pref. Everything that consulted none of those -- a game, an
+    //  installer, a mail client, a stub resolver -- went straight out over the
+    //  real IP. These two modules close that, and they do different halves of
+    //  it, so both are here:
+    //
+    //    TUNNEL      redirects. A Wintun adapter owns the route table and
+    //                tun2socks hands what arrives there to Tor's SOCKS5 port,
+    //                so a proxy-unaware app's TCP goes through Tor without the
+    //                app knowing. Up whenever the VPN is connected.
+    //    CONTAINMENT blocks. Default-deny outbound, so anything the tunnel
+    //                cannot carry (all UDP, ICMP, anything bound to the
+    //                physical NIC on purpose) is dropped rather than leaked.
+    //                Armed with the Kill Switch and never on its own -- it can
+    //                take the whole machine off the internet, so the user has
+    //                to have asked for that, and the Kill Switch IS that ask.
+    //
+    //  Order is not interchangeable. Arming goes tunnel-then-containment,
+    //  because containment needs the tunnel's local address to write the one
+    //  rule that lets in-tunnel traffic out (see ALLOW_RULES.tun). Disarming
+    //  goes containment-then-tunnel, because removing the routes first would
+    //  send every app at the physical NIC while it is still blocked -- the
+    //  user would get "no internet" instead of "back to normal".
+    // ════════════════════════════════════════════════════════
+    //  ── "Restore Internet" in the Start Menu ──────────────────────────
+    //  Containment is the one thing this app can leave behind that takes the
+    //  whole PC off the network. restore-internet.bat undoes it, self-elevates
+    //  and needs neither Node nor this install directory -- but a .bat in
+    //  C:\ProgramData\freeproxy-vpn is no use to a user who cannot reach a search
+    //  engine to be told it is there. So it gets a Start Menu entry, next to the
+    //  app's own, created by the app rather than by NSIS because the target has
+    //  to exist before the shortcut does.
+    //
+    //  All-users Start Menu: the install is perMachine and this process is
+    //  elevated. If the write fails -- a locked-down machine, a roaming policy --
+    //  that is logged and nothing else changes; the .bat is still on disk and the
+    //  log, the fault card and the recovery text all name its full path.
+    function installRecoveryShortcut(batPath) {
+        try {
+            const programs = path.join(process.env.ProgramData ||
+                                       'C:\\ProgramData',
+                                       'Microsoft', 'Windows', 'Start Menu',
+                                       'Programs');
+            if (!fs.existsSync(programs)) return;
+            const lnk = path.join(programs, RECOVERY_LNK);
+            //  Written every start, not once: an upgrade can move ProgramData,
+            //  and a shortcut pointing at a target that no longer exists is worse
+            //  than none at all -- it teaches the user this button does nothing.
+            const ok = shell.writeShortcutLink(lnk, 'create', {
+                target: batPath,
+                //  cmd.exe, not the .bat, would need the /c dance. The .bat is
+                //  the target directly so Windows uses its own association and
+                //  the script's own self-elevation prompt is what the user sees.
+                description: 'Undo FreeProxy VPN\'s firewall, proxy and DNS ' +
+                             'changes and put this PC back on the internet',
+                //  The batch file has no icon of its own; borrow the app's so the
+                //  entry is recognisable as belonging to this program.
+                icon: process.execPath, iconIndex: 0,
+                cwd: path.dirname(batPath),
+            });
+            if (ok) Logger.debug('Start Menu recovery shortcut written', { path: lnk });
+            else    Logger.warn('Start Menu recovery shortcut could not be written',
+                                { path: lnk, target: batPath });
+        } catch (e) {
+            Logger.warn('Start Menu recovery shortcut failed: ' + e.message);
+        }
+    }
+
+    function setupWholeMachineLayers() {
+        const ud = app.getPath('userData');
+        //  Run from app.asar.unpacked -- an .exe cannot be spawned and a .dll
+        //  cannot be loaded from inside an asar archive, which is why
+        //  package.json lists Tun/** under asarUnpack.
+        const tunBin = app.isPackaged
+            ? path.join(process.resourcesPath, 'app.asar.unpacked', 'Tun')
+            : path.join(__dirname, 'Tun');
+        //  The RUNNING paths, not the installed ones. setupWritableTor() copies
+        //  the bundle to ProgramData and the process that actually opens sockets
+        //  is the copy -- which is a different binary as far as the Windows
+        //  Filtering Platform is concerned. Getting this wrong is invisible
+        //  while outbound is allowed and total once it is not.
+        containment = new Containment({
+            Logger, stateDir: ud,
+            torExe:       path.join(ud, 'Tor', 'tor', 'tor.exe'),
+            lyrebirdExe:  path.join(ud, 'Tor', 'tor', 'pluggable_transports',
+                                    'lyrebird.exe'),
+            appExe:       process.execPath,
+            tun2socksExe: path.join(tunBin, 'tun2socks.exe'),
+        });
+        tunnel = new Tunnel({
+            Logger, binDir: tunBin,
+            onExit: info => onTunnelDied(info),
+        });
+
+        //  Say once, at startup, what this build can actually do. A user reading
+        //  the log should not have to infer it from the absence of a message.
+        const avail = tunnel.isAvailable();
+        if (avail.ok) {
+            Logger.success('Whole-machine layers ready: TUN full-tunnel ' +
+                           (wantFullTunnel ? 'ENABLED' : 'disabled in settings.json') +
+                           ', containment arms with the Kill Switch');
+        } else {
+            Logger.warn('This build has NO TUN layer, so applications that ignore ' +
+                        'the system proxy will not be routed through Tor. With the ' +
+                        'Kill Switch on they are blocked; with it off they leave ' +
+                        'over your real IP.', { reason: avail.reason });
+        }
+
+        //  Clean up after a run that did not shut down cleanly. The firewall
+        //  policy was already handed back by startupCleanup()'s first line; this
+        //  is the routing half, which cannot be done from a .bat because it
+        //  needs the interface index of an adapter that may no longer exist.
+        tunnel.cleanupStale().catch(e =>
+            Logger.warn('Tunnel startup cleanup failed: ' + e.message));
+
+        //  ── The escape hatch, written NOW and not when it is needed ──
+        //  writeRecovery() also runs from enable(), which refuses to arm if the
+        //  script cannot be written. Calling it here as well means the file is on
+        //  disk from the first start, so the one situation it exists for -- this
+        //  app is not running and the PC has no internet -- cannot be the
+        //  situation in which it was never created. It is a pure rewrite of a
+        //  generated file; there is nothing to preserve.
+        try {
+            const rec = containment.writeRecovery();
+            if (rec.ok) installRecoveryShortcut(rec.path);
+        } catch (e) {
+            Logger.warn('Recovery script could not be written at startup: ' + e.message);
+        }
+
+        //  And verify, rather than assume, that the policy really did come back.
+        containment.status().then(s => {
+            if (s.ok && s.outboundBlocked) {
+                Logger.error('Outbound traffic is STILL blocked by default after ' +
+                             'startup cleanup. This PC has no internet. Run ' +
+                             containment.recoveryBat + ' as administrator.',
+                             { profiles: s.profiles });
+                reportFault('Internet blocked at startup',
+                            'A previous session left the firewall in default-deny ' +
+                            'and it could not be restored automatically.');
+            } else if (s.ok && !s.firewallOn) {
+                Logger.warn('The Windows Firewall is off for at least one profile, ' +
+                            'so the Kill Switch cannot enforce default-deny on this ' +
+                            'PC. It will refuse rather than pretend.',
+                            { profiles: s.profiles });
+            }
+        }).catch(() => {});
+    }
+
+    //  ── ARM ──  tunnel first, then containment.
+    //  Called from the connect path once Tor is bootstrapped and its SOCKS port
+    //  is answering, and from toggle-killswitch while already connected.
+    //
+    //  Never throws and never fails a connect. Both layers are additive: a
+    //  connect that reaches this point already has a working Tor circuit, the
+    //  system proxy, the browser policies and the DNS lock. If a layer cannot
+    //  come up, what the user loses is COVERAGE, and the only honest response is
+    //  to say exactly which coverage -- not to tear down a working VPN, and not
+    //  to stay quiet and let them believe the machine is covered.
+    async function armWholeMachine({ reason, torPid = null }) {
+        const out = { tunnel: null, containment: null };
+        if (!tunnel || !containment) return out;
+
+        //  1. The redirect layer.
+        if (wantFullTunnel) {
+            const avail = tunnel.isAvailable();
+            if (!avail.ok) {
+                out.tunnel = { ok: false, reason: avail.reason, unavailable: true };
+            } else if (tunnel.running) {
+                //  A switch does not rebuild the tunnel -- it does not depend on
+                //  which exit is in use. But it DOES restart tor, and the new tor
+                //  may not get port 53 even though the one before it did: the
+                //  commonest reason :53 will not bind is the previous tor.exe
+                //  still holding it. So the adapter's resolver is re-stated here
+                //  against this connection's answer. Skipping it would leave
+                //  127.0.0.1 pinned on the adapter with nothing listening there,
+                //  which takes name resolution away from the whole machine, or --
+                //  the other way round -- leave the machine resolving in the
+                //  clear after Tor got :53 back.
+                const rs = await tunnel.setResolver(dnsViaTor ? '127.0.0.1' : '');
+                if (!rs.ok && !rs.unchanged) {
+                    reportFault('The tunnel\'s DNS setting could not be updated',
+                        'Tor is using port ' + activeDnsPort + ' on this ' +
+                        'connection and the tunnel adapter still has the old ' +
+                        'resolver. If websites stop loading by name, disconnect ' +
+                        'and connect again. Reason: ' + rs.reason);
+                }
+                out.tunnel = { ok: true, localIp: tunnel.localIp, already: true,
+                               resolver: rs };
+            } else {
+                Logger.info('Bringing the full-device tunnel up (' + reason + ')');
+                //  dnsIp is the resolver written onto the tunnel adapter, and it
+                //  is deliberately EMPTY unless Tor actually got port 53. An
+                //  adapter's resolver is an address with no port field, so
+                //  DNSPort 9053 cannot be named here at all -- and pointing the
+                //  machine at a 127.0.0.1:53 that nothing is listening on does
+                //  not fail safe, it ends name resolution for every program on
+                //  the PC (see the LEAK PROTECTION header above). In that case
+                //  the tunnel keeps the machine's own resolvers reachable
+                //  instead, and step 4 of establishConnection() tells the user
+                //  DNS is not private on this connection.
+                out.tunnel = await tunnel.start({
+                    socksPort: SOCKS_PORT, torPid,
+                    dnsIp: dnsViaTor ? '127.0.0.1' : '',
+                });
+                if (out.tunnel.ok) {
+                    Logger.success('Full-device tunnel UP -- every TCP connection ' +
+                        'on this PC now goes through Tor, including from programs ' +
+                        'that have never heard of a proxy', {
+                        adapter: TUN_NAME, address: out.tunnel.localIp,
+                        relaysPinned: out.tunnel.relaysPinned });
+                } else {
+                    //  Said out loud, in the window, because the difference
+                    //  between "whole machine" and "browsers only" is the entire
+                    //  point of this release and the user cannot see a log line.
+                    reportFault('Full-device tunnel did not start',
+                        'Browsers are still protected, but programs that ignore ' +
+                        'the system proxy are not. Reason: ' + out.tunnel.reason);
+                }
+            }
+        } else {
+            Logger.info('Full-device tunnel is disabled in settings.json ' +
+                        '(fullTunnel: false) -- proxy-aware programs only');
+            out.tunnel = { ok: false, reason: 'disabled by the user', disabled: true };
+        }
+
+        //  2. The block layer. Only with the Kill Switch, because default-deny
+        //     can take this PC off the internet and that has to be something the
+        //     user asked for. The Kill Switch IS that ask -- it is the setting
+        //     whose whole meaning is "if the tunnel is not carrying it, it does
+        //     not leave".
+        if (appState.killSwitch) {
+            const tunIp = (out.tunnel && out.tunnel.ok) ? tunnel.localIp : '';
+            if (containment.armed) {
+                //  Already armed, but the tunnel's address may have appeared
+                //  since -- rewrite the allow list so ALLOW_RULES.tun exists.
+                out.containment = await containment.installAllowRules({
+                    allowLan: true, tunLocalIp: tunIp });
+            } else {
+                //  allowLan: LocalSubnet traffic cannot reach the internet, so
+                //  permitting it leaks nothing about the user. Blocking it would
+                //  silently kill printers, NAS boxes and the router's own admin
+                //  page for every user, to close a hole that is not there.
+                out.containment = await containment.enable({
+                    allowLan: true, tunLocalIp: tunIp });
+            }
+            if (out.containment.ok && !tunIp) {
+                Logger.warn('Containment is armed WITHOUT a tunnel: programs that ' +
+                    'ignore the system proxy are now BLOCKED rather than routed. ' +
+                    'That is the Kill Switch doing its job, not a bug -- but it ' +
+                    'means some programs will report "no internet".');
+            }
+            if (!out.containment.ok) {
+                reportFault('Kill Switch could not seal this PC',
+                    'The firewall would not take a default-deny policy, so ' +
+                    'traffic outside the tunnel is not blocked. Reason: ' +
+                    out.containment.reason);
+            }
+        }
+        return out;
+    }
+
+    //  ── DISARM ──  containment first, then the tunnel.
+    //  The reverse order is a trap: with the routes gone but outbound still
+    //  denied, every program on the PC tries the physical NIC and is dropped, so
+    //  the user gets "no internet" at the exact moment they asked to be back to
+    //  normal. Restore reachability first, take the plumbing out second.
+    //
+    //  Like Containment.disable(), this never returns early. A disarm that gives
+    //  up halfway is how a machine stays offline.
+    async function disarmWholeMachine({ reason, keepContainment = false }) {
+        if (!tunnel || !containment) return;
+        Logger.info('Standing the whole-machine layers down: ' + reason);
+        if (containment.armed && !keepContainment) {
+            try { await containment.disable({ keepRules: false }); }
+            catch (e) { Logger.error('Containment disarm threw: ' + e.message); }
+        }
+        if (tunnel.running) {
+            try { await tunnel.stop({}); }
+            catch (e) { Logger.error('Tunnel stop threw: ' + e.message); }
+        }
+    }
+
+    //  ── The tunnel died on its own ──
+    //  tun2socks exited while we believed the tunnel was up. lib/tunnel.js has
+    //  already pulled its own routes, so the PC has silently reverted to the real
+    //  NIC for everything that was riding the tunnel. Two jobs here: get it back,
+    //  and if it will not come back, say so where the user can see it.
+    //
+    //  Bounded to two automatic restarts per connection. An unbounded retry on a
+    //  binary that crashes on startup is a spin, and a spin that creates and
+    //  deletes route-table entries a few times a second is worse than being down.
+    let _tunRestarts = 0;
+    function onTunnelDied(info) {
+        if (!appState.connected || !sessionLive) return;   // a teardown in progress
+        if (appState.killSwitch && containment && containment.armed) {
+            Logger.error('The tunnel dropped while the Kill Switch is on, so ' +
+                'programs outside it are now BLOCKED, not leaking. Trying to ' +
+                'bring the tunnel back.', { code: info.code });
+        } else {
+            Logger.error('The tunnel dropped and the Kill Switch is off, so ' +
+                'programs that ignore the system proxy are using your real IP ' +
+                'again. Trying to bring the tunnel back.', { code: info.code });
+        }
+        if (_tunRestarts >= 2) {
+            reportFault('Full-device tunnel keeps dying',
+                'It has been restarted twice and exited again, so it will not be ' +
+                'restarted a third time. Browsers are still going through Tor. ' +
+                'Turn the Kill Switch on to block everything else, or ' +
+                'disconnect. Last output: ' +
+                (info.lastOutput || []).join(' | ').slice(0, 300));
+            return;
+        }
+        _tunRestarts++;
+        //  Deliberately not awaited -- this runs from a child-process 'exit'
+        //  event and nothing upstream can consume a promise.
+        armWholeMachine({ reason: 'tunnel restart #' + _tunRestarts,
+                          torPid: torProc ? torProc.pid : null })
+            .then(r => {
+                if (r.tunnel && r.tunnel.ok) {
+                    Logger.success('Tunnel restarted, whole-device routing is back');
+                }
+            })
+            .catch(e => reportFault('Tunnel restart failed', e.message));
+    }
+
+    //  ── The engine died under a live session ──
+    //  tor.exe exited after a successful bootstrap, on its own. Before this
+    //  existed, nothing at all happened: appState still said connected, the
+    //  system proxy still pointed at a SOCKS port with nothing behind it, the
+    //  DNS lock still pointed at a dead 127.0.0.1:53, and the UI kept counting
+    //  session time. That is the state the Kill Switch was invented for and it
+    //  was never actually reached.
+    //
+    //  The response is deliberately the SAME one the user gets when they cancel
+    //  a connect -- tearDownTunnel() -- because the situation is identical: there
+    //  is no tunnel and the machine is configured as though there were. It
+    //  respects the Kill Switch rather than overriding it: on, and the PC is
+    //  sealed and stays sealed; off, and the PC is put back to normal and told
+    //  loudly that the VPN dropped. Taking a machine offline for a user who
+    //  explicitly declined that is not failing closed, it is ignoring them.
+    let _torDeathBusy = false;
+    function onTorDied(proc, { code, signal }) {
+        //  Only the process we currently believe in, and only under a session we
+        //  believe is live. killTor() nulls torProc before the exit event lands,
+        //  so every deliberate stop -- disconnect, switch, a step-5 re-pin
+        //  restart -- fails this test and is ignored, which is the point.
+        if (proc !== torProc) return;
+        if (!sessionLive || !appState.connected) return;
+        if (_torDeathBusy) return;
+        _torDeathBusy = true;
+        Logger.error('THE TOR ENGINE DIED while connected -- this PC is configured ' +
+                     'for a tunnel that no longer exists', { code, signal: signal || null });
+        reportFault('The Tor engine stopped unexpectedly',
+            appState.killSwitch
+                ? 'The Kill Switch is on, so this PC is now sealed: nothing can ' +
+                  'reach the internet until you connect again or turn the Kill ' +
+                  'Switch off.'
+                : 'The VPN is off and this PC has been put back to normal. Your ' +
+                  'traffic is no longer going through Tor. Turn the Kill Switch on ' +
+                  'if you would rather lose the internet than lose the tunnel.');
+        appState.busy = true; broadcastState();
+        tearDownTunnel('the Tor engine stopped unexpectedly')
+            .catch(e => Logger.error('Teardown after engine death: ' + e.message))
+            .finally(() => { _torDeathBusy = false; appState.busy = false;
+                             broadcastState(); });
+    }
+
     // ── Startup sequence ──────────────────────────────────
+    //  FIRST, before anything reads or writes a single file in that directory.
+    //  C:\ProgramData\freeproxy-vpn inherits C:\ProgramData's permissions, and
+    //  those let any local user create files anywhere in the tree and own what
+    //  they create (measured -- see lib/state-dir.js). Everything below this
+    //  line executes out of that directory with an administrator token:
+    //  startupCleanup() writes and runs fp_startup_clean.bat, setupWritableTor()
+    //  puts tor.exe there, setupWholeMachineLayers() names those binaries in
+    //  firewall allow rules. So the permissions are fixed before the first of
+    //  them, not after.
+    //  app.getPath('userData'), not APPDATA_PATH: they are the same string on
+    //  every machine where line 645 succeeded, and where it did NOT the app is
+    //  running out of %APPDATA%\freeproxy-vpn instead -- so this hardens the
+    //  directory getScriptPath() actually writes to rather than the one it was
+    //  supposed to.
+    const acl = secureStateDir(app.getPath('userData'), { log: Logger });
     startupCleanup();
-    setupWritableTor();
+    //  wasExposed is the one fact that cannot be recovered later: after the
+    //  hardening above there is no way to tell that the tree USED to be
+    //  writable. It is true on exactly the starts where a tor.exe already on
+    //  disk may not be ours, which is when the bundle is worth hashing.
+    setupWritableTor({ verify: acl.wasExposed });
+    //  After setupWritableTor(), because Containment's allow rules name the
+    //  ProgramData copies of tor.exe and lyrebird.exe and installAllowRules()
+    //  refuses to arm if tor.exe is not on disk at the path it was given.
+    setupWholeMachineLayers();
     firstRunCheck();
     setAppProxy('direct');
     createWindow();
@@ -1849,6 +3230,14 @@ function runAdminApp() {
         //  sitting on an unresolved promise while the process is torn down.
         stopExitWatcher();
         cancelAllAsks('cancel');
+        //  BEFORE anything else, and awaited. Containment is the one thing this
+        //  app can leave behind that takes the whole PC off the internet, and
+        //  the tunnel is the one thing that can leave the route table pointing
+        //  at an adapter that no longer exists. Neither is allowed to depend on
+        //  the rest of this handler succeeding, so they go first.
+        sessionLive = false;
+        try { await disarmWholeMachine({ reason: 'the app is closing' }); }
+        catch (e) { Logger.error('Whole-machine disarm on exit: ' + e.message); }
         //  Awaited: clearGeolocationSpoof now hands back the PowerShell
         //  promise that removes the browser proxy/DNS/WebRTC policies. Not
         //  waiting for it here would let app.quit() kill the script and
@@ -1877,6 +3266,29 @@ function runAdminApp() {
         if (process.platform !== 'darwin') app.quit();
     });
 
+    //  ── Last chance ──
+    //  window-all-closed is the ordinary path and it awaits a full disarm. This
+    //  is for the paths that do not go through it: a Windows shutdown or logoff,
+    //  Quit from the tray, app.quit() called from anywhere else. Fire-and-forget
+    //  detached commands, because the process may be gone before they return --
+    //  which is fine, netsh outlives us.
+    //
+    //  Not a substitute for either backstop that already exists: startupCleanup()
+    //  hands the firewall policy back unconditionally at every launch, and
+    //  restore-internet.bat sits on disk for the case where this app never runs
+    //  again. A kill -9 answers to those two, not to this.
+    app.on('will-quit', () => {
+        sessionLive = false;
+        try { if (containment && containment.armed) containment.disableNoWait(); }
+        catch (e) {}
+        try { if (tunnel && tunnel.running) tunnel.stopNoWait(); } catch (e) {}
+        //  Unconditional, unlike the two above. Those are gated on a live flag
+        //  because re-running them costs something; `winhttp reset proxy` on a
+        //  machine that has no WinHTTP proxy is a no-op, and the flag it would be
+        //  gated on is exactly the flag a hard kill leaves wrong.
+        resetWinHttpProxyNoWait();
+    });
+
     // ════════════════════════════════════════════════════════
     //  IPC HANDLERS
     // ════════════════════════════════════════════════════════
@@ -1893,7 +3305,46 @@ function runAdminApp() {
             return { ok: !err, dir: geoExt().baseDir, err: err || null };
         } catch (e) { return { ok: false, dir: null, err: e.message }; }
     });
-    ipcMain.handle('get-fastest-server', async () => ({ best: 'sg', others: ['hk', 'jp'] }));
+    // ── The BEST badge, and what it is allowed to mean ──
+    //
+    //  This handler used to be `({ best: 'sg', others: ['hk', 'jp'] })`. It
+    //  measured nothing, so Singapore wore the BEST badge on every launch of
+    //  every install -- including launches where the live relay list had no
+    //  usable Singapore exit at all, and the row the badge was attached to was
+    //  therefore not even in the dropdown.
+    //
+    //  It cannot become a throughput measurement, and that is a finding rather
+    //  than a shortcut: Tor exit throughput is not rankable from a sample. The
+    //  spread WITHIN one relay across repeated fetches is as wide as the spread
+    //  BETWEEN relays, so a probe would rank its own noise, and it would cost
+    //  one download per country -- in the clear, before anything is connected --
+    //  to collect that noise.
+    //
+    //  What is real is what the operators publish and the consensus weighs:
+    //  total advertised exit bandwidth per country. That is the same field the
+    //  dropdown already sorts the whole list on, so the badge now marks the top
+    //  of an ordering the user can already see rather than a country this app
+    //  hard-coded. `others` is the two runners-up.
+    //
+    //  With no relay list yet, this answers `best: null`, which equals no
+    //  country code, so the list carries no badge at all. A missing badge is
+    //  the honest answer to "which is fastest" before anything is known.
+    ipcMain.handle('get-fastest-server', async () => {
+        //  exitCapacityStats(), not countryStats(): a country whose every exit
+        //  has been measured in the wrong country cannot be offered, so it
+        //  cannot be the best one either.
+        const stats  = exitCapacityStats();
+        const ranked = Object.keys(stats)
+            .sort((a, b) => (stats[b].bandwidth || 0) - (stats[a].bandwidth || 0));
+        return {
+            best:   ranked[0] || null,
+            others: ranked.slice(1, 3),
+            //  Carried so nothing downstream has to guess, and so a future
+            //  reader of this record cannot mistake it for a speed test.
+            basis: 'total advertised exit bandwidth in the live relay list',
+            measured: false,
+        };
+    });
 
     // ── The one restart, if Windows really deferred something ──
     //
@@ -1985,6 +3436,17 @@ function runAdminApp() {
     //  that point, only main's knowledge of what the user asked for.
     ipcMain.handle('report-killswitch', async (event, isEnabled) => {
         appState.killSwitch = !!isEnabled;
+        //  And WRITTEN, which the rest of this handler's reasoning requires.
+        //  The window is reporting a value it restored from localStorage
+        //  because main's copy -- read from settings.json at startup -- may be
+        //  wrong. Correcting only the in-memory copy leaves the wrong value on
+        //  disk, so the next launch starts wrong again and needs another report
+        //  to fix it. That matters because appState.killSwitch is consulted
+        //  BEFORE any window reports: armWholeMachine() reads it to decide
+        //  whether default-deny goes on at connect time. Writing here is what
+        //  makes "the user asked for the Kill Switch" survive a restart in the
+        //  one direction that was not already covered.
+        saveSettings();
         Logger.info('report-killswitch (state only, no system change)',
                     { killSwitch: appState.killSwitch });
         broadcastState();
@@ -2032,6 +3494,12 @@ function runAdminApp() {
     let torCtl        = null;
     let dnsViaTor     = false;
     let activeDnsPort = DNS_PORT;
+    //  Filled in by the dns-bind retry with whatever udpPortOwners() found on
+    //  :53, and read at step 4 of establishConnection() so the fault the user
+    //  is shown can name the program instead of the port number. Cleared at the
+    //  top of every connect: a holder that has since been closed must not be
+    //  blamed for the next connection's own bind failure.
+    let dnsHolders    = [];
     let lastNewnymAt  = 0;
     let guardTimer    = null;    // circuit-lock watchdog
     let guardFp       = null;    // the one exit relay allowed while connected
@@ -2040,7 +3508,11 @@ function runAdminApp() {
     //  across runs. A second connect to a country the app has already
     //  verified skips the whole search.
     const exitStore  = new ExitStore(getScriptPath('exit-cache.json'), Logger);
-    const relayIndex = new RelayIndex(Logger);
+    //  Cached to disk as well, and for a privacy reason rather than a speed one:
+    //  see the RelayIndex constructor. Without it, every cold start has to ask
+    //  onionoo.torproject.org for the relay list IN THE CLEAR before a tunnel
+    //  exists to ask through.
+    const relayIndex = new RelayIndex(Logger, getScriptPath('relay-index.json'));
 
     function torPaths() {
         const torParent = path.dirname(torDir);
@@ -2252,6 +3724,58 @@ function runAdminApp() {
         } catch (e) { resolve({ ok: false, code: null, out: e.message }); }
     });
 
+    //  ── Who is holding a UDP port ──
+    //  Asked exactly once per connect, and only after a bind has already
+    //  failed, because of what the alternative message is worth: "Port 53
+    //  unavailable" is a sentence the user can do nothing at all with, while
+    //  "port 53 is held by pihole.exe (PID 4812)" names the one thing they
+    //  could close to get DNS through Tor. On a machine with a real local
+    //  resolver that is the ONLY route to it -- Tor cannot share the port and
+    //  Windows cannot be pointed at any other one.
+    //
+    //  netstat, not Get-NetUDPEndpoint: one execFile, no shell, no PowerShell
+    //  process to start on a path that is already an error path. tasklist /SVC
+    //  is asked as well because the commonest holder is svchost.exe, where the
+    //  process name alone says nothing and the service name says everything --
+    //  "svchost.exe (Dnscache)" means this app's own `net stop dnscache` did
+    //  not take, which is a different problem with a different answer.
+    //
+    //  Read-only. Nothing here stops, kills or changes anything.
+    async function udpPortOwners(port) {
+        const owners = [];
+        const r = await runQuiet('netstat', ['-a', '-n', '-o', '-p', 'UDP'], 8000);
+        if (!r.ok) return owners;
+        const pids = new Set();
+        for (const line of String(r.out).split(/\r?\n/)) {
+            //  "  UDP    0.0.0.0:53    *:*    1234", and the [::]:53 form. The
+            //  address is matched loosely and the PORT strictly: a :53 that is
+            //  really :5353 or a local :53 in a foreign column would both be
+            //  the wrong process to name.
+            const m = line.match(/^\s*UDP\s+(\S+):(\d+)\s+\S+\s+(\d+)\s*$/);
+            if (m && Number(m[2]) === port) pids.add(m[3]);
+        }
+        if (!pids.size) return owners;
+        const t = await runQuiet('tasklist', ['/SVC', '/FO', 'CSV', '/NH'], 8000);
+        const named = new Map();
+        for (const line of String(t.out).split(/\r?\n/)) {
+            //  "svchost.exe","1234","Dnscache"   --  "N/A" when not a service.
+            const m = line.match(/^"([^"]+)","(\d+)","([^"]*)"/);
+            if (m) named.set(m[2], { name: m[1], svc: m[3] });
+        }
+        for (const pid of pids) {
+            const n = named.get(pid);
+            const svc = n && n.svc && n.svc !== 'N/A' ? n.svc.split(',')[0].trim() : '';
+            owners.push({
+                pid,
+                name: n ? n.name : 'unknown',
+                svc,
+                label: (n ? n.name : 'an unnamed process') +
+                       (svc ? ` (${svc})` : '') + ` [PID ${pid}]`,
+            });
+        }
+        return owners;
+    }
+
     //  tor exits with status 1 on a bad config, and the old code learned
     //  that only by watching bootstrap never start and timing out 120 s
     //  later. --verify-config returns the actual parser error in ~200 ms.
@@ -2393,9 +3917,17 @@ function runAdminApp() {
 
             proc.on('exit', (code, signal) => {
                 if (buf.trim()) { onLine(buf); buf = ''; }
-                if (!settled) Logger.warn('tor.exe exited during bootstrap', { code, signal, bindFail });
-                if (bindFail) finish(false, 'dns-bind', { port: bindFail });
-                else          finish(false, 'exit', { code });
+                if (!settled) {
+                    Logger.warn('tor.exe exited during bootstrap', { code, signal, bindFail });
+                    if (bindFail) finish(false, 'dns-bind', { port: bindFail });
+                    else          finish(false, 'exit', { code });
+                    return;
+                }
+                //  `settled` means the bootstrap already succeeded and this
+                //  promise is long resolved, so finish() is a no-op and the two
+                //  lines above did nothing at all here. Every mid-session engine
+                //  death landed in that dead code -- see onTorDied().
+                onTorDied(proc, { code, signal });
             });
 
             pollId = setInterval(() => {
@@ -2514,8 +4046,59 @@ function runAdminApp() {
     //  through Tor's SOCKS port once one does. Node's global fetch()
     //  ignores the Windows proxy entirely -- that is why the log filled
     //  with "fetchJSON failed" on every refresh while connected.
-    async function refreshRelayIndex({ viaTor, force = false } = {}) {
+    //
+    //  HOW OFTEN, and why it is not "whenever a caller says force"
+    //  -----------------------------------------------------------
+    //  Onionoo builds its details document from the hourly consensus. Asking
+    //  for it three times a minute -- which is what the two "keep trying"
+    //  loops below used to do, each with force:true on a 20 s timer -- cannot
+    //  return anything new, and costs one of two things depending on where the
+    //  app is at the time:
+    //
+    //    * before the tunnel exists, a cleartext HTTPS request to
+    //      onionoo.torproject.org from the user's real address, repeated for
+    //      as long as they are willing to wait. The destination is the
+    //      disclosure; nothing in the body matters.
+    //    * once it does, several MB down a Tor circuit that the user is
+    //      trying to browse through.
+    //
+    //  So a successful refresh is followed by a minimum gap. It is shorter
+    //  than the consensus interval that produces the data, so nothing is
+    //  missed by waiting, and shorter than INDEX_FRESH_MS, so a clamped
+    //  refresh still leaves the index fresh enough for the negative claims at
+    //  the connect sites. `force` overrides the freshness check, as before --
+    //  it does not override this.
+    //
+    //  AND: a cleartext read is not made at all while a usable cached list
+    //  exists. `clearNetOk` is the opt-in, and exactly two callers set it --
+    //  the two places where the user has asked the app to keep watching for a
+    //  country and there is genuinely no other way to find out. Everywhere
+    //  else, including the ordinary Connect path, a cold start now connects
+    //  from the cache and the list is refreshed THROUGH TOR seconds later.
+    const REFRESH_MIN_GAP_MS = 5 * 60 * 1000;
+    //  Seeded from the cache: the file records when its list was fetched, and
+    //  that is the same fact this variable holds. Starting it at 0 would make
+    //  the first call after every start exempt from the gap.
+    let lastRelayFetch = relayIndex.isUsable ? relayIndex.fetchedAt : 0;
+
+    async function refreshRelayIndex({ viaTor, force = false, clearNetOk = false } = {}) {
         if (relayIndex.isFresh && !force) return relayIndex;
+        //  Nothing usable to fall back on: fetch regardless of the gap and
+        //  regardless of transport. This is the only case with no alternative.
+        if (relayIndex.isUsable && lastRelayFetch &&
+            Date.now() - lastRelayFetch < REFRESH_MIN_GAP_MS) {
+            Logger.debug('Relay index re-read skipped: last one was ' +
+                         `${Math.round((Date.now() - lastRelayFetch) / 1000)} s ago ` +
+                         'and onionoo rebuilds hourly');
+            return relayIndex;
+        }
+        if (!viaTor && !clearNetOk && relayIndex.isUsable) {
+            Logger.info('Using the cached relay list rather than asking onionoo in ' +
+                        `the clear (${Math.round((Date.now() - relayIndex.fetchedAt) / 60000)} ` +
+                        'min old, ' + relayIndex.relayCount + ' exits). It is refreshed ' +
+                        'through Tor once the tunnel is up.');
+            return relayIndex;
+        }
         //  The exit-only Onionoo response runs to a few MB. socksGet's
         //  256 KB default would truncate it mid-object and JSON.parse
         //  would throw on valid data.
@@ -2523,7 +4106,17 @@ function runAdminApp() {
         const fetcher = viaTor
             ? url => socksGet(url,  { socksPort: SOCKS_PORT, timeoutMs: 30000, maxBytes: cap })
             : url => directGet(url, { timeoutMs: 20000, maxBytes: cap });
+        if (!viaTor) {
+            Logger.warn('Reading the Tor relay list in the clear -- ' +
+                        (relayIndex.isUsable
+                            ? 'the user asked the app to keep watching for a country'
+                            : 'there is no cached list to use instead') +
+                        '. Your ISP can see a request to onionoo.torproject.org.');
+        }
         await relayIndex.refresh(fetcher);
+        //  Stamped on success only: a failed fetch must not buy five minutes of
+        //  silence when the app still has no list at all.
+        lastRelayFetch = Date.now();
         return relayIndex;
     }
 
@@ -2919,6 +4512,21 @@ function runAdminApp() {
         Logger.info('Tearing the tunnel back down: ' + why);
         stopCircuitGuard();
         stopExitWatcher();
+        //  First, and before tor is killed. The capture routes send every app's
+        //  TCP to Tor's SOCKS port; with tor gone and the routes still in place
+        //  the whole machine would hang on connections that can never be
+        //  answered. Containment comes out inside this call, ahead of the routes,
+        //  for the same reason in reverse.
+        //
+        //  keepContainment mirrors what the Kill Switch means. With it on, the
+        //  user has asked for "no tunnel, no internet" -- so default-deny is not
+        //  something to undo here, it is the state they asked to be left in, and
+        //  killSwitchLeakLock() below re-affirms it. With it off, everything comes
+        //  out and the PC goes back to normal.
+        sessionLive = false;
+        try { await disarmWholeMachine({ reason: why,
+                                         keepContainment: appState.killSwitch }); }
+        catch (e) { Logger.error('Whole-machine disarm: ' + e.message); }
         try { await killTor({ blocking: false }); } catch (e) { Logger.warn('killTor: ' + e.message); }
         try { await setAppProxy(appState.killSwitch ? 'blocked' : 'direct'); }
         catch (e) { Logger.warn('setAppProxy: ' + e.message); }
@@ -2971,7 +4579,7 @@ function runAdminApp() {
 
     function startExitWatcher(wantCc) {
         stopExitWatcher();
-        if (!wantCc || !GEO_COORDS[wantCc]) return;
+        if (!wantCc || !isSpoofableCc(wantCc)) return;
         exitWatchFor = wantCc;
         Logger.info(`Still looking for ${wantCc.toUpperCase()} in the background`);
         exitWatchTimer = setInterval(() => { exitWatchTick().catch(e =>
@@ -3019,6 +4627,16 @@ function runAdminApp() {
                       `is back in the live relay list. You are currently connected through ` +
                       `${ccName(appState.serverCode)}. Switching re-tests the ${ccName(want)} ` +
                       `exit for real; if it fails the check, you stay where you are.`,
+                //  The ONE ask that goes up while the tunnel is carrying traffic,
+                //  and therefore the one that must not take the default footer.
+                //  That default -- "Nothing is connected right now, and no
+                //  country has been chosen for you" -- is true of the other two
+                //  choice cards, which are both up BECAUSE a connect failed.
+                //  Here it contradicts the sentence directly above it, and a
+                //  card that argues with itself is a card the user cannot act
+                //  on. main.js sends the words; renderer.js invents none.
+                foot: `You stay connected through ${ccName(appState.serverCode)} while this ` +
+                      `question is up, and nothing changes until you answer it.`,
                 options: [
                     { id: 'yes', label: `Yes, switch to ${ccName(want)} now`,
                       hint: 'The circuit is rebuilt and the new exit is verified before ' +
@@ -3061,6 +4679,30 @@ function runAdminApp() {
     //  machine. Every step is awaited here.
     // ════════════════════════════════════════════════════════
     async function establishConnection({ serverCode, bypassList = '', isSwitch = false, oldServerCode = '', wc }) {
+        //  ── the one gate on the country code ──
+        //  Every caller of this function is checked below, so this is defence in
+        //  depth rather than the only check -- but it is the RIGHT place for it,
+        //  because this is where the code stops being a UI value and starts
+        //  being machine configuration:
+        //
+        //    * `{${serverCode}}` is written verbatim into the torrc's ExitNodes
+        //      line, and the torrc is line-oriented -- a newline in this string
+        //      is a directive of the attacker's choosing in Tor's own config,
+        //      e.g. a SocksPort bound to 0.0.0.0.
+        //    * geoCoord() reads it, and applyGeolocationSpoof() spoofs from
+        //      whatever comes back.
+        //    * it is echoed into progress messages that the renderer and the
+        //      extension popup both render.
+        //
+        //  Two letters AND a country this app has coordinates for, which is the
+        //  same test the WebSocket's CHANGE_SERVER applies, so the two entry
+        //  points cannot disagree about what a country is.
+        if (!isSpoofableCc(serverCode)) {
+            Logger.error('Refusing to connect: not a country this app can place',
+                         { serverCode: String(serverCode).slice(0, 32) });
+            return { status: 'unavailable', serverCode: null, verified: false };
+        }
+        serverCode = String(serverCode).toLowerCase();
         //  `extra` exists for exactly one fact that neither surface can work out
         //  for itself: whether a cancel left a working tunnel standing. Both
         //  surfaces show a rocket that has to blast in mid-air when a connect is
@@ -3176,13 +4818,23 @@ function runAdminApp() {
         //  test anything through yet, so what is waited for is the live relay
         //  list showing an exit relay in that country at all. Returns false if
         //  the user stopped waiting.
+        //
+        //  This is one of only two callers that pass clearNetOk. Nothing is
+        //  connected, the user has explicitly asked the app to keep watching,
+        //  and the relay list is the only thing that can answer -- so the read
+        //  has to go out in the clear. What it must not do is go out three
+        //  times a minute: refreshRelayIndex clamps it, and the text below says
+        //  what actually happens rather than what the loop's own timer does.
         const waitForCapacity = async cc => {
             const gate = openAsk({
                 variant: 'live', cc,
                 title: `Waiting for an exit node in ${ccName(cc)}`,
                 body: `Nothing is connected while this runs -- no other country is being ` +
-                      `used in the meantime. The app re-reads the live Tor relay list every ` +
-                      `20 seconds and starts connecting the moment ${ccName(cc)} has one.`,
+                      `used in the meantime. The app checks for an exit relay in ` +
+                      `${ccName(cc)} every 20 seconds and starts connecting the moment it ` +
+                      `has one. The relay list itself is re-downloaded at most every 5 ` +
+                      `minutes, because that list is rebuilt hourly at the source -- and ` +
+                      `with nothing connected yet, each download is a request your ISP can see.`,
                 options: [{ id: 'stop', label: 'Stop waiting and cancel' }],
             }, { defaultAnswer: null });
             let stopped = false;
@@ -3199,7 +4851,7 @@ function runAdminApp() {
                 }
                 sendProgress(4, `Waiting for an exit node in ${ccName(cc)} ` +
                                 `(attempt ${round})...`);
-                try { await refreshRelayIndex({ viaTor: false, force: true }); }
+                try { await refreshRelayIndex({ viaTor: false, force: true, clearNetOk: true }); }
                 catch (e) { Logger.debug('Relay list refresh while waiting: ' + e.message); }
                 if (relayIndex.available(cc, exitStore) > 0) {
                     Logger.success(`${cc.toUpperCase()} has an exit relay again after ${round} attempt(s)`);
@@ -3258,6 +4910,24 @@ function runAdminApp() {
         //  From here on the tunnel that may have been up has been replaced, so
         //  a cancel can no longer mean "keep what was working".
         torStarted = true;
+        //  ── The full-device tunnel comes DOWN for the duration ──
+        //  It has to. tun2socks captures every route except the /32 host routes
+        //  pinned for the CURRENT tor.exe's own relay connections, and a restart
+        //  is a new PID with new guards. Leaving the capture up across a restart
+        //  means the new tor.exe's first SYN is routed into a SOCKS port that
+        //  nothing is listening on yet -- the whole machine, including the
+        //  connect that is trying to fix it, stops. Step 5b brings it back once
+        //  the last restart in this attempt is behind us.
+        //
+        //  Containment is deliberately NOT dropped here: with the Kill Switch on
+        //  the user asked for no traffic outside the tunnel, and a country switch
+        //  is exactly the window in which they meant it.
+        sessionLive = false;
+        if (tunnel && tunnel.running) {
+            Logger.info('Taking the full-device tunnel down across the engine restart');
+            try { await tunnel.stop({ quiet: true }); }
+            catch (e) { Logger.error('Tunnel stop before restart: ' + e.message); }
+        }
         //  Every round of this loop is a complete attempt to bring the engine up
         //  -- direct, then a DNS-port retry if :53 is taken, then bridges. Only
         //  when all three are exhausted is the user asked, and only their answer
@@ -3292,6 +4962,10 @@ function runAdminApp() {
             //  A machine with a real local resolver simply fails the bind again
             //  and pays one extra attempt for it.
             dnsPort = DNS_PORT;
+            //  ...and so is the list of programs blamed for taking it. Round 2
+            //  re-asks if it has to; a stale holder from round 1 must not end up
+            //  in the fault the user reads at step 4.
+            dnsHolders = [];
             if (coldCache && engineRound === 1) {
                 sendProgress(5, 'First connection: building the relay list (one time only)...');
             }
@@ -3312,7 +4986,16 @@ function runAdminApp() {
                 //  Docker, Pi-hole...). Retry on 9053 instead of failing --
                 //  and do NOT point the adapters at 127.0.0.1 afterwards,
                 //  because that would kill name resolution machine-wide.
-                Logger.warn(`Port ${res.port} unavailable -- retrying with DNSPort ${DNS_FALLBACK_PORT}`);
+                //
+                //  Ask WHICH program, once, here: this is the only moment the
+                //  answer is still true, and without it the user is told a port
+                //  number they cannot act on. Read-only, and it must not be
+                //  allowed to fail the connect, so it is a plain await on a
+                //  function that returns [] on any error.
+                dnsHolders = await udpPortOwners(DNS_PORT);
+                Logger.warn(`Port ${res.port} unavailable -- retrying with DNSPort ${DNS_FALLBACK_PORT}`,
+                            { heldBy: dnsHolders.length ? dnsHolders.map(o => o.label)
+                                                        : 'not identified' });
                 sendProgress(5, 'Adjusting DNS port...');
                 dnsPort = DNS_FALLBACK_PORT;
                 res = await startTor({
@@ -3434,10 +5117,18 @@ function runAdminApp() {
                 //  A fresh attempt, not a resumed one: the relay list is re-read
                 //  first, so a guard or an exit that has come back since is used
                 //  and the exit spec is recomputed from it.
+                //
+                //  The second and last clearNetOk caller. The engine failed to
+                //  bootstrap and the user pressed try-again, so a cached list is
+                //  precisely what has already been shown not to work; a re-read
+                //  is the only new information available, and there is still no
+                //  tunnel to read it through. Clamped to one download every five
+                //  minutes like the other one -- pressing try-again six times in
+                //  a row costs one request, not six.
                 sendProgress(4, `Trying ${ccName(serverCode)} again ` +
                                 `(attempt ${engineRound + 1})...`);
                 await sleepUnless(4000, () => false);
-                try { await refreshRelayIndex({ viaTor: false, force: true }); }
+                try { await refreshRelayIndex({ viaTor: false, force: true, clearNetOk: true }); }
                 catch (e) { Logger.debug('Relay list refresh before retry: ' + e.message); }
                 plan = await exitPlan(serverCode);
                 firstSpec = plan[0].fp ? `$${plan[0].fp}` : `{${serverCode}}`;
@@ -3473,16 +5164,76 @@ function runAdminApp() {
 
         // ── 3. Route the machine through Tor ──────────────────────────
         sendProgress(96, 'Setting up secure proxy...');
-        await runBat(getScriptPath('fp_conn.bat'), buildProxyBat(SOCKS_PORT, HTTP_PORT, bypassList));
-        Logger.success(`Proxy set -> SOCKS 127.0.0.1:${SOCKS_PORT}, HTTP 127.0.0.1:${HTTP_PORT}`);
+        //  Verified, not assumed. This used to be a runBat that resolved on any
+        //  exit code, so "Proxy set ->" was printed even when every reg add had
+        //  failed -- an app that says it is protecting you while the machine is
+        //  still direct is the worst outcome this project can produce.
+        const inet = await applyWinInetProxy(SOCKS_PORT, HTTP_PORT, bypassList);
+        if (!inet.ok) {
+            throw new Error('Could not point this PC at Tor: ' + inet.reason +
+                            '. Nothing was left half-applied -- run the app as ' +
+                            'administrator and try again.');
+        }
+
+        //  ── The other half of "this PC", and the half no release before 2.0.5
+        //     actually wrote ──
+        //  applyWinInetProxy above covers WinINET, which is per-user and is what
+        //  browsers read. applyWinHttpProxy covers WinHTTP, which is per-machine
+        //  and is what Windows Update, the Store, the update services and most
+        //  .NET/PowerShell HTTP clients read. Two different stores; setting one
+        //  does nothing for the other.
+        //
+        //  NOT fatal, and that is a deliberate difference from the line above.
+        //  The WinINET write is the primary mechanism and it lands in HKCU, so
+        //  its failing means nothing was applied at all. This one needs an
+        //  elevated netsh, and if it fails the traffic it would have covered is
+        //  still caught by the full-device tunnel that armWholeMachine() brings
+        //  up a few steps later -- tun2socks captures TCP regardless of what any
+        //  program thinks the proxy is. Tearing down a working connection over a
+        //  redundant layer would be the wrong trade. Saying nothing would be
+        //  worse, so a failure is named in the window, not just the log.
+        const wh = await applyWinHttpProxy(HTTP_PORT, bypassList);
+        if (!wh.ok) {
+            Logger.error('Machine-wide WinHTTP proxy NOT set', { reason: wh.reason });
+            reportFault('Windows services are not using Tor',
+                'Browsers are protected. Windows Update, the Microsoft Store and ' +
+                'other background services could not be pointed at the tunnel' +
+                (wantFullTunnel ? ' by proxy settings -- the full-device tunnel ' +
+                                  'still carries their traffic.'
+                                : '. Turn the full-device tunnel on to cover them ' +
+                                  'anyway.') +
+                ' Reason: ' + wh.reason);
+        }
 
         // ── 4. Close the leak paths, and WAIT for it ──────────────────
         sendProgress(97, 'Closing leak paths...');
         await applyLeakProtection({ dnsViaTor });
         if (!dnsViaTor) {
-            Logger.warn('DNS is NOT routed through Tor -- port 53 was already in use. ' +
-                        'Browsers still resolve remotely via the SOCKS proxy, but other ' +
-                        'applications will use the system resolver.');
+            //  This used to be a Logger.warn and nothing else, which meant the
+            //  one part of the connection that is NOT private was the one part
+            //  the user was never told about: the window said Connected, and the
+            //  sentence explaining that every program's DNS still goes to their
+            //  ISP sat in a log file. It is a fault, so it goes where faults go.
+            //
+            //  What is and is not affected, precisely, because a vague warning
+            //  about DNS invites people to disconnect a working tunnel:
+            //    - browsers are unaffected. Chromium and Gecko hand the HOSTNAME
+            //      to the SOCKS proxy, so the lookup happens at the exit.
+            //    - everything else uses the system resolver, in the clear.
+            //    - the traffic itself is still tunnelled either way. This is a
+            //      metadata leak, not an IP leak.
+            const who = dnsHolders.length
+                ? dnsHolders.map(o => o.label).join(', ')
+                : 'another program on this PC that Windows would not name';
+            reportFault('DNS is not going through Tor on this connection',
+                'Port 53 on this PC is held by ' + who + ', so Tor is using port ' +
+                DNS_FALLBACK_PORT + ' instead -- and Windows can only be pointed at ' +
+                'a resolver on port 53, so it cannot be sent there. Your browsing ' +
+                'is still tunnelled, and browsers still look names up at the exit. ' +
+                'Other programs look names up through your normal DNS server, which ' +
+                'means it can see which sites they contact. To fix it: close that ' +
+                'program and reconnect.',
+                { heldBy: dnsHolders.map(o => o.label), dnsPort: DNS_FALLBACK_PORT });
         }
 
         // ── 5. Verify the exit, re-pinning through the control port ───
@@ -3600,6 +5351,35 @@ function runAdminApp() {
                     }
 
                     if (cand.fp) {
+                        //  ONE QUESTION BEFORE 46 s OF WAITING FOR NOTHING.
+                        //  Being in the consensus is not enough to be reachable:
+                        //  path selection AND EXTENDCIRCUIT both need the
+                        //  relay's microdescriptor. Without it Tor cannot choose
+                        //  the relay -- it prints "No exits in ExitNodes seem to
+                        //  be running" for the whole wait -- and it refuses to
+                        //  be told to extend to it, with `552 No descriptor`,
+                        //  once per borrowed pair.
+                        //
+                        //  MEASURED, and it is not a corner case: `demise`,
+                        //  Germany's highest-bandwidth exit and therefore the
+                        //  first relay the app offers for DE, was in this Tor's
+                        //  consensus (`ns/id` answered) with no microdescriptor
+                        //  (`md/id` refused, 552) -- so it burned the 10 s wait
+                        //  and all three explicit builds and reached the restart
+                        //  below 30 s later than it needed to.
+                        //
+                        //  `null` means the question could not be asked, and it
+                        //  deliberately falls through to the normal path:
+                        //  skipping a candidate over an unanswered question
+                        //  would drop a relay that works.
+                        const hasDesc = await ctl.hasDescriptor(cand.fp);
+                        if (hasDesc === false) {
+                            Logger.warn(`Tor holds no descriptor for ` +
+                                        `${cand.nick || cand.fp.slice(0, 8)} yet -- it can ` +
+                                        'neither choose that relay nor extend to it, so the ' +
+                                        'wait and the explicit builds are skipped');
+                        }
+
                         //  Wait for a real BUILT circuit through this relay
                         //  instead of the old blind `await sleep(12000)`.
                         //
@@ -3611,7 +5391,9 @@ function runAdminApp() {
                         //  budget printing "No exits in ExitNodes seem to be
                         //  running: can't choose an exit" and then fails. The
                         //  seconds saved go into the forced build instead.
-                        let built = await ctl.waitForExit(cand.fp, { timeoutMs: 10000 });
+                        let built = hasDesc === false
+                            ? false
+                            : await ctl.waitForExit(cand.fp, { timeoutMs: 10000 });
 
                         //  ESCALATION -- stop asking Tor to choose, and name
                         //  the path. Tor's exit scoring is what refuses these
@@ -3620,7 +5402,7 @@ function runAdminApp() {
                         //  1414 ms, PURPOSE=GENERAL, visible to activeExits().
                         //  This is what makes a country with listed exits
                         //  actually connectable instead of merely offered.
-                        if (!built) {
+                        if (!built && hasDesc !== false) {
                             const forced = await ctl.forceExitCircuit(cand.fp, {
                                 middles: relayIndex.fastestRelays(8),
                                 tries: 3, buildMs: 12000,
@@ -3979,6 +5761,25 @@ function runAdminApp() {
         const lockFp = verdict.fp || verdict.pinnedFp;
         await finalSweep(lockFp);
 
+        // ── 5b. Take the whole device, not just the proxy-aware half ──
+        //  HERE and not earlier, deliberately. Everything above may still
+        //  restart tor.exe -- repinFor() does it whenever the live control-port
+        //  re-pin stops working, and each restart is a new PID with new guard
+        //  connections. The tunnel pins /32 host routes for the PID it is given
+        //  so that tor's own relay traffic does not get handed back to tor's
+        //  SOCKS port, so bringing it up before the last restart would pin the
+        //  routes of a process that no longer exists and deadlock the new one.
+        //
+        //  Awaited rather than deferred: the user is about to be told they are
+        //  connected, and "connected" in this release means the whole machine.
+        //  A tunnel that arrives four seconds after that sentence is a window in
+        //  which the claim is false.
+        sessionLive   = true;
+        _tunRestarts  = 0;
+        sendProgress(99, 'Routing the whole device through Tor...');
+        await armWholeMachine({ reason: 'connect',
+                                torPid: torProc ? torProc.pid : null });
+
         // ── 6. Report honestly ────────────────────────────────────────
         //  `finalCode` is the country the traffic DEMONSTRABLY comes out of,
         //  not the one that was asked for. That distinction is the whole
@@ -4025,6 +5826,17 @@ function runAdminApp() {
         //  pressed: the 30 seconds of bootstrap are not connected time.
         appState.since      = Date.now();
         appState.serverCode = finalCode;
+        //  Persisted, because this is the one assignment that every connecting
+        //  path funnels through -- the app window's dropdown, the popup's
+        //  CHANGE_SERVER while connected, a switch, and the watcher's "your
+        //  country is back". The disconnected CHANGE_SERVER path already wrote
+        //  settings.json; this one did not, so a country chosen and CONNECTED
+        //  was the one choice the app forgot on quit, and the next launch had
+        //  main disagreeing with the window's own restored selection. It is
+        //  `finalCode` -- the exit that was externally verified, not the one
+        //  that was asked for -- because that is what the window is showing
+        //  too.
+        saveSettings();
         broadcastState();
 
         //  Armed after appState.connected, because the guard stops itself
@@ -4047,7 +5859,35 @@ function runAdminApp() {
         //  it makes several registry/policy writes and can restart
         //  browsers, and doing that before resolving left the UI stuck on
         //  "Switching to X..." long after the tunnel was already up.
-        if (mainWindow) setImmediate(() => applyGeolocationSpoof(mainWindow, finalCode));
+        //
+        //  The third argument is the Gecko family's share of the tunnel. It is
+        //  handed over from here because this is the only place both halves are
+        //  in scope: SOCKS_PORT and appState.bypassList are inside this
+        //  function, and the wrapper that consumes them is at module scope.
+        if (mainWindow) setImmediate(() => applyGeolocationSpoof(
+            mainWindow, finalCode,
+            { socksPort: SOCKS_PORT, bypass: appState.bypassList }));
+
+        //  And now that there IS a tunnel, replace whatever list this connect
+        //  was built from with one fetched through it.
+        //
+        //  This is what makes the "cached list, refreshed through Tor once the
+        //  tunnel is up" line in refreshRelayIndex a statement of fact rather
+        //  than an intention. The renderer's country dropdown polls
+        //  get-realtime-status every 30 s and would eventually do the same, but
+        //  that is the renderer's timer -- if the window is closed to the tray
+        //  before it fires, or the poll is dropped in a later edit, the app
+        //  would keep connecting from a day-old list and the log would still be
+        //  promising a refresh. So it is done here, where the tunnel is known to
+        //  be up, and it is not awaited: the caller's promise is what unsticks
+        //  the "Connecting..." UI, and a several-MB download must not sit in
+        //  front of it. A failure is logged and nothing else -- the connect
+        //  already succeeded, and the cached list is still there for the next one.
+        setImmediate(() => {
+            refreshRelayIndex({ viaTor: true, force: true }).catch(e =>
+                Logger.debug('Post-connect relay list refresh through Tor failed: ' +
+                             e.message));
+        });
 
         return {
             status:     'connected',
@@ -4071,10 +5911,20 @@ function runAdminApp() {
         try {
             //  Works while connected too: refreshRelayIndex routes through
             //  Tor's SOCKS port, unlike the old Node fetch().
+            //
+            //  Not connected, with a cached list on disk: this returns the cached
+            //  one rather than downloading a fresh one in the clear. That is the
+            //  right trade for what this list is used for -- which countries have
+            //  exit relays at all, and roughly how many. That set is stable over
+            //  a day; the exact per-country counts are not, and no wording claims
+            //  they are to the second. The moment a tunnel exists, the same call
+            //  refreshes through it and the numbers correct themselves.
             await refreshRelayIndex({ viaTor: appState.connected });
             const stats = spoofableOnly(relayIndex.countryStats());
             if (Object.keys(stats).length) {
-                Logger.success(`Exit relays: ${Object.keys(stats).length} countries with usable exits`);
+                Logger.success(`Exit relays: ${Object.keys(stats).length} countries ` +
+                               'with usable exits' +
+                               (relayIndex.fromDisk ? ' (from the cached list)' : ''));
                 cachedRelays   = stats;
                 appState.servers = stats;
                 broadcastState();
@@ -4124,6 +5974,15 @@ function runAdminApp() {
         const { serverCode, bypassList = '' } = data;
         Logger.info('connect-vpn', { serverCode });
         const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+        //  Checked here as well as inside establishConnection, because the
+        //  catch below and the progress record both echo this string back to
+        //  the renderer and to the extension popup. Rejecting it at the door
+        //  means the unusable value never round-trips into a UI at all.
+        if (!isSpoofableCc(serverCode)) {
+            Logger.error('connect-vpn refused: not a country this app can place',
+                         { serverCode: String(serverCode).slice(0, 32) });
+            return { status: 'unavailable', serverCode: null, verified: false };
+        }
         try {
             return await establishConnection({ serverCode, bypassList, isSwitch: false, wc });
         } catch (e) {
@@ -4149,6 +6008,26 @@ function runAdminApp() {
         //  looking clickable while nothing appears to happen.
         appState.busy = true; broadcastState();
         try {
+            //  BEFORE killTor, and in this order. The tunnel's capture routes
+            //  hand every program's TCP to Tor's SOCKS port; with tor killed
+            //  first and the routes still up, the whole machine would sit on
+            //  connections that can never be answered -- a hang, not a
+            //  disconnect. Containment comes out inside this call ahead of the
+            //  routes, for the mirror-image reason.
+            //
+            //  appState.killSwitch is trusted over the argument only where they
+            //  cannot disagree: the renderer passes the toggle it is showing, so
+            //  record it first and let one value drive both.
+            appState.killSwitch = !!isKillSwitchOn;
+            //  Written for the same reason report-killswitch writes: this is a
+            //  value the renderer is showing and main is being told about, and
+            //  the copy that decides whether default-deny goes on at the NEXT
+            //  connect is the one on disk.
+            saveSettings();
+            sessionLive = false;
+            await disarmWholeMachine({ reason: 'the user disconnected',
+                                       keepContainment: !!isKillSwitchOn });
+
             //  killTor() instead of a raw taskkill: it closes the control
             //  socket and the spawned child handle as well as the process.
             //  The old version killed tor.exe and left torCtl believing it
@@ -4194,9 +6073,43 @@ function runAdminApp() {
     });
 
     // ── Kill Switch ───────────────────────────────────────
+    //  Two different jobs behind one toggle, and they were not distinguished
+    //  before. The renderer used to call this only while DISCONNECTED, so
+    //  toggling it during a session changed a localStorage key and nothing else:
+    //  main's appState.killSwitch stayed stale, and every decision that reads it
+    //  -- tearDownTunnel, the tor-death handler, disconnect's own branch -- acted
+    //  on the wrong answer. It now calls in both states and this handler picks
+    //  the job that matches.
+    //
+    //  While CONNECTED the Kill Switch means "block whatever the tunnel is not
+    //  carrying", so it arms or disarms containment and touches nothing else.
+    //  Running the disconnected lock here would point the system proxy at a dead
+    //  port and stop dnscache while the user is happily browsing -- it would
+    //  break the very session it is meant to protect.
     ipcMain.handle('toggle-killswitch', async (event, isEnabled) => {
-        Logger.info('toggle-killswitch', { enabled: isEnabled });
-        appState.killSwitch = isEnabled; broadcastState();
+        Logger.info('toggle-killswitch', { enabled: isEnabled,
+                                           connected: appState.connected });
+        appState.killSwitch = !!isEnabled; saveSettings(); broadcastState();
+        if (appState.connected) {
+            if (isEnabled) {
+                const r = await armWholeMachine({ reason: 'kill switch turned on ' +
+                                                          'during a session',
+                                                  torPid: torProc ? torProc.pid : null });
+                return { status: 'done',
+                         sealed: !!(r.containment && r.containment.ok) };
+            }
+            if (containment && containment.armed) {
+                //  Containment only. The DNS lock, the IPv6 block and the system
+                //  proxy belong to the connection, not to the Kill Switch, and
+                //  reverseLeakProtection() would take all three off a live one.
+                try { await containment.disable({ keepRules: false }); }
+                catch (e) { Logger.error('Containment disarm: ' + e.message); }
+                Logger.warn('Kill Switch off while connected -- traffic the tunnel ' +
+                            'cannot carry (all UDP, and anything bound to the real ' +
+                            'adapter) can leave this PC again');
+            }
+            return { status: 'done', sealed: false };
+        }
         if (isEnabled) {
             await killSwitchLeakLock();
         } else {
@@ -4211,27 +6124,89 @@ function runAdminApp() {
     });
 
     // ── Live bypass update ────────────────────────────────
-    ipcMain.handle('update-live-bypass', async (event, bypassList) => {
-        Logger.info('update-live-bypass', { bypassList });
-        return new Promise(resolve => {
-            appState.bypassList = bypassList; broadcastState();
-            let fp = '<local>';
-            if (bypassList && bypassList.trim()) {
-                const parts = bypassList.replace(/,/g, ';').split(';')
-                    .map(s => { const c = s.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/[\*\s]/g, ''); return c ? `*${c}*` : ''; })
-                    .filter(Boolean);
-                if (parts.length) fp = parts.join(';') + ';<local>';
+    //  A named function, not an inline handler body, because the WebSocket's
+    //  UPDATE_BYPASS needs exactly this and used to do only half of it: it set
+    //  appState and told the renderer, and the renderer's round trip back to
+    //  this handler is what wrote the registry. With the app window closed to
+    //  the tray there was no renderer, the WS handler's `if (!wc) return`
+    //  dropped the message, and the split-tunnel change silently did nothing.
+    //  Declared with `function` so it hoists above the WS handler that calls it.
+    async function applyLiveBypass(bypassList) {
+        const list = typeof bypassList === 'string' ? bypassList : '';
+        Logger.info('applyLiveBypass', { chars: list.length });
+        appState.bypassList = list; saveSettings(); broadcastState();
+        //  One shared mapping with buildProxyBat now -- the two used to be
+        //  written out separately and could drift. See bypassToProxyOverride.
+        const fp = bypassToProxyOverride(list);
+        // Set-DnsClientServerAddress is deliberately NOT here: it was crashing
+        // the Wi-Fi adapter when split tunnelling was updated while connected.
+        // DNS is locked by applyLeakProtection() at connect time; only
+        // ProxyOverride has to change for a bypass update.
+        const r = await runBatLines(getScriptPath('fp_bypass.bat'), [
+            `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyOverride /t REG_SZ /d "${fp}" /f`,
+        ]);
+        if (!r.ok) {
+            Logger.error('Split-tunnel list NOT applied -- the registry write failed',
+                         { code: r.code, fp });
+            return { status: 'failed', error: r.error || `exit ${r.code}` };
+        }
+        //  Read back, because "reg add returned 0" and "the value is what we
+        //  asked for" are different claims and only the second one matters.
+        const got = await regRead(INET_KEY, 'ProxyOverride');
+        if (got !== fp) {
+            Logger.error('ProxyOverride read-back does not match what was written',
+                         { wrote: fp, read: got });
+            return { status: 'failed', error: 'read-back mismatch', read: got };
+        }
+        Logger.success('Split-tunnel list applied and verified', { fp });
+
+        //  The SECOND store, kept in step. WinHTTP has its own copy of the bypass
+        //  list, so a split-tunnel change that only rewrites ProxyOverride leaves
+        //  the machine-wide store still holding the list from connect time -- the
+        //  user removes a host from the list, browsers start tunnelling it, and
+        //  Windows services carry on sending it direct. Two stores that disagree
+        //  about which hosts skip Tor is worse than either answer.
+        //
+        //  Only while connected: there is nothing to keep in step otherwise, and
+        //  writing a proxy here would point a disconnected machine at a dead port.
+        //  Not fatal -- the WinINET half above is applied and verified, and the
+        //  reason is named rather than swallowed.
+        if (appState.connected) {
+            const wh = await applyWinHttpProxy(HTTP_PORT, list);
+            if (!wh.ok) {
+                Logger.warn('The machine-wide bypass list could not be updated. ' +
+                            'Browsers follow the new split-tunnel list; Windows ' +
+                            'services still follow the one from connect time.',
+                            { reason: wh.reason });
+                return { status: 'updated', partial: 'winhttp', reason: wh.reason };
             }
-            // REMOVED: Set-DnsClientServerAddress was crashing WiFi adapter
-            // when split tunneling was updated while connected.
-            // DNS is locked by applyLeakProtection() at connect time.
-            // Only ProxyOverride needs to change for bypass updates.
-            runBat(getScriptPath('fp_bypass.bat'), [
-                '@echo off',
-                `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyOverride /t REG_SZ /d "${fp}" /f`,
-            ].join('\r\n')).then(() => { Logger.debug('Bypass updated', { fp }); resolve({ status: 'updated' }); });
-        });
-    });
+            //  ...and the THIRD store, for the same reason. The Gecko family's
+            //  network.proxy.no_proxies_on is its own copy of this list in its
+            //  own format, so a split-tunnel edit that skipped it would leave
+            //  Firefox sending a host direct that every other store had started
+            //  tunnelling.
+            //
+            //  The current country's coordinates go with it, not null: the
+            //  fenced block is rewritten whole, so passing only the proxy half
+            //  would delete the spoofed location the user is connected under.
+            //
+            //  Off-thread, chained behind any connect-time apply, because it is
+            //  the same file-and-registry work that measured seconds on the
+            //  window's thread. Not fatal: applyGecko() refuses when there is no
+            //  session journal, and a Gecko browser that is running keeps the
+            //  list it read at startup either way.
+            try {
+                await runGeckoApply(
+                    geoCoord(appState.serverCode),
+                    { host: '127.0.0.1', port: SOCKS_PORT, bypass: list });
+            } catch (e) {
+                Logger.warn('Gecko browsers still hold the split-tunnel list from ' +
+                            'connect time: ' + e.message);
+            }
+        }
+        return { status: 'updated' };
+    }
+    ipcMain.handle('update-live-bypass', (event, bypassList) => applyLiveBypass(bypassList));
 
 
     // ════════════════════════════════════════════════════════
@@ -4248,7 +6223,13 @@ function runAdminApp() {
         const { serverCode, bypassList = '', oldServerCode = '' } = data;
         Logger.info('switch-vpn', { from: oldServerCode, to: serverCode });
         const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-
+        //  Same gate as connect-vpn, and for the same reason: the revert path
+        //  and both error returns below hand this string straight back.
+        if (!isSpoofableCc(serverCode)) {
+            Logger.error('switch-vpn refused: not a country this app can place',
+                         { serverCode: String(serverCode).slice(0, 32) });
+            return { status: 'unavailable', serverCode: null, verified: false };
+        }
         try {
             const r = await establishConnection({
                 serverCode, bypassList, isSwitch: true, oldServerCode, wc,
@@ -4300,34 +6281,49 @@ function runAdminApp() {
     });
 }
 // ═══════════════════════════════════════════════════════════════════
-//  ADDITIVE FIX (v2) — corrects 2 remaining issues from last round
+//  WHY THE BROWSER SECTION BELOW EXISTS
 //
-//  ISSUE A: Edge still shows real IP, Chrome works
-//  ROOT CAUSE: Windows WinINET caches the proxy decision per-process.
-//  Writing the registry key alone does NOT notify already-running
-//  browsers. Chrome happened to re-read it (likely opened/navigated
-//  after the write); Edge's WinINET cache never got invalidated.
-//  REAL FIX: call InternetSetOption(NULL, INTERNET_OPTION_SETTINGS_CHANGED)
-//  + INTERNET_OPTION_REFRESH via a tiny PowerShell P/Invoke — this is
-//  the official Win32 API to force ALL WinINET-based apps (Edge,
-//  Chrome, IE-mode, etc.) to immediately re-read the registry proxy,
-//  without needing to restart the browser.
-//  Also reinforced with: (1) netsh winhttp machine proxy, and
-//  (2) Chromium Enterprise policy registry (ProxySettings JSON)
-//  under HKLM for both Edge and Chrome — this is the policy channel
-//  Chromium browsers check FIRST, before user-level WinINET settings,
-//  so it guarantees Edge specifically obeys it.
+//  A record of two bugs and what each one actually turned out to need. Kept
+//  because both root causes are non-obvious and both would be reintroduced by
+//  anyone who assumed "write the proxy registry key" is the whole job.
 //
-//  ISSUE B: Google Maps shows no location at all
-//  ROOT CAUSE: previous version blocked 'geolocation.googleapis.com'
-//  in hosts — but that hostname does NOT exist / is never queried.
-//  Chrome's actual W3C Geolocation network-location-provider endpoint
-//  is:  https://www.googleapis.com/geolocation/v1/geolocate
-//  Blocking the wrong domain meant Chrome's real request still went
-//  out (now via Tor, with no responder) → no result → blank map.
-//  REAL FIX: redirect www.googleapis.com (the ACTUAL endpoint host)
-//  to 127.0.0.1, with a matching cert SAN, and serve the exact JSON
-//  shape Chrome expects from this endpoint.
+//  ── A: Edge kept showing the real IP while Chrome did not ──
+//  ROOT CAUSE: WinINET caches the proxy decision per process. Writing the
+//  registry key does not notify browsers that are already running. Chrome
+//  happened to re-read it; Edge's cache never got invalidated.
+//
+//  Three separate mechanisms address it, and all three are implemented below:
+//    1. InternetSetOption(NULL, INTERNET_OPTION_SETTINGS_CHANGED / _REFRESH)
+//       -- options 39 and 37, via a P/Invoke in forceAllBrowsersOntoProxy().
+//       The official Win32 way to make every running WinINET client re-read
+//       the registry without a restart.
+//    2. The Chromium Enterprise policy channel, HKLM ProxySettings JSON, for
+//       Edge and Chrome. Chromium checks policy BEFORE the user-level WinINET
+//       settings, so this is what makes Edge specifically obey.
+//    3. netsh winhttp, the per-machine store -- applyWinHttpProxy(), around
+//       line 1450. WinINET and the Chromium policy between them cover
+//       browsers; WinHTTP is what Windows Update, the Store, the update
+//       services and most .NET/PowerShell HTTP clients read, and nothing in
+//       this app wrote it before v2.0.5.
+//
+//  ── B: Google Maps showed no location at all ──
+//  ROOT CAUSE: an early build blocked 'geolocation.googleapis.com' in the
+//  hosts file. Chrome never queries that host. Its network-location provider
+//  is https://www.googleapis.com/geolocation/v1/geolocate, so the real request
+//  still went out -- through Tor, to no responder -- and the map came up blank.
+//
+//  The fix that followed was WRONG and has been removed. It redirected
+//  www.googleapis.com to 127.0.0.1 and served the expected JSON from a local
+//  HTTPS listener, which needed a self-signed www.googleapis.com certificate
+//  in the machine's Trusted Root store -- with its private key on disk under a
+//  hard-coded password. Anything that could read that file could impersonate
+//  any Google host to this machine. startupCleanup() now hunts those
+//  certificates down and removes them on every start.
+//
+//  What replaced it is the browser extension in Extension/ plus the Chromium
+//  geolocation override: the coordinates are SPOOFED, never blocked, so Maps
+//  gets an answer and the user keeps control of their own site permissions.
+//  See lib/geo-ext.js and lib/geo-spoof.js.
 // ═══════════════════════════════════════════════════════════════════
 
 function geoFile(name) { return path.join(app.getPath('userData'), name); }
@@ -4586,10 +6582,42 @@ function markIntroShown() {
 //  the last run still has our values in HKLM and teardown is the only thing
 //  that ever removes them.
 
-async function forceAllBrowsersOntoProxy() {
+// ═══════════════════════════════════════════════════════════════════
+//  WHY THIS FUNCTION READS BACK EVERY VALUE IT WRITES
+//
+//  It used to open with `$ErrorActionPreference = 'SilentlyContinue'` and
+//  close with a literal `Write-Output "PROXY_OK ..."`. Between those two
+//  lines are six Set-ItemProperty calls per browser, into HKLM, and every
+//  one of them could fail -- no elevation, a hive an AV product has locked,
+//  a policy key another management tool owns -- with the preference
+//  swallowing the error and the final line printing PROXY_OK anyway. The app
+//  then logged "Browser policy applied to Edge/Chrome/Brave", and the value
+//  that stops WebRTC handing out the real IP was never written.
+//
+//  So: no blanket preference; each browser's writes in their own try/catch so
+//  one locked hive does not skip the rest; and then every value read BACK out
+//  of the registry and compared. The verdict lines are counted in PowerShell
+//  and the totals printed from those counters, which is the difference
+//  between a report and a claim -- `MISMATCH` cannot be printed by a script
+//  that did not compare, and `ok=3` cannot be printed by one that wrote
+//  nothing.
+// ═══════════════════════════════════════════════════════════════════
+//  The user's split-tunnel list goes into ProxyBypassList as well. It used to
+//  be the fixed string 'localhost;127.0.0.1;<local>', so a host the user
+//  listed was tunnelled by Chromium and bypassed by Windows -- the same list
+//  meaning two different things depending on which application read it.
+//  bypassToProxyOverride() is the one mapping (see above runAdminApp), and
+//  Chromium accepts exactly its output: `;`-separated patterns, `*.host` for
+//  a subdomain wildcard and `<local>` for dotless names.
+async function forceAllBrowsersOntoProxy(bypassList) {
+    //  localhost and 127.0.0.1 are prepended unconditionally: <local> covers
+    //  names with no dot in them, NOT the loopback literal, and this app's own
+    //  WebSocket and the extension's helper both live on 127.0.0.1.
+    const bypass = ['localhost', '127.0.0.1', bypassToProxyOverride(bypassList)]
+        .join(';');
     const proxyJson = '{"ProxyMode":"fixed_servers",' +
                       '"ProxyServer":"socks5://127.0.0.1:9050",' +
-                      '"ProxyBypassList":"localhost;127.0.0.1;<local>"}';
+                      `"ProxyBypassList":"${bypass}"}`;
 
     const roots    = browsers.policyRoots('ps');
     const keysLine = roots.length
@@ -4597,7 +6625,10 @@ async function forceAllBrowsersOntoProxy() {
         : '$keys = @()';
 
     const ps = [
-        "$ErrorActionPreference = 'SilentlyContinue'",
+        //  Stop, not SilentlyContinue: a write that fails has to reach the
+        //  catch below rather than be skipped in silence. Scoped per key, so
+        //  one browser's locked policy hive does not cost the others theirs.
+        "$ErrorActionPreference = 'Stop'",
         // Tell every already-running WinINET consumer to re-read the proxy.
         "try {",
         "    Add-Type -Namespace FP -Name Inet -MemberDefinition @'",
@@ -4609,33 +6640,94 @@ async function forceAllBrowsersOntoProxy() {
         "} catch {}",
         `$desired = '${proxyJson}'`,
         '$changed = $false',
+        '$okKeys = 0',
+        '$badKeys = 0',
         keysLine,
-        'foreach ($k in $keys) {',
-        '    New-Item -Path $k -Force | Out-Null',
-        "    $cur = (Get-ItemProperty -Path $k -Name 'ProxySettings' -ErrorAction SilentlyContinue).ProxySettings",
-        '    if ($cur -ne $desired) { $changed = $true }',
-        "    Set-ItemProperty -Path $k -Name 'ProxySettings'            -Value $desired -Type String -Force",
-        // ── leak vectors a SOCKS proxy does not cover ──
-        "    Set-ItemProperty -Path $k -Name 'WebRtcIPHandlingPolicy'   -Value 'disable_non_proxied_udp' -Type String -Force",
-        "    Set-ItemProperty -Path $k -Name 'DnsOverHttpsMode'         -Value 'off' -Type String -Force",
-        "    Set-ItemProperty -Path $k -Name 'BuiltInDnsClientEnabled'  -Value 0 -Type DWord -Force",
-        "    Set-ItemProperty -Path $k -Name 'DnsPrefetchingEnabled'    -Value 0 -Type DWord -Force",
-        "    Set-ItemProperty -Path $k -Name 'NetworkPredictionOptions' -Value 2 -Type DWord -Force",
-        // Clear the old force-allow list policy if a previous build left it.
-        "    Remove-Item -Path (Join-Path $k 'GeolocationAllowedForUrls') -Recurse -ErrorAction SilentlyContinue",
+        //  Name, desired value and type in one table, so the write loop and the
+        //  read-back loop below cannot disagree about what was asked for.
+        '$want = [ordered]@{',
+        "    'ProxySettings'            = @($desired, 'String')",
+        //  ── leak vectors a SOCKS proxy does not cover ──
+        "    'WebRtcIPHandlingPolicy'   = @('disable_non_proxied_udp', 'String')",
+        "    'DnsOverHttpsMode'         = @('off', 'String')",
+        "    'BuiltInDnsClientEnabled'  = @(0, 'DWord')",
+        "    'DnsPrefetchingEnabled'    = @(0, 'DWord')",
+        "    'NetworkPredictionOptions' = @(2, 'DWord')",
         '}',
-        'Write-Output "PROXY_OK CHANGED=$changed"',
+        'foreach ($k in $keys) {',
+        '    $failed = @()',
+        '    try {',
+        '        New-Item -Path $k -Force | Out-Null',
+        "        $cur = (Get-ItemProperty -Path $k -Name 'ProxySettings' -ErrorAction SilentlyContinue).ProxySettings",
+        '        if ($cur -ne $desired) { $changed = $true }',
+        '        foreach ($n in $want.Keys) {',
+        '            Set-ItemProperty -Path $k -Name $n -Value $want[$n][0] -Type $want[$n][1] -Force',
+        '        }',
+        //  Clear the old force-allow list policy if a previous build left it.
+        //  Absent on every machine that never ran one, so this is the one
+        //  place a "not found" is expected rather than a failure.
+        "        Remove-Item -Path (Join-Path $k 'GeolocationAllowedForUrls') -Recurse -ErrorAction SilentlyContinue",
+        '    } catch {',
+        "        $failed += ('write: ' + $_.Exception.Message.Split([char]10)[0])",
+        '    }',
+        //  ── the read-back ───────────────────────────────────────────
+        //  Out of the registry, after the writes, compared as strings so a
+        //  DWord that came back as the wrong number is a mismatch and not a
+        //  type coincidence.
+        '    foreach ($n in $want.Keys) {',
+        '        try {',
+        '            $got = (Get-ItemProperty -Path $k -Name $n -ErrorAction Stop).$n',
+        '            if ([string]$got -ne [string]$want[$n][0]) { $failed += ($n + ": MISMATCH") }',
+        '        } catch { $failed += ($n + ": missing") }',
+        '    }',
+        '    if ($failed.Count -eq 0) { $okKeys++; Write-Output ("KEY_OK " + $k) }',
+        '    else { $badKeys++; Write-Output ("KEY_BAD " + $k + " -- " + ($failed -join "; ")) }',
+        '}',
+        //  Printed FROM the counters. There is no path through this script that
+        //  prints ok=n for values it did not read back.
+        'Write-Output ("PROXY_DONE ok=$okKeys bad=$badKeys changed=$changed")',
     ].join('\r\n');
 
-    let changed = true;   // if we cannot tell, assume it changed
+    //  If we cannot tell, assume it changed: the only thing this drives is
+    //  whether the caller says "changed" or "unchanged" in the log, and
+    //  over-reporting a change is the harmless direction.
+    let changed = true, verified = 0, failedKeys = [];
     try {
         const out = await runPs1(ps, 'fp_browserproxy.ps1', 20000);
-        changed = /CHANGED=True/i.test(out);
-        Logger.success('Browser policy applied to ' +
-                       (roots.map(r => r.name).join('/') || 'no policy-capable browser') +
-                       ` (proxy changed: ${changed})`);
+        const done = /PROXY_DONE ok=(\d+) bad=(\d+) changed=(\w+)/i.exec(out);
+        failedKeys = (out.match(/^KEY_BAD .*$/gim) || [])
+            .map(l => l.replace(/^KEY_BAD\s*/i, '').trim());
+        if (!done) {
+            //  The script produced no verdict at all. That is not success with
+            //  a missing line; it is an unknown outcome, and it is reported as
+            //  one.
+            Logger.error('Browser policy script produced no verdict line. The ' +
+                         'proxy and leak policies for ' +
+                         (roots.map(r => r.name).join('/') || 'no browser') +
+                         ' are NOT confirmed.', { tail: String(out).slice(-400) });
+        } else {
+            verified = Number(done[1]);
+            changed  = /true/i.test(done[3]);
+            if (Number(done[2]) === 0 && verified === roots.length) {
+                Logger.success('Browser policy applied AND read back for ' +
+                               (roots.map(r => r.name).join('/') ||
+                                'no policy-capable browser') +
+                               ` -- ${verified}/${roots.length} hives, six values ` +
+                               `each (proxy changed: ${changed})`);
+            } else {
+                //  Named, per browser. "Some browsers are not on the proxy" is
+                //  not something the user can act on; "Brave's hive refused the
+                //  write" is.
+                Logger.error(`Browser policy did NOT take on ${done[2]} of ` +
+                             `${roots.length} browsers. Those browsers are not ` +
+                             'on the proxy and their WebRTC/DNS leak settings ' +
+                             'are not applied.', { failed: failedKeys });
+            }
+        }
     } catch (e) {
-        Logger.warn('Browser policy script: ' + e.message.split('\n')[0]);
+        Logger.error('Browser policy script failed outright -- no Chromium ' +
+                     'browser is confirmed to be on the proxy: ' +
+                     e.message.split('\n')[0]);
     }
 
     //  The restart decision is deliberately NOT made here any more. This
@@ -4643,20 +6735,53 @@ async function forceAllBrowsersOntoProxy() {
     //  policy can need a restart on its own -- gating the restart on the
     //  proxy alone is what left Chrome and Brave running with their old
     //  location settings while the app reported success.
-    return { proxyChanged: changed };
+    return { proxyChanged: changed, verified, expected: roots.length,
+             failed: failedKeys };
 }
 
+//  The same read-back rule as forceAllBrowsersOntoProxy, for the same reason,
+//  and here it matters more: this is the RECOVERY path. If it prints
+//  RESTORE_OK while the ProxySettings policy is still in the hive, the user's
+//  browsers stay pointed at 127.0.0.1:9050 after the app has told them it let
+//  go -- and once tor.exe is gone that is not "still connected", it is a
+//  browser that cannot reach anything. It used to open with
+//  SilentlyContinue and end with a literal `Write-Output 'RESTORE_OK'`, so
+//  that is exactly what it would have reported.
+//
+//  'all' rather than the installed set: a browser uninstalled while the app
+//  held its policy would otherwise keep the key forever.
 async function restoreAllBrowsersProxy() {
+    const NAMES = ['ProxySettings', 'WebRtcIPHandlingPolicy', 'DnsOverHttpsMode',
+                   'BuiltInDnsClientEnabled', 'DnsPrefetchingEnabled',
+                   'NetworkPredictionOptions'];
     const keys = browsers.policyRoots('ps', 'all').map(r => r.key);
     const ps = [
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        `$keys = @('${keys.join("','")}')`,
+        "$ErrorActionPreference = 'Stop'",
+        //  Guarded: an empty list would otherwise become @('') and send this
+        //  loop at the current directory.
+        keys.length ? `$keys = @('${keys.join("','")}')` : '$keys = @()',
+        `$names = @('${NAMES.join("','")}')`,
+        '$okKeys = 0',
+        '$badKeys = 0',
         'foreach ($k in $keys) {',
-        "    foreach ($n in @('ProxySettings','WebRtcIPHandlingPolicy','DnsOverHttpsMode'," +
-            "'BuiltInDnsClientEnabled','DnsPrefetchingEnabled','NetworkPredictionOptions')) {",
-        '        Remove-ItemProperty -Path $k -Name $n -ErrorAction SilentlyContinue',
+        //  A key that never existed is nothing to undo, not a failure. This is
+        //  the normal case for every browser the user does not have.
+        '    if (-not (Test-Path $k)) { $okKeys++; continue }',
+        '    $failed = @()',
+        '    foreach ($n in $names) {',
+        '        try { Remove-ItemProperty -Path $k -Name $n -ErrorAction SilentlyContinue } catch {}',
+        //  The read-back for a removal is absence. Get-ItemProperty -Stop
+        //  throws when the value is gone, which is the outcome being checked
+        //  for, so a value that still ANSWERS is the failure.
+        '        try {',
+        '            $still = (Get-ItemProperty -Path $k -Name $n -ErrorAction Stop).$n',
+        '            $failed += ($n + ": STILL SET")',
+        '        } catch {}',
         '    }',
-        "    Remove-Item -Path (Join-Path $k 'GeolocationAllowedForUrls') -Recurse -ErrorAction SilentlyContinue",
+        "    try { Remove-Item -Path (Join-Path $k 'GeolocationAllowedForUrls') -Recurse -ErrorAction SilentlyContinue } catch {}",
+        "    if (Test-Path (Join-Path $k 'GeolocationAllowedForUrls')) { $failed += 'GeolocationAllowedForUrls: STILL PRESENT' }",
+        '    if ($failed.Count -eq 0) { $okKeys++; Write-Output ("KEY_OK " + $k) }',
+        '    else { $badKeys++; Write-Output ("KEY_BAD " + $k + " -- " + ($failed -join "; ")) }',
         '}',
         "try {",
         "    Add-Type -Namespace FP -Name Inet2 -MemberDefinition @'",
@@ -4666,13 +6791,32 @@ async function restoreAllBrowsersProxy() {
         "    [FP.Inet2]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null",
         "    [FP.Inet2]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null",
         "} catch {}",
-        "Write-Output 'RESTORE_OK'",
+        'Write-Output ("RESTORE_DONE ok=$okKeys bad=$badKeys")',
     ].join('\r\n');
 
     try {
-        await runPs1(ps, 'fp_browserproxy_off.ps1', 15000);
-        Logger.info('Browser proxy + leak policies reverted');
-    } catch (e) { Logger.warn('Browser policy restore: ' + e.message.split('\n')[0]); }
+        const out  = await runPs1(ps, 'fp_browserproxy_off.ps1', 15000);
+        const done = /RESTORE_DONE ok=(\d+) bad=(\d+)/i.exec(out);
+        const failed = (out.match(/^KEY_BAD .*$/gim) || [])
+            .map(l => l.replace(/^KEY_BAD\s*/i, '').trim());
+        if (done && Number(done[2]) === 0 && Number(done[1]) === keys.length) {
+            Logger.info(`Browser proxy + leak policies reverted and read back ` +
+                        `(${done[1]}/${keys.length} hives clear)`);
+        } else {
+            //  Loud, and it says what to do: this is the one failure in the app
+            //  that can leave a browser with no working network at all.
+            Logger.error('Browser proxy policy could NOT be fully reverted. ' +
+                         'Affected browsers may stay pointed at 127.0.0.1:9050 ' +
+                         'and lose internet access once Tor stops. Use ' +
+                         '"Restore Internet" in the app, or delete the ' +
+                         'ProxySettings value under the listed keys.',
+                         { failed, verdict: done ? done[0] : 'no verdict line',
+                           tail: done ? undefined : String(out).slice(-400) });
+        }
+    } catch (e) {
+        Logger.error('Browser policy restore failed outright -- browser proxy ' +
+                     'policy may still be in place: ' + e.message.split('\n')[0]);
+    }
     //  Deliberately NOT restarting browsers here. Reverting does not need
     //  it, and killing the browser on disconnect (and on app exit) was
     //  what made it appear to close by itself. The InternetSetOption
@@ -4821,16 +6965,43 @@ function runOffThread(job, payload, timeoutMs = 120000) {
 //  and its first step is an await, so a fast second switch really can
 //  arrive mid-run. Chained FIFO, so the newest country is applied last.
 let _geoApplyChain = Promise.resolve();
-const runGeoApply = coord => {
+const runGeoApply = (coord, proxy) => {
     const step = async () => {
-        const off = await runOffThread('geo-apply', { stateDir: APPDATA_PATH, coord });
+        const off = await runOffThread('geo-apply',
+                                       { stateDir: APPDATA_PATH, coord, proxy });
         if (off.ok) return;
         //  A freeze is a bug; skipping the shield would be a claim of
         //  coverage that was never applied. Same call, in-process, and if
         //  it throws the wrapper's own catch reports it as it always did.
         Logger.debug('Location shield: could not run off-thread (' +
                      (off.error || 'no reason reported') + ') -- applying in-process');
-        geoEngine().applyAll(coord);
+        geoEngine().applyAll(coord, proxy);
+    };
+    const next = _geoApplyChain.then(step, step);
+    _geoApplyChain = next.then(() => {}, () => {});
+    return next;
+};
+
+//  The Gecko half on its own, for a split-tunnel list edited while the session
+//  is already up. On the SAME chain as runGeoApply, deliberately: the two write
+//  the same journal and the same user.js files, so letting a bypass edit run
+//  alongside a country switch would reopen exactly the race the chain exists to
+//  close.
+//
+//  A separate job rather than another applyAll, because applyAll re-runs the
+//  Windows platform shield -- the 43 registry/service calls that cost 2.3-5.0 s
+//  -- and none of that changes when a hostname is added to the split-tunnel
+//  list. applyGecko() also refuses when there is no session journal, which is
+//  the guard that keeps a disconnected browser from being pointed at a dead
+//  port.
+const runGeckoApply = (coord, proxy) => {
+    const step = async () => {
+        const off = await runOffThread('geo-gecko',
+                                       { stateDir: APPDATA_PATH, coord, proxy });
+        if (off.ok) return;
+        Logger.debug('Gecko prefs: could not run off-thread (' +
+                     (off.error || 'no reason reported') + ') -- applying in-process');
+        geoEngine().applyGecko(coord, proxy);
     };
     const next = _geoApplyChain.then(step, step);
     _geoApplyChain = next.then(() => {}, () => {});
@@ -4861,14 +7032,36 @@ const runGeoApply = coord => {
 //  the proxy is 127.0.0.1:9050 for every country, the extension is already
 //  installed, and the new coordinates reach it live over the WebSocket.
 const _origApplyGeo = applyGeolocationSpoof;
-applyGeolocationSpoof = function (win, sc) {
+applyGeolocationSpoof = function (win, sc, opts) {
     _origApplyGeo(win, sc);
-    const coord = GEO_COORDS[String(sc).toLowerCase()] || null;
+    const coord = geoCoord(sc);
+    //  The Gecko family's proxy descriptor, and it is passed IN rather than
+    //  read from a global on purpose: SOCKS_PORT and appState both live inside
+    //  runAdminApp(), and this wrapper is at module scope where neither is
+    //  visible. The single call site is inside that function and hands them
+    //  over.
+    //
+    //  Absent -- the tray path, or any future caller that has no live tunnel to
+    //  point at -- and no proxy pref is written at all. That is the safe
+    //  direction: a Gecko profile pointed at a SOCKS port nothing answers
+    //  cannot reach the internet, and this app must never be the reason a
+    //  browser stops working.
+    const port  = Number(opts && opts.socksPort);
+    const proxy = Number.isInteger(port) && port > 0 && port < 65536
+        ? { host: '127.0.0.1', port, bypass: (opts && opts.bypass) || '' }
+        : null;
     //  Fire-and-forget with a real catch: an unhandled rejection here
     //  would take down the main process on a policy-write failure.
     return (async () => {
         const ext = geoExt();
-        const { proxyChanged } = await forceAllBrowsersOntoProxy();
+        //  The user's split-tunnel list goes to Chromium too. It is already in
+        //  hand as opts.bypass -- the same raw string the WinINET writer and
+        //  netsh winhttp get -- and bypassToProxyOverride() inside the callee
+        //  turns all three into the identical set of patterns. Passing '' when
+        //  there is no list is correct: the callee always prepends
+        //  localhost;127.0.0.1 and always appends <local>.
+        const { proxyChanged } = await forceAllBrowsersOntoProxy(
+            (opts && opts.bypass) || '');
 
         // 2. Package, serve and force-install the spoofer.
         let extReady = null, autoDone = [];
@@ -4891,7 +7084,7 @@ applyGeolocationSpoof = function (win, sc) {
             ` -- applied live to ${up.length ? up.join(', ') : 'no running browser'}; ` +
             'nothing was closed');
 
-        // 4. Windows platform + Firefox.
+        // 4. Windows platform + the Gecko family.
         //
         //    In the child process, because this step alone measured 43
         //    synchronous `reg`/`sc`/`powershell` calls -- 2.3 to 5.0 s
@@ -4899,7 +7092,7 @@ applyGeolocationSpoof = function (win, sc) {
         //    window's messages, and it runs on every connect AND every
         //    switch. runGeoApply() also serialises them, so a fast second
         //    switch cannot leave the country they left on screen.
-        await runGeoApply(coord);
+        await runGeoApply(coord, proxy);
 
         //  Chrome and Brave refuse every automatic install route an app has
         //  on Windows, so say so plainly and once, instead of leaving the

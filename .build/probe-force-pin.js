@@ -55,6 +55,65 @@
 //  the middle. Nothing here widens the guard set -- every first hop named
 //  is already one of this Tor's own entry guards.
 //
+//  ── run 3, 2026-09-04, and the check that was too weak to make it ──
+//  8/9. One row failed: pinned to UnredactedAiFen (consensus 23.191.200.124),
+//  the page came out at 23.191.200.23. Onionoo says that address is
+//  UnredactedBB, a DIFFERENT relay in the same operator's /24 -- and that the
+//  pinned relay's exit_addresses is its own OR address, so it was not a relay
+//  exiting from a second address of its own. The stream really did leave
+//  somewhere else, and this probe's own sweep is why: it kept an id window
+//  (staleIdMax = maxCircuitId()) that is correct mid-build but not here, so a
+//  circuit Tor launched after the marker survived and was free to take the
+//  stream. That family runs 123 exits in one /24, which is why the substitute
+//  looked like a sibling.
+//
+//  Fixed, and the check made stronger than the one that failed: the sweep now
+//  closes every circuit but the pinned one, exactly as main.js:5523 does, and
+//  the verification no longer infers attachment from an IP -- it reads the
+//  stream's own circuit id out of GETINFO stream-status while the request is in
+//  flight and takes that circuit's last hop. An exit IP is now the fallback
+//  evidence, reported as such, and never counted as proof.
+//
+//  ── run 4, 2026-09-04, and the 30 s the app was spending on a no ───
+//  9/10. The row that failed was DE/demise -- Germany's highest-bandwidth exit,
+//  so the FIRST relay the app offers for that country -- and all three explicit
+//  builds died on the same reply: `552 No descriptor for "$3E10B71C…"`. The
+//  three pairs were AbsoluteCinema/koolkeith, tp3/prsv and
+//  AbsoluteCinema/ezioauditore: disjoint, so the fingerprint Tor was complaining
+//  about could only be the exit's.
+//
+//  Asked directly (tor 0.4.9.6, the app's own consensus cache): `GETINFO
+//  ns/id/3E10B71C…` answers with an `r demise` line, so the relay IS in this
+//  Tor's consensus -- and `GETINFO md/id/3E10B71C…` refuses the key with 552,
+//  while DE's other four candidates each answer it with a 449-771 byte
+//  microdescriptor. Consensus entry, no descriptor. Tor needs the descriptor for
+//  both halves of what the app does: it will not CHOOSE a relay it has no
+//  descriptor for (the 10 s wait was always going to time out) and it will not
+//  extend to one (each build failed in ~10 s).
+//
+//  So this is not a hole in "must connect, whatever it takes" -- the app's next
+//  escalation, restarting the engine with the relay pinned, is exactly what
+//  fetches a missing descriptor. It was a hole in how fast the app gets there:
+//  30 s of guaranteed failure first. TorControl.hasDescriptor() asks the one
+//  question, main.js skips the wait and the builds on a `false`, and
+//  forceExitCircuit() stops the pair loop when a 552 names the exit rather than
+//  retrying a pair that cannot matter. A `null` -- the question could not be
+//  asked -- still takes the old path, because skipping a candidate over an
+//  unanswered question would drop a relay that works.
+//
+//  The assertion this probe makes is restated to match what it can prove: every
+//  candidate either comes up, or fails for a reason the app recognises and
+//  escalates past. A row that fails for no nameable reason is still a defect.
+//
+//  Re-run after the fix, same 15 candidates, 10/10 -- and the row that had
+//  failed is the interesting one: `demise` was chosen by TOR ITSELF in 3035 ms,
+//  and the page came out at 77.90.185.93, its own consensus address, with the
+//  stream proven attached at the control port. So a missing microdescriptor is
+//  a TRANSIENT state, not a dead relay: Tor fetched it in the hours between the
+//  two runs. That is what makes the escalation the right answer rather than a
+//  consolation -- the descriptor arrives, and the only thing worth changing was
+//  how long the app spends waiting for a "no" it can already read.
+//
 //  Read-only with respect to the app: own ports, own DataDirectory under
 //  %TEMP%, the app's consensus cache is COPIED, a scratch ExitStore, and
 //  only this probe's tor.exe is killed.
@@ -258,7 +317,15 @@ async function extendTo(want, pool) {
         const lines = await ctl.cmd(`EXTENDCIRCUIT 0 $${d.g.fp},$${d.m.fp},$${want}`,
                                    { timeoutMs: 20000 });
         id = (/EXTENDED\s+(\d+)/.exec(lines.find(l => /EXTENDED/.test(l)) || '') || [])[1] || null;
-    } catch (e) { return { err: 'EXTENDCIRCUIT: ' + e.message.slice(0, 50), via: d }; }
+    } catch (e) {
+        //  Not truncated to 50 any more: run 3's log printed
+        //  `No descriptor for "$3E10B71C4D1B9` and cut the fingerprint in half,
+        //  which is exactly the character that says whether Tor is complaining
+        //  about the exit or about a borrowed hop.
+        const noDescriptor = /tor control 552:/.test(e.message) &&
+                             new RegExp('"\\$' + want + '"', 'i').test(e.message);
+        return { err: 'EXTENDCIRCUIT: ' + e.message.slice(0, 90), via: d, noDescriptor };
+    }
     if (!id) return { err: 'no circuit id in the reply', via: d };
 
     for (;;) {
@@ -291,20 +358,30 @@ async function forcePinTo(fp) {
         lastNewnymAt = Date.now();
         newnym = true;
     }
-    let built = await ctl.waitForExit(want, { timeoutMs: PATIENCE });
+    //  The app's own precheck, run here for the same reason it runs there --
+    //  see the run-4 note in the header. `false` means neither the wait nor a
+    //  single explicit build can succeed, so spending 8 s + 3 x 20 s on them
+    //  measures nothing except how long it takes to fail.
+    const hasDesc = await ctl.hasDescriptor(want);
+    let built = hasDesc === false
+        ? false
+        : await ctl.waitForExit(want, { timeoutMs: PATIENCE });
     const passiveMs = Date.now() - t0;
     const attempts = [];
-    if (!built) {
+    if (!built && hasDesc !== false) {
         const pool = await donors(want);
         for (let i = 0; i < TRIES && !built; i++) {
             const a = await extendTo(want, pool);
             attempts.push(a);
             if (a.built) built = true;
             if (a.err === 'no guard/middle pair left to try') break;
+            //  A 552 that names the exit is not about this pair. Every other
+            //  pair would fail identically -- measured, three times, in run 3.
+            if (a.noDescriptor) break;
         }
     }
     return { built, how: built ? (attempts.length ? 'forced' : 'tor') : 'none',
-             ms: Date.now() - t0, passiveMs, purged, newnym, stashed,
+             ms: Date.now() - t0, passiveMs, purged, newnym, stashed, hasDesc,
              pairs: PAIRS.length, attempts };
 }
 
@@ -314,14 +391,64 @@ async function sweepAndVerify(want) {
     //  purge is what empties the circuit list, and the pairs standing right now
     //  are the ones the NEXT candidate will have to borrow.
     await harvestPairs();
-    const hi = await ctl.maxCircuitId();
-    const swept = await ctl.purgeCircuitsExcept(want, { staleIdMax: hi });
-    let ip = null, err = null;
+    //  NO ID WINDOW HERE, and that is the whole point. This used to sweep with
+    //  staleIdMax = maxCircuitId(), a "now" marker read a moment earlier, which
+    //  is right in forcePinTo() above -- there a circuit is mid-build and closing
+    //  it by id would close the one being built. It is wrong here: the pinned
+    //  circuit is already BUILT and is kept BY FINGERPRINT, so every other
+    //  circuit can go, and any circuit Tor launched after that marker was read
+    //  survived the sweep and was free to carry the stream.
+    //
+    //  MEASURED, once, and it is why this function was rewritten. Pinned to
+    //  UnredactedAiFen (F0C16344..., consensus address 23.191.200.124), the page
+    //  came out at 23.191.200.23 -- which onionoo says is UnredactedBB
+    //  (7AC25DC9...), a DIFFERENT relay in the same operator's /24. That family
+    //  runs 123 exits in 23.191.200.0/24, so a surviving pre-built circuit
+    //  landing on a sibling is likely rather than freak. Two candidate causes
+    //  were separated by asking onionoo directly: exit_addresses for the pinned
+    //  relay is ["23.191.200.124"], its own OR address, so it was NOT a relay
+    //  exiting from a second address of its own -- the stream went somewhere
+    //  else. main.js:5523 already sweeps with MAX_SAFE_INTEGER for exactly this
+    //  reason when it wants "this exit and nothing else", so this now matches
+    //  the app instead of being a looser version of it.
+    const swept = await ctl.purgeCircuitsExcept(want, { staleIdMax: Number.MAX_SAFE_INTEGER });
+
+    //  And then the fact itself, rather than a proxy for it. An exit IP is
+    //  evidence about WHERE the page came out; the question being asked is which
+    //  CIRCUIT carried it, and Tor answers that directly. `GETINFO stream-status`
+    //  prints `<id> <status> <circId> <target>`, so while the fetch is in flight
+    //  the stream to api.ipify.org is looked up, its circuit id read, and that
+    //  circuit's last hop taken from circuit-status. That is attachment, proven.
+    //  It is polled because a stream lives for as long as the request and no
+    //  longer: miss the window and `attached` stays null, which the caller
+    //  reports as unproven rather than as a pass.
+    let attached = null, ip = null, err = null, watching = true;
+    const watcher = (async () => {
+        while (watching) {
+            try {
+                const lines = String(await ctl.getInfo('stream-status')).split('\n');
+                for (const line of lines) {
+                    const p = line.trim().split(/\s+/);
+                    //  circId 0 means "not attached to anything yet".
+                    if (p.length < 4 || p[2] === '0' || !/ipify/i.test(p[3])) continue;
+                    const c = (await ctl.circuits()).find(x => x.id === p[2]);
+                    if (c && c.exit) {
+                        attached = { circId: c.id, fp: c.exit.fp, nick: c.exit.nick };
+                        watching = false;
+                    }
+                    break;
+                }
+            } catch (e) { /* a closed stream between the two reads is normal */ }
+            if (watching) await sleep(120);
+        }
+    })();
     try {
         const r = await socksGet('https://api.ipify.org/', { socksPort: SOCKS, timeoutMs: 25000, maxBytes: 4096 });
         ip = (/\b(?:\d{1,3}\.){3}\d{1,3}\b/.exec(r.body || '') || [])[0] || null;
     } catch (e) { err = e.message.slice(0, 50); }
-    return { swept, ip, err };
+    watching = false;
+    await watcher;
+    return { swept, ip, err, attached };
 }
 
 async function finish() {
@@ -409,11 +536,32 @@ async function finish() {
             const v = r.built ? await sweepAndVerify(c.fp.toUpperCase()) : { swept: 0, ip: null };
             rows.push({ cc, c, nick, r, v });
             console.log(`   ${cc.toUpperCase()}  ${nick.padEnd(18)} ` +
-                        `${(r.built ? r.how : 'FAILED').padEnd(9)} ` +
+                        `${(r.built ? r.how : (r.hasDesc === false ? 'no md' : 'FAILED')).padEnd(9)} ` +
                         `${String(r.ms).padStart(6)}  ${String(r.passiveMs).padStart(7)}  ` +
                         `${String(r.attempts.length).padStart(6)}  ${String(v.swept).padStart(5)}  ` +
                         (v.ip ? `${v.ip} ${v.ip === c.ip ? '(that relay)' : 'BUT THE RELAY IS ' + c.ip}`
                               : '(no answer' + (v.err ? ': ' + v.err : '') + ')'));
+            //  Why it was not even attempted, when that is the answer. A row
+            //  printed with a bare FAILED and no attempts under it is what sent
+            //  run 3 looking for a defect that was Tor's consensus, not the app.
+            if (r.hasDesc === false) {
+                console.log('        GETINFO md/id says Tor holds no microdescriptor for this ' +
+                            'relay -- it cannot choose it and cannot be told to extend to it, ' +
+                            'so the app skips the wait and restarts the engine with it pinned');
+            }
+            //  The attachment, printed next to the IP rather than instead of it:
+            //  the IP says where the page came out and this says which circuit
+            //  carried it, and only the second one is the claim being made.
+            if (v.attached) {
+                console.log('        stream attached to circuit ' + v.attached.circId +
+                            ', whose exit is ' + (v.attached.nick || v.attached.fp.slice(0, 8)) +
+                            ' ' + (v.attached.fp === c.fp.toUpperCase()
+                                    ? '-- the pinned relay, read from the control port'
+                                    : '-- NOT THE PINNED RELAY (' + nick + ')'));
+            } else if (r.built) {
+                console.log('        stream-status never showed this stream attached -- the exit ' +
+                            'IP is the only evidence for this row');
+            }
             for (const a of r.attempts.filter(x => x.err)) {
                 console.log(`        explicit build via ${a.via ? (a.via.g.nick || a.via.g.fp.slice(0, 6)) + '/' +
                             (a.via.m.nick || a.via.m.fp.slice(0, 6)) + ' [' + a.via.from + ']' : '?'}: ${a.err}`);
@@ -433,31 +581,61 @@ async function finish() {
     const byTor  = built.filter(r => r.r.how === 'tor');
     const forced = built.filter(r => r.r.how === 'forced');
     const dead   = tried.filter(r => !r.r.built);
-    const right  = built.filter(r => r.v.ip && r.v.ip === r.c.ip);
-    const wrong  = built.filter(r => r.v.ip && r.v.ip !== r.c.ip);
-    const silent = built.filter(r => !r.v.ip);
+    //  A candidate that did not come up is not automatically a hole in "must
+    //  connect, whatever it takes". Split it by whether the app RECOGNISES why:
+    //  a relay Tor holds no microdescriptor for cannot be waited for and cannot
+    //  be extended to, the app detects that in one GETINFO and escalates
+    //  straight to an engine restart with the relay pinned -- which is the route
+    //  that fetches the descriptor. `unexplained` is the class that would be a
+    //  defect: it failed and nothing in the app knows why.
+    const noDesc      = dead.filter(r => r.r.hasDesc === false ||
+                                         r.r.attempts.some(a => a.noDescriptor));
+    const unexplained = dead.filter(r => !noDesc.includes(r));
+    //  Split by what each row can actually prove. `proven` read the circuit the
+    //  stream attached to off the control port and it was the pinned relay;
+    //  `elsewhere` read it and it was someone else, which is the real failure;
+    //  `byIpOnly` never caught the stream in stream-status, so the exit IP is all
+    //  there is -- kept as evidence, but never counted as proof of attachment.
+    const proven    = built.filter(r => r.v.attached &&
+                                        r.v.attached.fp === r.c.fp.toUpperCase());
+    const elsewhere = built.filter(r => r.v.attached &&
+                                        r.v.attached.fp !== r.c.fp.toUpperCase());
+    const byIpOnly  = built.filter(r => !r.v.attached && r.v.ip);
+    const ipWrong   = byIpOnly.filter(r => r.v.ip !== r.c.ip);
+    const silent    = built.filter(r => !r.v.ip);
 
     console.log(`   ${tried.length} candidates across ${CCS.length} countries ` +
                 `(${rows.length - tried.length} skipped as BadExit).`);
     console.log(`   ${byTor.length} were chosen by Tor itself within ${PATIENCE} ms; ` +
-                `${forced.length} needed the path named explicitly; ${dead.length} never came up.`);
+                `${forced.length} needed the path named explicitly; ${dead.length} never came up ` +
+                `(${noDesc.length} because Tor holds no microdescriptor for them, ` +
+                `${unexplained.length} for no reason the app can name).`);
     if (forced.length) {
         const ms = forced.map(r => r.r.ms).sort((a, b) => a - b);
-        console.log(`   the forced ones took ${ms[0]}-${ms[ms.length - 1]} ms in total -- against the ` +
-                    '25 000 ms the app currently spends failing.');
+        console.log(`   the forced ones took ${ms[0]}-${ms[ms.length - 1]} ms in total -- against ` +
+                    `the ${PATIENCE} ms the app now waits before it stops asking Tor to choose, ` +
+                    'and the 25 000 ms it used to spend failing.');
     }
-    console.log(`   ${right.length} of ${built.length} verified: the page came out at exactly the ` +
-                `relay's own consensus address. ${wrong.length} came out elsewhere, ` +
-                `${silent.length} did not answer.`);
+    console.log(`   ${proven.length} of ${built.length} proven at the control port: the stream ` +
+                `attached to a circuit whose exit IS the pinned relay. ${elsewhere.length} ` +
+                `attached to some other exit, ${byIpOnly.length} were never caught attached ` +
+                `(${byIpOnly.length - ipWrong.length} of those came out at the relay's own ` +
+                `address anyway), ${silent.length} did not answer.`);
 
-    ok(dead.length === 0,
-       'every candidate the app would offer was reachable -- so "must connect, whatever it takes" ' +
+    ok(unexplained.length === 0,
+       'every candidate the app would offer either came up, or failed for a reason the app ' +
+       'recognises in one GETINFO and escalates past -- so "must connect, whatever it takes" ' +
        'is implementable with what Tor already exposes',
-       dead.map(r => r.cc.toUpperCase() + '/' + r.nick).join(', ') + ' stayed unreachable');
-    ok(built.length > 0 && wrong.length === 0,
-       'and once pinned and swept, traffic left through that exact relay every time -- an ' +
-       'explicitly built circuit carries real streams',
-       wrong.map(r => `${r.nick}: page at ${r.v.ip}, relay is ${r.c.ip}`).join('; '));
+       unexplained.map(r => r.cc.toUpperCase() + '/' + r.nick).join(', ') +
+       ' failed and nothing here explains why');
+    ok(built.length > 0 && elsewhere.length === 0,
+       'and once pinned and swept, the stream attached to the pinned relay every time it could ' +
+       'be read -- an explicitly built circuit carries real streams',
+       elsewhere.map(r => `${r.nick}: stream took circuit ${r.v.attached.circId} out through ` +
+                          `${r.v.attached.nick || r.v.attached.fp.slice(0, 8)}`).join('; '));
+    ok(ipWrong.length === 0,
+       'and no row that went unread at the control port came out at a foreign address either',
+       ipWrong.map(r => `${r.nick}: page at ${r.v.ip}, relay is ${r.c.ip}`).join('; '));
     ok(silent.length === 0,
        'every pinned exit answered a real HTTPS request through the tunnel',
        silent.map(r => r.nick).join(', ') + ' built a circuit but returned nothing');

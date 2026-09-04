@@ -6,6 +6,18 @@ const fs = require('fs');
 const path = require('path');
 
 const root = process.argv[2];
+//  There is no default to fall back on, and inventing one would be worse than
+//  saying so: the profile this reads lives under the fpext-XXXXXX directory
+//  mkdtemp gave that run, which test-ext-install.js prints and which is
+//  different every time. Without it the next line threw ERR_INVALID_ARG_TYPE
+//  with a stack trace, which reads as a broken probe in a sweep rather than as
+//  a missing argument.
+if (!root) {
+    console.log('ABORT: pass the kept red-run directory, the one holding udd-Brave-w.');
+    console.log('       usage: node .build/probe-red-profile.js <...\\Temp\\fpext-XXXXXX>');
+    console.log('       .build/test-ext-install.js prints that path when it keeps a profile.');
+    process.exit(3);
+}
 const dir = path.join(root, 'udd-Brave-w', 'Default', 'Local Extension Settings');
 for (const sub of fs.readdirSync(dir)) {
     const d = path.join(dir, sub);

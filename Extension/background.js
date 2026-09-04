@@ -129,6 +129,65 @@ chrome.runtime.onInstalled.addListener(details => {
 //  this a no-op in every normal case.
 chrome.runtime.onStartup.addListener(() => announceOnce(false));
 
+// ── Which hosts skip the tunnel, in Chromium's own bypass format ────
+//  THE FIFTH COPY OF ONE DECISION, and the only one that used to get it wrong.
+//  The other four are WinINET's ProxyOverride and netsh winhttp's bypass-list
+//  (both from bypassToProxyOverride(), main.js:861), the Chromium
+//  ProxyBypassList policy (forceAllBrowsersOntoProxy(), same function), and
+//  Gecko's network.proxy.no_proxies_on (GeoSpoof.geckoNoProxy(), which carries
+//  main.js's host shapes character-for-character and is pinned there by
+//  .build/probe-gecko-proxy.js). This one had its own rules, and they were
+//  wrong in exactly the way main.js's comment records as fixed:
+//
+//    1. OVER-MATCH -- a leak, not untidiness. It emitted `'*' + host`, and
+//       Chromium's own bypass documentation gives the counter-example:
+//       `*foobar.com` matches `barfoobar.com`. So `bank.com` in the user's
+//       split-tunnel list also sent `notbank.com` DIRECT, with the real IP on
+//       it, in the browser only -- Windows tunnelled that host at the same
+//       moment. The form for "this host and its subdomains" is `host` plus
+//       `*.host`, which is what is emitted now.
+//
+//    2. NO SHAPE CHECK. Anything surviving a strip of `*` and whitespace was
+//       kept. The scheme strip was `/^https?:\/\//` with no `i`, so
+//       `HTTPS://Bank.COM/x` became the two bypass rules `*HTTPS:` and
+//       `HTTPS:`; no port was stripped, so `foo.com:8080` bypassed only that
+//       one port here while Windows bypassed every port; and a literal
+//       `<local>` typed by the user was pushed a second time, as `*<local>`.
+//
+//  Chromium's bypass format is the same one the ProxyBypassList policy takes,
+//  so unlike Gecko this copy does not need a format of its own: joined with
+//  `;` this array IS the policy string main.js writes, and
+//  .build/probe-ext-bypass.js asserts that equality over a hostile corpus
+//  rather than trusting the two to stay in step.
+const BP_HOST = /^(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})*$/;
+const BP_IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+function bypassRules(bypassList) {
+    const out = [], dropped = [];
+    for (const raw of String(bypassList || '').replace(/,/g, ';').split(';')) {
+        const e = raw.trim()
+            .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')   // scheme
+            .replace(/\/.*$/, '')                      // path
+            .replace(/:\d+$/, '')                      // port
+            .replace(/^\*\./, '').replace(/\.$/, '')   // leading *., trailing dot
+            .toLowerCase();
+        if (!e || e === '<local>') continue;            // <local> added below, once
+        if (BP_IPV4.test(e))      { out.push(e); continue; }
+        if (e.length <= 253 && BP_HOST.test(e)) { out.push(e, '*.' + e); continue; }
+        dropped.push(raw.trim().slice(0, 40));
+    }
+    //  Named rather than silently swallowed, the same way main.js names them:
+    //  an entry that does nothing is a host the user believes is excluded.
+    if (dropped.length) {
+        console.warn('FreeProxy: split-tunnel entries ignored -- not a hostname or ' +
+                     'an IPv4 address:', dropped);
+    }
+    //  localhost and 127.0.0.1 first and unconditionally: `<local>` covers names
+    //  with no dot in them, NOT the loopback literal, and this worker's own
+    //  socket to the desktop app is ws://127.0.0.1:8080. De-duplicated, so a
+    //  list saved twice cannot grow the rule set.
+    return ['localhost', '127.0.0.1', ...new Set(out), '<local>'];
+}
+
 // ── Proxy ───────────────────────────────────────────────────────────
 //  WHY THIS ONE HAS A WATCHDOG ON IT
 //
@@ -255,14 +314,9 @@ function setBrowserProxy(enabled, bypassList, done) {
 
     //  Split-tunnel entries from the desktop app are honoured here too, so
     //  a site the user excluded behaves the same in the browser as it does
-    //  system-wide.
-    const bypass = ["localhost", "127.0.0.1", "<local>"];
-    if (bypassList && bypassList.trim()) {
-        bypassList.replace(/,/g, ';').split(';').forEach(raw => {
-            const host = raw.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/[\*\s]/g, '');
-            if (host) bypass.push('*' + host, host);
-        });
-    }
+    //  system-wide -- which means the SAME rules, not a second set of them.
+    //  See bypassRules() above for what the second set used to send direct.
+    const bypass = bypassRules(bypassList);
     //  Armed BEFORE the write, not after. The window between the two is exactly
     //  where a worker teardown would leave a proxy nobody is watching.
     armProxyGuard(true);

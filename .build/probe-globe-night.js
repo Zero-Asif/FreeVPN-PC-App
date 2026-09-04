@@ -3,6 +3,8 @@
 //  .build/probe-globe-night.js  --  the OTHER side of the globe, measured.
 //
 //  Run:  node_modules/electron/dist/electron.exe .build/probe-globe-night.js
+//        -- that is GN_SET=3, the three-row regression suite: as reported, pre-fix,
+//           and what ships. GN_SET=1 and GN_SET=2 are the two searches that chose it.
 //
 //  WHY THIS FILE EXISTS
 //  --------------------
@@ -59,7 +61,14 @@ const HOME = { lat: 23.8103, lng: 90.4125, city: 'Dhaka', country: 'Bangladesh',
 const SUB  = { lat: 23.5, lng: 53.9 };
 const ANTI = { lat: -SUB.lat, lng: SUB.lng - 180 };
 
-const SET = process.env.GN_SET || '1';
+//  The set defaults to 3, the regression suite, because an unqualified run has to be
+//  answerable with a pass or a fail. Sets 1 and 2 are searches, and set 1 is the one
+//  whose finding is written out below: NOT ONE of its nine candidates got within 55%
+//  of the pre-fix night side on both counts. Defaulting to it made the verdict's "at
+//  least one candidate is usable" red by construction -- on the very set that exists
+//  to record that none was -- which is indistinguishable from a regression to anyone
+//  reading the output. GN_SET=1 and GN_SET=2 still run the two searches.
+const SET = process.env.GN_SET || '3';
 const TAG = process.env.GN_TAG || SET;
 const LOG = path.join(__dirname, `probe-globe-night-${TAG}.log`);
 try { fs.writeFileSync(LOG, ''); } catch (e) {}
@@ -267,6 +276,10 @@ const FRAME_JS = `(spots => {
 })`;
 
 let win = null;
+//  The app's own two intensities, as the scene hands them over in INIT. verdict()
+//  needs them to tell a regression suite from a search: a set that holds the shipped
+//  row is the former, and only the former has a row whose failure is a defect.
+let SHIPPED = null;
 const run  = js => win.webContents.executeJavaScript(js, true);
 const logs = [], netHits = [];
 let died = null;
@@ -429,11 +442,24 @@ async function sweep() {
     ok(st.found.vAmb && st.found.vAmb.i === 0 && st.found.vDir && st.found.vDir.i === 0,
        "globe.gl's own pair is still silenced, so this run measures the app's lights only",
        JSON.stringify([st.found.vAmb, st.found.vDir]));
-    ok(st.found.aAmb && Math.abs(st.found.aAmb.i - 0.90) < 1e-9 &&
-       st.found.aDir && Math.abs(st.found.aDir.i - 0.42) < 1e-9,
-       'globe-controller.js ships ambient 0.90 with a 0.42 directional -- read back out ' +
-       'of the running scene, so the rows below are candidates against the real app',
+    //  Read out of globe-controller.js rather than typed here a second time. The
+    //  numbers this file chose are the numbers that file now ships, and a copy of
+    //  them in a probe is a copy that goes stale the next time the lighting is
+    //  touched -- silently agreeing with a scene it no longer describes, or going
+    //  red about a change that was deliberate. The source is the one home.
+    const SRC  = fs.readFileSync(path.join(ROOT, 'globe-controller.js'), 'utf8');
+    const mAmb = SRC.match(/new window\.THREE\.AmbientLight\(0x[0-9a-fA-F]+,\s*([\d.]+)\)/);
+    const mDir = SRC.match(/new window\.THREE\.DirectionalLight\(0x[0-9a-fA-F]+,\s*([\d.]+)\)/);
+    ok(mAmb && mDir, 'globe-controller.js states its two intensities where they can be read',
+       `ambient ${mAmb && mAmb[1]}, directional ${mDir && mDir[1]}`);
+    ok(mAmb && mDir && st.found.aAmb && Math.abs(st.found.aAmb.i - +mAmb[1]) < 1e-9 &&
+       st.found.aDir && Math.abs(st.found.aDir.i - +mDir[1]) < 1e-9,
+       `globe-controller.js ships ambient ${mAmb ? mAmb[1] : '?'} with a ` +
+       `${mDir ? mDir[1] : '?'} directional -- read back out of the running scene, so the ` +
+       'rows below are candidates against the real app',
        JSON.stringify([st.found.aAmb, st.found.aDir]));
+    SHIPPED = { amb: st.found.aAmb ? st.found.aAmb.i : null,
+                dir: st.found.aDir ? st.found.aDir.i : null };
     ok(st.found.fill && st.found.fill.pos[0] === -st.sun[0] &&
        st.found.fill.pos[1] === -st.sun[1] && st.found.fill.pos[2] === -st.sun[2],
        'the fill light is aimed at exactly -SUN_DIR, so on the day side it adds nothing',
@@ -616,8 +642,32 @@ function verdict(rows) {
     const usable = g.filter(x => x.r.i !== 1 && x.dayClean && x.sandKept && x.reliefKept &&
                                  x.nightPct >= 0.55 && x.seePct >= 0.55);
     usable.sort((a, b) => Math.min(b.nightPct, b.seePct) - Math.min(a.nightPct, a.seePct));
-    ok(usable.length > 0,
-       'at least one candidate is legible at night without bringing the white back');
+    //  WHICH CLAIM THIS GATE IS. A set that CONTAINS the shipped lighting is a
+    //  regression suite, and there the row that ships has to clear all five gates: if
+    //  it stops clearing them the app's globe has regressed, which is worth failing
+    //  over. A set that does not contain it is a search, and a search legitimately
+    //  comes back empty -- set 1's nine candidates all did, which is this file's own
+    //  recorded finding and the whole reason set 2 exists. Failing on that turned the
+    //  plain run permanently red, so an empty search is printed as the finding it is.
+    const shipped = g.find(x => SHIPPED && x.r.c.fill === 0 && !x.r.c.vAmb && !x.r.c.vDir &&
+                                Math.abs(x.r.c.aAmb - SHIPPED.amb) < 1e-9 &&
+                                Math.abs(x.r.c.aDir - SHIPPED.dir) < 1e-9);
+    if (shipped) {
+        ok(usable.some(x => x.r.i === shipped.r.i),
+           `the lighting that ships -- row ${shipped.r.i}, ambient ${SHIPPED.amb} with a ` +
+           `${SHIPPED.dir} directional -- is still legible at night without bringing the ` +
+           'white back, on all five gates',
+           `day-clean ${shipped.dayClean}, sand ${shipped.sandKept}, relief ` +
+           `${shipped.reliefKept}, night ${(100 * shipped.nightPct).toFixed(0)}% (needs 55), ` +
+           `land-sea ${(100 * shipped.seePct).toFixed(0)}% (needs 55)`);
+    } else {
+        console.log(`  --   skipped: no row here matches the shipped lighting (ambient ` +
+                    `${SHIPPED ? SHIPPED.amb : '?'}, directional ${SHIPPED ? SHIPPED.dir : '?'}` +
+                    `), so this set is a search and not a regression suite. ` +
+                    `${usable.length} of its ${g.length} rows cleared all five gates` +
+                    (usable.length ? '.' : ' -- which for set 1 is this file\'s finding, ' +
+                     'not a failure.') + ' GN_SET=3 is the regression suite.');
+    }
     if (usable.length) {
         const w = usable[0];
         console.log(`\n   best by measurement: [${w.r.i}] ${w.r.c.n}  ` +

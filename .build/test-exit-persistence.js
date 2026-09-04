@@ -103,9 +103,10 @@ function onionoo(counts) {
  *                  null means no source answered at all.
  */
 function build({ counts = { se: 20 }, live = () => false, boot = () => true,
-                 geo = () => null, bridges = false, verified = null } = {}) {
+                 geo = () => null, bridges = false, verified = null,
+                 hasDesc = () => true } = {}) {
     const seen = { setConf: [], waited: [], forced: [], spawned: [], probes: [],
-                   opened: 0, logs: [], progress: [] };
+                   desc: [], opened: 0, logs: [], progress: [] };
     const state = { pin: null };
 
     const Logger = {
@@ -133,6 +134,11 @@ function build({ counts = { se: 20 }, live = () => false, boot = () => true,
         purgeCircuitsExcept: async () => 0,
         newIdentity: async () => true,
         activeExits: async () => [],
+        //  The one question the app asks before it spends the wait and the
+        //  explicit builds: does this Tor hold the relay's microdescriptor at
+        //  all? True for every candidate unless a scenario says otherwise --
+        //  which is the ordinary case, measured 14 of 15 in probe-force-pin.
+        hasDescriptor: async fp => { seen.desc.push(fp); return hasDesc({ fp }); },
         waitForExit: async (fp, o) => { seen.waited.push(fp); return live({ fp }); },
         forceExitCircuit: async (fp, o) => {
             seen.forced.push(fp);
@@ -299,6 +305,64 @@ const mk = o => { const t = build(o); dirs.push(t.dir); return t; };
         ok(t.seen.setConf.length === 3, 'three SETCONF re-pins instead', String(t.seen.setConf.length));
         ok(t.seen.setConf[0] === '$' + FP('se', 0),
            'starting with candidate 0, which repinFirst now pins itself');
+        ok(t.seen.desc.length === 3 && t.seen.desc.length === t.seen.waited.length,
+           'and the descriptor question is asked once per candidate -- one GETINFO, in front ' +
+           'of the wait it might save', `${t.seen.desc.length} asked, ${t.seen.waited.length} waited`);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  A relay in the consensus with NO MICRODESCRIPTOR cannot be chosen by
+    //  Tor and cannot be extended to. MEASURED (tor 0.4.9.6, 2026-09-04):
+    //  `demise`, Germany's highest-bandwidth exit and therefore the first
+    //  relay the app offers for DE, was exactly that -- `GETINFO ns/id`
+    //  answered for it, `md/id` refused with 552 -- and the app spent the
+    //  full wait plus three ~10 s explicit builds discovering what one
+    //  GETINFO says at once. The restart IS the right escalation (it is what
+    //  fetches the descriptor: hours later Tor chose `demise` itself in
+    //  3035 ms), so the only thing worth changing was how long the app
+    //  spends reaching it.
+    // ════════════════════════════════════════════════════════════════
+    console.log('\n── a relay Tor holds no descriptor for is not waited for ──');
+    {
+        //  `live: () => true` is the point: the running engine WOULD oblige if
+        //  it were asked. The app must still not ask, because Tor cannot build
+        //  to a relay whose md it does not have -- so an obliging stub here
+        //  proves the skip is the precheck's doing and not a failure it hid.
+        const t = mk({ counts: { se: 3 }, hasDesc: () => false,
+                       live: () => true, boot: () => true,
+                       geo: () => ({ cc: 'SE', ip: '185.65.134.66', votes: { SE: 5 }, answered: 4 }) });
+        const v = await t.attemptCountry('se', { limit: 3 });
+        ok(v.verified && v.fp === FP('se', 0),
+           'the country is still reached -- a missing descriptor delays the relay, it does not ' +
+           'disqualify it', `${v.cc} at ${v.ip}`);
+        ok(t.seen.desc.length === 1, 'one GETINFO md/id was enough to decide',
+           `${t.seen.desc.length} asked`);
+        ok(t.seen.waited.length === 0 && t.seen.forced.length === 0,
+           'and neither the wait nor a single explicit build is spent on a relay Tor cannot ' +
+           'reach at all', `waited ${t.seen.waited.length}, forced ${t.seen.forced.length}`);
+        ok(t.seen.logs.some(l => /holds no descriptor for/.test(l)),
+           'the log names the relay and says the wait and the builds were skipped');
+        ok(t.seen.spawned.length === 1 && t.seen.spawned[0].exitSpec === '$' + FP('se', 0),
+           'it goes straight to the engine restart with that relay pinned -- which is the step ' +
+           'that fetches the descriptor', t.seen.spawned.map(s => s.exitSpec.slice(0, 6)).join(','));
+    }
+
+    {
+        //  null is not false. A question that could not be asked -- a closed
+        //  control socket, a timeout, a fingerprint that is not one -- is no
+        //  evidence about the relay, and reading it as "no descriptor" would
+        //  skip a relay that works. It must cost the app nothing but the
+        //  ordinary path.
+        const t = mk({ counts: { se: 3 }, hasDesc: () => null,
+                       live: () => true, boot: () => true,
+                       geo: () => ({ cc: 'SE', ip: '185.65.134.66', votes: { SE: 5 }, answered: 4 }) });
+        const v = await t.attemptCountry('se', { limit: 3 });
+        ok(v.verified && t.seen.waited.length === 1,
+           'an unanswerable precheck falls through to the normal wait rather than writing the ' +
+           'relay off', `waited ${t.seen.waited.length}`);
+        ok(t.seen.spawned.length === 0,
+           'and the switch still costs seconds, not a bootstrap -- null cost nothing',
+           `${t.seen.spawned.length} restarts`);
     }
 
     console.log('\n── a bridged connection must not lose the tunnel to a switch ──');
@@ -392,6 +456,15 @@ const mk = o => { const t = build(o); dirs.push(t.dir); return t; };
            String((src.match(/await startTor\(\{/g) || []).length));
         ok(/reason: answers \? 'exhausted' : \(probed \? 'no-answer' : 'unreachable'\)/.test(src),
            'and the three failures are still told apart');
+        ok(src.indexOf('await ctl.hasDescriptor(cand.fp)') > 0 &&
+           src.indexOf('await ctl.hasDescriptor(cand.fp)') <
+           src.indexOf('await ctl.waitForExit(cand.fp'),
+           'the descriptor question is asked BEFORE the wait it exists to save');
+        ok(/let built = hasDesc === false\s*\n\s*\? false\s*\n\s*: await ctl\.waitForExit/.test(src),
+           'a relay with no descriptor is not waited for');
+        ok(/if \(!built && hasDesc !== false\) \{/.test(src),
+           'and it is not built to either -- while `null`, the answer that could not be had, ' +
+           'still goes down the ordinary path');
     }
 
     for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) {} }

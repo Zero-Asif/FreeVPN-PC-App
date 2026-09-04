@@ -48,7 +48,12 @@ const ok = (cond, name, extra) => {
 const log = { debug: () => {}, info: () => {}, success: () => {},
               warn: () => {}, error: (...a) => console.log('   ERROR:', ...a) };
 
-const strip = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+const { stripComments } = require('./srcstrip.js');
+//  Shared, and in that order, because "block comments first" pairs the `/*`
+//  inside a prose `Tun/**` with a `*/` 890 lines later and deletes the code in
+//  between -- silently, and a negative assertion over the gap then passes. See
+//  .build/srcstrip.js.
+const strip = s => stripComments(s, 'source');
 const read = f => fs.readFileSync(path.join(ROOT, f), 'utf8');
 const mainRaw = read('main.js');
 const rendRaw = read('renderer.js');

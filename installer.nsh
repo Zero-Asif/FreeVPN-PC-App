@@ -86,10 +86,34 @@
   ; ── 1. Windows Firewall: tor.exe + app outbound allow ──────────
   ;  Named rules, deleted first so a repeat install cannot stack duplicates.
   ;  lib/installer-tasks.js knows these same two names and removes them on
-  ;  uninstall, together with the three the running app creates.
+  ;  uninstall, together with the ones the running app creates.
+  ;
+  ;  THE PATH MATTERS, AND IT IS NOT $INSTDIR. Up to v2.0.4 this rule named
+  ;  "$INSTDIR\resources\app.asar.unpacked\Tor\tor\tor.exe" -- a file that
+  ;  exists and never runs. main.js setupWritableTor() copies the whole Tor
+  ;  directory to ProgramData at first start and launches THAT copy, because
+  ;  tor.exe needs a writable DataDirectory next to it and Program Files is not
+  ;  writable. WFP matches a rule to a process by image path, so the rule was
+  ;  for the wrong binary: it permitted an executable nothing ever started, and
+  ;  the process that did start was covered only by whatever Windows decided by
+  ;  default. firstRunCheck() then found a rule with the right NAME and reported
+  ;  "Firewall rule present", which is how a wrong path survives four releases.
+  ;
+  ;  Read from the environment rather than assumed: $APPDATA depends on the
+  ;  shell-var context electron-builder happens to have set, and getting that
+  ;  wrong here writes a rule for a per-user path instead.
+  ReadEnvStr $6 "ProgramData"
+  ${If} $6 == ""
+    StrCpy $6 "C:\ProgramData"
+  ${EndIf}
   DetailPrint "Setting up Windows Firewall rules..."
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Tor Engine"'
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FreeProxy Tor Engine" dir=out action=allow program="$INSTDIR\resources\app.asar.unpacked\Tor\tor\tor.exe" enable=yes profile=any description="FreeProxy VPN Tor Engine"'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FreeProxy Tor Engine" dir=out action=allow program="$6\freeproxy-vpn\Tor\tor\tor.exe" enable=yes profile=any description="FreeProxy VPN Tor Engine"'
+  ;  The bridge transport, same story: it is spawned by tor.exe from the
+  ;  ProgramData copy, only in obfs4 bridge mode, and it makes its own outbound
+  ;  connections rather than going through tor.exe's socket.
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Bridge Transport"'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FreeProxy Bridge Transport" dir=out action=allow program="$6\freeproxy-vpn\Tor\tor\pluggable_transports\lyrebird.exe" enable=yes profile=any description="FreeProxy VPN obfs4 bridge transport"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy App"'
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FreeProxy App" dir=out action=allow program="$INSTDIR\FreeProxy VPN.exe" enable=yes profile=any description="FreeProxy VPN Application"'
   DetailPrint "Firewall configured."
@@ -495,30 +519,78 @@
   nsExec::ExecToLog 'netsh interface isatap set state default'
   nsExec::ExecToLog 'netsh interface 6to4 set state default'
 
-  ;  Firewall: the two this installer created plus the rules the running app
+  ;  Firewall: the ones this installer created plus the rules the running app
   ;  creates. Named, so nothing else in the profile is touched.
   ;
-  ;  The two DNS blocks are the ones that must not survive: they forbid
-  ;  outbound port 53 and 853 to everything except 127.0.0.1, which is correct
-  ;  while Tor is answering there and catastrophic once it is not -- a machine
-  ;  that resolves nothing, with no visible cause in any Windows dialog.
+  ;  ORDER IS LOAD-BEARING. The outbound policy goes back to the Windows default
+  ;  FIRST. lib/containment.js can put every profile into default-deny -- that is
+  ;  what the Kill Switch means in v2.0.5 -- and it survives a crash, a kill and
+  ;  an uninstall-while-connected. Deleting the "FreeProxy Allow *" rules while
+  ;  that policy is still in force would move the machine from "only this app's
+  ;  programs have a network" to "nothing has a network", permanently, with the
+  ;  app already gone. blockinbound,allowoutbound is the shipped Windows default
+  ;  for all three profiles, not a value this app invented, and it is applied
+  ;  unconditionally rather than by reading a state file some killed process may
+  ;  have half-written.
   ;
-  ;  The last one is FW_RULE in lib/geo-spoof.js -- the lfsvc shield. Leaving
-  ;  that behind would keep Windows location resolution broken after the app
-  ;  is gone.
+  ;  The DNS blocks are the ones that must not survive: they forbid outbound
+  ;  port 53 and 853 to everything except 127.0.0.1, which is correct while Tor
+  ;  is answering there and catastrophic once it is not -- a machine that
+  ;  resolves nothing, with no visible cause in any Windows dialog. Both the
+  ;  v2.0.5 per-protocol names and the single pre-2.0.5 name are deleted,
+  ;  because an upgraded machine carries the old one too.
+  ;
+  ;  The location rule is FW_RULE in lib/geo-spoof.js -- the lfsvc shield.
+  ;  Leaving that behind would keep Windows location resolution broken after the
+  ;  app is gone.
+  ;
+  ;  This list is the same one as FW_RULES in lib/installer-tasks.js, which is
+  ;  what runs when the program files are still there. It is duplicated here on
+  ;  purpose: electron-builder does not guarantee the exe survives to this point,
+  ;  and a rule that outlives its app has no other way off the machine.
+  DetailPrint "Restoring the outbound firewall policy..."
+  nsExec::ExecToLog 'netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound'
   DetailPrint "Removing firewall rules..."
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Tor Engine"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Bridge Transport"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy App"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Block IPv6 Out"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Block IPv6 In"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Block DNS Out UDP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Block DNS Out TCP"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Block DNS Out"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Block DoT Out"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy VPN - block Windows location resolution"'
+  ;  lib/containment.js, ALLOW_RULES -- all eight, by name.
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow Tor Engine"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow Bridge Transport"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow App"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow Tunnel Engine"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow Loopback"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow DHCP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow Tunnel Adapter"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FreeProxy Allow Local Subnet"'
 
   ;  Geolocation service back to its shipped start type, and the stale
   ;  resolver cache dropped so the next lookup is a real one.
   nsExec::ExecToLog 'sc config lfsvc start= demand'
   nsExec::ExecToLog 'ipconfig /flushdns'
+
+  ;  The "Restore Internet" Start Menu entry the app writes for
+  ;  C:\ProgramData\freeproxy-vpn\restore-internet.bat. Its target goes with the
+  ;  state directory, so a shortcut left behind is a Start Menu item that opens
+  ;  nothing -- and one the user cannot remove without being told where it lives.
+  ;  --fp-teardown deletes it too (sweepRecoveryShortcut); this is the copy for
+  ;  the case where the exe is no longer there to run.
+  ;
+  ;  ReadEnvStr, not $APPDATA: that one depends on the shell-var context in force
+  ;  when this macro happens to run, and getting it wrong here deletes nothing
+  ;  while reporting nothing.
+  ReadEnvStr $3 "ProgramData"
+  ${If} $3 == ""
+    StrCpy $3 "C:\ProgramData"
+  ${EndIf}
+  Delete "$3\Microsoft\Windows\Start Menu\Programs\Restore Internet (FreeProxy VPN).lnk"
 
   ; ── 5. hosts file and certificates -- no exe required ──────────
   ;  Two leftovers that outlive an uninstall and cannot be undone from any
@@ -532,7 +604,7 @@
   ;      is on disk in an app that no longer exists. Matched on this app's
   ;      FriendlyName, or on a SELF-SIGNED (issuer == subject) googleapis
   ;      subject, which a real Google certificate never is.
-  DetailPrint "Restoring hosts file and removing certificates..."
+  DetailPrint "Restoring hosts file, certificates and Firefox-family prefs..."
   StrCpy $1 "$TEMP\fp-uninstall-clean.ps1"
   FileOpen $2 "$1" w
   FileWrite $2 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
@@ -563,6 +635,89 @@
   FileWrite $2 "      Remove-Item $$c.PSPath -Force$\r$\n"
   FileWrite $2 "    }$\r$\n"
   FileWrite $2 "  }$\r$\n"
+  FileWrite $2 "}$\r$\n"
+
+  ;  ── The Firefox family, which nothing above this line reaches ──
+  ;  Everything in sections 1-4 is Windows: the proxy, DNS, IPv6, the firewall,
+  ;  Chromium policy. A Gecko browser this app wrote user.js into has
+  ;  network.proxy.type = 1 pointing at 127.0.0.1:9050 and reads none of it -- so
+  ;  with the app deleted, that browser cannot load a single page and NO Windows
+  ;  dialog will fix it. An uninstall that leaves Firefox dead has not uninstalled.
+  ;
+  ;  This runs the app's OWN restore-gecko-prefs.ps1 rather than carrying a copy.
+  ;  main.js writes that file at every start (before any connect, so before a
+  ;  user.js of ours can exist), it defaults its own -UsersRoot and -Journal to
+  ;  the real paths, and .build/probe-containment-recovery.js runs it for real
+  ;  against seeded profiles -- 72 checks, including the anchored end-marker
+  ;  regex that a hand-kept second copy here would be the one to get wrong.
+  ;  Section 7 deletes the tree it lives in; this is section 5, so it is still
+  ;  there. Ordering is load-bearing, not incidental.
+  ;
+  ;  It has to be gone-and-said-so, never gone-and-silent: the fallback strips
+  ;  our fenced block by line so the browser works again, and prints that a
+  ;  user's own values for those prefs could not be put back, because the journal
+  ;  lived in the same directory as the script that is missing.
+  FileWrite $2 "$$geckoPs1 = (Join-Path $$env:ProgramData 'freeproxy-vpn\restore-gecko-prefs.ps1')$\r$\n"
+  FileWrite $2 "if (Test-Path -LiteralPath $$geckoPs1) {$\r$\n"
+  FileWrite $2 "  Write-Host 'Firefox family: running the app''s own recovery script'$\r$\n"
+  FileWrite $2 "  try { & $$geckoPs1 } catch { Write-Host ('  it failed: ' + $$_.Exception.Message) }$\r$\n"
+  FileWrite $2 "} else {$\r$\n"
+  FileWrite $2 "  Write-Host 'Firefox family: restore-gecko-prefs.ps1 is gone -- stripping by hand'$\r$\n"
+  FileWrite $2 "  $$fpBegin = 'FreeProxy VPN:'$\r$\n"
+  FileWrite $2 "  $$fpEndRx = 'end FreeProxy VPN[^A-Za-z0-9]*$$'$\r$\n"
+  FileWrite $2 "  $$fpOurs = @('geo.provider.network.url','geo.wifi.uri',$\r$\n"
+  FileWrite $2 "    'geo.provider.ms-windows-location','geo.provider.use_corelocation',$\r$\n"
+  FileWrite $2 "    'geo.provider.use_gpsd','geo.provider.use_geoclue','network.proxy.type',$\r$\n"
+  FileWrite $2 "    'network.proxy.socks','network.proxy.socks_port','network.proxy.socks_version',$\r$\n"
+  FileWrite $2 "    'network.proxy.socks_remote_dns','network.proxy.no_proxies_on',$\r$\n"
+  FileWrite $2 "    'network.proxy.failover_direct','network.trr.mode','network.dns.disablePrefetch',$\r$\n"
+  FileWrite $2 "    'network.predictor.enabled','media.peerconnection.enabled')$\r$\n"
+  FileWrite $2 "  $$fpEnc = New-Object System.Text.UTF8Encoding($$false)$\r$\n"
+  ;  Built out of [char] and never a backtick: this whole script is written
+  ;  through NSIS FileWrite, and a backtick that survives the .nsh escaping is
+  ;  the kind of thing that turns into a parse error in a file nobody watches
+  ;  run. [string] on each one because char + char in PowerShell is arithmetic.
+  FileWrite $2 "  $$fpLF = [string][char]10$\r$\n"
+  FileWrite $2 "  $$fpNL = [string][char]13 + [string][char]10$\r$\n"
+  FileWrite $2 "  $$fpRoot = (Join-Path $$env:SystemDrive 'Users')$\r$\n"
+  FileWrite $2 "  $$fpHits = @()$\r$\n"
+  FileWrite $2 "  if (Test-Path -LiteralPath $$fpRoot) {$\r$\n"
+  FileWrite $2 "    foreach ($$u in (Get-ChildItem -LiteralPath $$fpRoot -Directory)) {$\r$\n"
+  FileWrite $2 "      $$ad = Join-Path $$u.FullName 'AppData\Roaming'$\r$\n"
+  FileWrite $2 "      if (Test-Path -LiteralPath $$ad) {$\r$\n"
+  FileWrite $2 "        $$fpHits += @(Get-ChildItem -LiteralPath $$ad -Filter 'user.js' -File -Recurse -Depth 4)$\r$\n"
+  FileWrite $2 "      }$\r$\n"
+  FileWrite $2 "    }$\r$\n"
+  FileWrite $2 "  }$\r$\n"
+  FileWrite $2 "  $$fpFixed = 0$\r$\n"
+  FileWrite $2 "  foreach ($$f in $$fpHits) {$\r$\n"
+  FileWrite $2 "    $$t = ''$\r$\n"
+  FileWrite $2 "    try { $$t = Get-Content -LiteralPath $$f.FullName -Raw -ErrorAction Stop } catch { continue }$\r$\n"
+  FileWrite $2 "    if ($$t -notlike ('*' + $$fpBegin + '*')) { continue }$\r$\n"
+  FileWrite $2 "    $$keep = New-Object System.Collections.ArrayList$\r$\n"
+  FileWrite $2 "    $$inside = $$false$\r$\n"
+  FileWrite $2 "    foreach ($$l in ($$t -split '\r?\n')) {$\r$\n"
+  FileWrite $2 "      if (-not $$inside -and $$l.Trim().StartsWith('//') -and $$l -like ('*' + $$fpBegin + '*')) { $$inside = $$true; continue }$\r$\n"
+  FileWrite $2 "      if ($$inside) { if ($$l -match $$fpEndRx) { $$inside = $$false }; continue }$\r$\n"
+  FileWrite $2 "      [void]$$keep.Add($$l)$\r$\n"
+  FileWrite $2 "    }$\r$\n"
+  FileWrite $2 "    $$rest = ($$keep -join $$fpNL).Trim()$\r$\n"
+  FileWrite $2 "    if ($$rest.Length -gt 0) { [System.IO.File]::WriteAllText($$f.FullName, $$rest + $$fpNL, $$fpEnc) }$\r$\n"
+  FileWrite $2 "    else { Remove-Item -LiteralPath $$f.FullName -Force }$\r$\n"
+  FileWrite $2 "    $$d = Split-Path -Parent $$f.FullName$\r$\n"
+  FileWrite $2 "    $$pj = Join-Path $$d 'prefs.js'$\r$\n"
+  FileWrite $2 "    if (Test-Path -LiteralPath $$pj) {$\r$\n"
+  FileWrite $2 "      try {$\r$\n"
+  FileWrite $2 "        $$ln = @(Get-Content -LiteralPath $$pj -ErrorAction Stop)$\r$\n"
+  FileWrite $2 "        $$out = @($$ln | Where-Object { $$x = $$_; -not ($$fpOurs | Where-Object { $$x -like ('*$\"' + $$_ + '$\"*') }) })$\r$\n"
+  FileWrite $2 "        [System.IO.File]::WriteAllText($$pj, ($$out -join $$fpLF), $$fpEnc)$\r$\n"
+  FileWrite $2 "      } catch { Write-Host ('  could not rewrite ' + $$pj) }$\r$\n"
+  FileWrite $2 "    }$\r$\n"
+  FileWrite $2 "    $$fpFixed++$\r$\n"
+  FileWrite $2 "    Write-Host ('  cleared ' + $$d)$\r$\n"
+  FileWrite $2 "  }$\r$\n"
+  FileWrite $2 "  if ($$fpFixed -eq 0) { Write-Host '  nothing found -- no Firefox-family profile carried this app''s prefs' }$\r$\n"
+  FileWrite $2 "  else { Write-Host ('  ' + $$fpFixed + ' profile(s) stripped. Anything you had set yourself for those same prefs is back to the browser default -- the restore journal went with the script.') }$\r$\n"
   FileWrite $2 "}$\r$\n"
   FileClose $2
   nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$1"'
@@ -626,7 +781,7 @@
   RMDir /r "$APPDATA\FreeProxy VPN"
 
   DetailPrint "FreeProxy VPN removed. Proxy, DNS, IPv6, firewall, browser"
-  DetailPrint "policy, hosts file and location settings are back as they were."
+  DetailPrint "policy, hosts file, Firefox prefs and location settings are back."
 
   ; ── 8. The uninstall's own restart -- offered, never taken ─────
   ;  Exit code 11 (EXIT.rebootAdvised in lib/installer-tasks.js) means one

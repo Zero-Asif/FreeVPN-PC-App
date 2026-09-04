@@ -36,16 +36,32 @@ if (!fs.existsSync(ASAR)) {
 }
 
 // ── the asar header ─────────────────────────────────────────────────
-//  16-byte pickle preamble, then a JSON header of hdrSize bytes, then the data
-//  block. Offsets in the header are relative to the start of that data block.
+//  Four UInt32LE of pickle preamble, then the JSON header, then the data block.
+//
+//  The data block begins at 8 + headerPickleSize, NOT at 16 + headerStringSize.
+//  A pickle pads its payload up to a 4-byte boundary, so the two agree only when
+//  the header's JSON length happens to be a multiple of 4 -- three builds in four
+//  it is not, and every offset in this file is then 1 to 3 bytes early. MEASURED
+//  on the 2.0.5 build: headerStringSize 33479, 33479 % 4 = 3, so one byte of
+//  padding, and main.js/renderer.js/index.html/globe-controller.js all "differed
+//  from source" while being byte-perfect in the artifact -- the exact false
+//  positive this probe exists to rule out, pointing the wrong way. It also fed
+//  the previous file's last byte into JSON.parse(package.json) -- ";{" -- which
+//  threw and took the twenty-odd NAMED checks below down with it, unrun.
 const fd = fs.openSync(ASAR, 'r');
 const pre = Buffer.alloc(16);
 fs.readSync(fd, pre, 0, 16, 0);
-const hdrSize = pre.readUInt32LE(12);
+const hdrSize = pre.readUInt32LE(12);          // JSON header length
+const DATA = 8 + pre.readUInt32LE(4);          // padded: the real data offset
 const hdrBuf = Buffer.alloc(hdrSize);
 fs.readSync(fd, hdrBuf, 0, hdrSize, 16);
-const DATA = 16 + hdrSize;
 const header = JSON.parse(hdrBuf.toString('utf8'));
+const PAD = DATA - (16 + hdrSize);
+if (PAD < 0 || PAD > 3)
+    throw new Error(`asar preamble makes no sense: data at ${DATA}, header ends at ` +
+                    `${16 + hdrSize} (${PAD} bytes of padding, expected 0-3). Every ` +
+                    'byte-compare below would be meaningless, so nothing is reported.');
+
 
 function entry(rel) {
     let node = header;
@@ -111,7 +127,14 @@ for (const rel of CHANGED) {
 {
     const src = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
     const got = readFromArtifact('package.json');
-    const pkg = got.buf ? JSON.parse(got.buf.toString('utf8')) : {};
+    //  Caught, not thrown: an unhandled SyntaxError here ends the process and the
+    //  NAMED checks below never run at all -- which is how a one-byte offset slip
+    //  silenced the whole second half of this probe once.
+    let pkg = {}, parseErr = null;
+    if (got.buf) { try { pkg = JSON.parse(got.buf.toString('utf8')); } catch (e) { parseErr = e.message; } }
+    ok(!parseErr, 'the packed package.json is readable JSON',
+       `${parseErr} -- first bytes ${JSON.stringify((got.buf || Buffer.alloc(0)).slice(0, 16).toString('utf8'))}` +
+       `, so suspect the data offset (DATA=${DATA}, ${PAD} pad), not the build`);
     ok(pkg.name === src.name && pkg.version === src.version && pkg.main === src.main,
        `package.json is rewritten by the packer, but name/version/main carry over ` +
        `(${pkg.name} ${pkg.version}, main ${pkg.main})`,

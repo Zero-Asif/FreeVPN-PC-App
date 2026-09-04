@@ -66,6 +66,76 @@ Shipped with Tor, derived from the MaxMind GeoLite2 data under the
 licence. This product includes GeoLite2 data created by MaxMind, available from
 <https://www.maxmind.com>. The app reads them only through Tor; it does no
 geolocation lookup of its own against them.
+
+---
+
+## The tunnel
+
+Both files below are committed under `Tun/` and shipped unmodified, byte for
+byte, from the upstream releases named here. They are what makes v2.0.5 a
+whole-machine VPN rather than a proxy: Wintun is the adapter that owns the route
+table, tun2socks is the netstack that hands what arrives there to Tor's SOCKS5
+port. See [`lib/tunnel.js`](lib/tunnel.js) for how they are driven and for the
+limits that come with them.
+
+### tun2socks — `Tun/tun2socks.exe`
+
+| | |
+|---|---|
+| **Version** | 2.7.0 (`windows/amd64`, `go1.26.3`, commit `8dda19e`) |
+| **Licence** | MIT — Copyright (c) 2019 Jason Lyu |
+| **Home** | <https://github.com/xjasonlyu/tun2socks> |
+| **Downloaded from** | `https://github.com/xjasonlyu/tun2socks/releases/download/v2.7.0/tun2socks-windows-amd64.zip` |
+| **How verified** | `Tun/tun2socks.exe --version` |
+
+```
+tun2socks-2.7.0
+windows/amd64, go1.26.3, 8dda19e
+```
+
+| | SHA-256 |
+|---|---|
+| `tun2socks-windows-amd64.zip` (4,640,541 bytes) | `c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43` |
+| `Tun/tun2socks.exe` (11,993,600 bytes) | `076b3c3d6a372bae3f49f2b415a4105f70c30a3ed3caaed7979390e649892559` |
+
+**It is not code-signed.** `Get-AuthenticodeSignature` on the shipped file
+returns `NotSigned`, which is normal for a Go binary published as a GitHub
+release asset and is why SmartScreen and some antivirus engines will flag it.
+That is stated here rather than discovered by the user. The licence text travels
+with it as `Tun/LICENSE-tun2socks.txt`.
+
+Its own Go module dependencies (`gvisor.dev/gvisor` for the netstack,
+`golang.zx2c4.com/wintun` for the adapter binding, and the rest) are recorded in
+that project's `go.mod` and are not reproduced here.
+
+### Wintun — `Tun/wintun.dll`
+
+| | |
+|---|---|
+| **Version** | 0.14.1, x64 build |
+| **Licence** | **Not open source.** WireGuard LLC's *Prebuilt Binaries License* — shipped verbatim as `Tun/LICENSE-wintun.txt` |
+| **Home** | <https://www.wintun.net/> |
+| **Downloaded from** | `https://www.wintun.net/builds/wintun-0.14.1.zip` |
+| **How verified** | `Get-AuthenticodeSignature` — **Valid**, `CN=WireGuard LLC, O=WireGuard LLC, L=Boulder, S=Colorado, C=US` |
+
+| | SHA-256 |
+|---|---|
+| `wintun-0.14.1.zip` (750,540 bytes) | `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51` |
+| `Tun/wintun.dll` (427,552 bytes, `bin/amd64/`) | `e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce` |
+
+Redistribution here rests on clause 3(d) of that licence, which permits shipping
+the DLL "insofar as the Software is distributed alongside other software that
+uses the Software only via the Permitted API" — the Permitted API being the
+`wintun.h` interface. tun2socks uses exactly that interface through
+`golang.zx2c4.com/wintun`, and no code in this repository touches the DLL at all.
+Clause 3(c) forbids removing the notices, so `Tun/LICENSE-wintun.txt` ships
+next to it and must not be deleted from the build. The file is **unmodified**;
+clause 3(a) and 3(b) forbid modifying or deriving from it, and nothing here does.
+
+The DLL carries the kernel driver Windows loads to create the adapter. It is
+Microsoft-attested and WireGuard-signed; this project neither signs nor alters
+any driver.
+
 ---
 
 ## The application shell

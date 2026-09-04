@@ -9,16 +9,35 @@ words with Tor's bootstrap forwarded verbatim, and the exit read back through th
 the machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 853 shut
 elsewhere, IPv6 blocked both ways, 14 browsers told the same country. Five: switching country
 re-pins the exit and clears each browser's cache, cookies and history browser wide, and a list of
-domains can bypass the tunnel live. Six: check it yourself, from the plain text log and the 111
+domains can bypass the tunnel live. Six: check it yourself, from the plain text log and the 125
 probe scripts.</desc>
 <!--
   docs/media/walkthrough.svg
-  The animated tour. Every figure in it is one the rest of this repository
-  already had to prove: 74 is Object.keys(GEO_COORDS).length in main.js, 14 is
-  the browser table in lib/browsers.js (8 chromium, 5 gecko, 1 wininet), 7 is
-  the firewall rule count, 111 is the number of test/probe scripts in .build/,
+  The animated tour. Every figure in it is counted out of the project rather
+  than typed from memory: 74 countries is Object.keys(GEO_COORDS).length in
+  main.js, 14 browsers is the table in lib/browsers.js (8 Chromium browsers,
+  5 Gecko browsers, 1 for WinINET), 9 firewall rules is the set of rule names
+  main.js and lib/geo-spoof.js can add, 125 probe scripts is what .build/ holds,
   and the seven connect stages are the sendProgress calls flow-connect.svg
   spells out one by one.
+
+  Counted, now, by .build/probe-readme-lines.js, which reads THIS text, the
+  captions below and the description above, and re-derives every one of those
+  numbers from the source. Written after finding that the firewall rule count
+  and the probe script count that used to be here, seven and a hundred and
+  eleven, were both correct on the day they were typed and quietly wrong two
+  releases later: the DNS block became three rules, and .build/ grew. A number
+  in a picture has no test around it unless someone writes one, and a picture is
+  the last place a reader expects to be misled.
+
+  Those two are spelled in words on purpose. The probe cannot tell a figure
+  quoted as history from one being claimed as true, so it rejects both, which is
+  the right way round for a file whose whole job is to state numbers.
+
+  Nothing in this comment uses a doubled hyphen, and neither does any other file
+  in docs/media/. XML forbids that sequence inside a comment, and an SVG a page
+  loads through an img tag is parsed as XML: one doubled hyphen in here is not a
+  typo, it is a picture that fails to render at all.
 
   Two deliberate choices about the animation itself. Nothing that carries a
   word ever fades or moves: the six panels are laid out side by side and all
@@ -222,7 +241,7 @@ probe scripts.</desc>
   <text x="62" y="547">browsers told the exit&#8217;s own country.</text>
 </g>
 <rect x="62" y="566" width="199" height="24" rx="7" fill="#1b1730" stroke="#2f2650"/>
-<text x="76" y="582" font-size="11.5" fill="#9fb0c9">14 browsers, 7 firewall rules</text>
+<text x="76" y="582" font-size="11.5" fill="#9fb0c9">14 browsers, 9 firewall rules</text>
 <!--  5. switch, or split  -->
 <rect x="416" y="380" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
 <rect x="434" y="398" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
@@ -310,7 +329,7 @@ probe scripts.</desc>
 <g font-size="12.5" fill="#7d8aa5">
   <text x="806" y="490">A plain-text log in ProgramData records</text>
   <text x="806" y="509">what it wrote, and what a read-back then</text>
-  <text x="806" y="528">found. <tspan fill="#c4b5fd">111 probe scripts</tspan> drive the real</text>
+  <text x="806" y="528">found. <tspan fill="#c4b5fd">125 probe scripts</tspan> drive the real</text>
   <text x="806" y="547">registry, and the real browsers.</text>
 </g>
 <rect x="806" y="566" width="276" height="24" rx="7" fill="#0f2a1a" stroke="#1c6b3a"/>

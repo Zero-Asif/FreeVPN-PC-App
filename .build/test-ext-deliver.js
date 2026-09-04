@@ -358,8 +358,32 @@ function freePort() {
     ok(/deliver\.writeBundle\(/.test(geoSrc), 'prepare() writes the bundle');
     ok(/deliver\.probeOurs\(/.test(geoSrc) && /this\.host\.adopt\(/.test(geoSrc),
        'and adopts a live helper instead of shifting the port every policy names');
-    ok(/browsers\.profileHasExtension\(userData, this\.id\)/.test(geoSrc),
-       'presence() and the helper share ONE definition of "is it really there"');
+
+    //  RESTATED, 2026-09-04. This used to pin the literal
+    //  `browsers.profileHasExtension(userData, this.id)` inside geo-ext, and it
+    //  failed on a call site that had got strictly better: presence() now takes
+    //  the richer browsers.extensionState() -- so it can tell 'installed' from
+    //  'needs-enable', which is the distinction the whole report exists for --
+    //  and asks it per browser through idFor(), because a store re-signs the CRX
+    //  and the browser holding the store copy holds a different id.
+    //
+    //  The call shape was never the invariant. The invariant is that "is it
+    //  really there" has ONE implementation: two would be two chances for the
+    //  helper to go on serving a browser the report already calls covered. That
+    //  is now true more literally than when this was written --
+    //  profileHasExtension() IS extensionState(), narrowed to the bytes.
+    const browsersSrc  = src('lib/browsers.js');
+    const deliverSrc   = src('lib/ext-deliver.js');
+    ok(/function profileHasExtension\(userData, id\) \{[\s\S]{0,200}?const st = extensionState\(userData, id\);/
+         .test(browsersSrc),
+       'the helper\'s question is the report\'s own read, narrowed to the bytes -- one function, ' +
+       'so the two cannot disagree');
+    ok(/browsers\.extensionState\(/.test(geoSrc) &&
+       /browsers\.profileHasExtension\(/.test(deliverSrc),
+       'presence() and the helper both get their answer from lib/browsers.js');
+    ok(!/function (profileHasExtension|extensionState)\b/.test(geoSrc + deliverSrc) &&
+       !/'Secure Preferences'/.test(geoSrc.replace(/^\s*[*/].*$/gm, '') + deliverSrc),
+       'and neither keeps a second copy -- only browsers.js opens a profile to answer it');
 
     ok(/schtasks \/delete \/tn "FreeProxy VPN Extension Delivery" \/f/.test(src('installer.nsh')),
        'installer.nsh deletes the task even if nothing of ours ran');

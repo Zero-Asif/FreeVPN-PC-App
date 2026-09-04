@@ -60,3 +60,15 @@ vendor/*.png            binary
 #  either ending, but they are 3 MB of upstream data with a signature history,
 #  so nothing in here is normalised either way.
 Tor/**                  -text
+
+#  The TUN payload, for the same reason and one more. THIRD-PARTY-NOTICES.md
+#  publishes a SHA-256 for tun2socks.exe and for wintun.dll and says both ship
+#  "unmodified, byte for byte" -- and wintun.dll is Authenticode-signed by
+#  WireGuard LLC, so a single rewritten byte invalidates a signature Windows
+#  checks before it loads the driver. `text=auto` does detect both as binary and
+#  leaves them alone, but the two licence texts beside them are text: without
+#  this line `eol=lf` rewrites LICENSE-wintun.txt on checkout, which is a
+#  modified copy of a licence whose clause 3(a) forbids modification. `-text`
+#  rather than `binary` so the licences still diff as text if upstream reissues
+#  one.
+Tun/**                  -text

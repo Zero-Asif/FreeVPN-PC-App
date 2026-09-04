@@ -3,20 +3,22 @@
 //  test-force-exit-circuit.js -- proof for the escalation, because the
 //  live probe never fired it.
 //
-//  MEASURED, .build/probe-force-pin.js run 3 (on the fixed reply framing):
-//  15 of 15 candidates across SE/US/DE were chosen by Tor itself inside
-//  8000 ms, 0 needed the path named explicitly. That is the good outcome --
-//  but it means TorControl.forceExitCircuit() and its two donor sources ran
-//  ZERO times against a real Tor in that run, so nothing in that log says
-//  they work. Run 2, before the framing fix, "measured" them failing and
-//  that was the framing bug lying too.
+//  MEASURED, .build/probe-force-pin.js: the escalation fires against a real Tor
+//  only rarely -- 2 of 15 candidates in run 3, 1 of 15 in run 4 -- and when it
+//  does, it works (614, 1214 and 1222 ms to BUILT, visible to activeExits()).
+//  That is the good outcome, and it is also why a live probe cannot be the proof:
+//  a run where Tor happens to choose every relay itself exercises this function
+//  zero times, and run 2, before the reply-framing fix, "measured" it failing
+//  when the framing bug was what failed.
 //
 //  So the escalation is proven here instead, against a real socket speaking
 //  the real control protocol: EXTENDCIRCUIT is answered with "250 EXTENDED
 //  <id>", the circuit appears in circuit-status, and the caller has to poll
 //  it to BUILT and check its exit. Every failure shape Tor actually produces
-//  is scripted: no id in the reply, the circuit torn down, and a circuit
-//  that never leaves LAUNCHED.
+//  is scripted: no id in the reply, the circuit torn down, a circuit that never
+//  leaves LAUNCHED, a 551 refusal, and -- section 6 -- the 552 `No descriptor`
+//  that says the relay has no microdescriptor, which is the one failure where
+//  trying another borrowed pair cannot possibly help.
 //
 //  No Tor, no network, none of the app's ports.
 // ════════════════════════════════════════════════════════════════════
@@ -56,10 +58,14 @@ console.log = (...a) => {
 //    'stall'  -- LAUNCHED and never anything else
 //    'noid'   -- "250 OK" with no circuit id in it
 //    'error'  -- a 551 refusal
+//    'nodesc-exit'  -- 552 No descriptor, naming the EXIT   (hop 3)
+//    'nodesc-guard' -- 552 No descriptor, naming the borrowed GUARD (hop 1)
+//  `st.md` picks what GETINFO md/id/<fp> does: 'have' or 'missing'.
 const st = {
     circuits: [],
     guards: [],
     extend: 'build',
+    md: 'have',
     nextId: 400,
     paths: [],        // every path EXTENDCIRCUIT was asked for, in order
     closed: [],
@@ -72,6 +78,18 @@ function serve(cmd) {
         `250+${key}=\r\n` + lines.map(l => l + '\r\n').join('') + '.\r\n250 OK\r\n';
 
     if (/^AUTHENTICATE /.test(cmd)) return '250 OK\r\n';
+
+    //  A microdescriptor when Tor has one, and Tor's real answer when it does
+    //  not: GETINFO has no "I looked and it is absent" code, so an md it does
+    //  not hold comes back as 552 Unrecognized key. MEASURED on 0.4.9.6 --
+    //  four of DE's top five candidates answered with 449-771 bytes and the
+    //  fifth refused the key.
+    if (/^GETINFO md\/id\//.test(cmd)) {
+        const key = cmd.slice('GETINFO '.length);
+        if (st.md !== 'have') return `552 Unrecognized key "${key}"\r\n`;
+        return block(key, ['onion-key', '-----BEGIN RSA PUBLIC KEY-----',
+                           'MIGJAoGBAKfake', '-----END RSA PUBLIC KEY-----']);
+    }
 
     if (cmd === 'GETINFO circuit-status') {
         st.reads++;
@@ -96,6 +114,15 @@ function serve(cmd) {
         st.paths.push(spec);
         if (st.extend === 'error') return '551 Couldn\'t start circuit\r\n';
         if (st.extend === 'noid')  return '250 OK\r\n';
+        //  Tor names the first hop it cannot use, whichever hop that is. Which
+        //  one it names is the whole question: the exit's is the caller's own
+        //  target and no other pair can change it, a borrowed hop's is bad luck
+        //  and the next pair is worth trying.
+        if (st.extend === 'nodesc-exit' || st.extend === 'nodesc-guard') {
+            const hops = spec.split(',');
+            const named = st.extend === 'nodesc-exit' ? hops[hops.length - 1] : hops[0];
+            return `552 No descriptor for "${named}"\r\n`;
+        }
         const id = String(st.nextId++);
         st.circuits = st.circuits.concat(`${id} LAUNCHED PURPOSE=GENERAL`);
         st.pending = { id, since: st.reads, mode: st.extend,
@@ -246,6 +273,52 @@ function serve(cmd) {
        `${st.paths.length} EXTENDCIRCUITs in the whole run: 2 dropped, 1 stalled, ` +
        '2 with no id, 1 refused -- and none from the empty pool');
     bare.close();
+
+    // ── 6. the one question worth asking BEFORE any of the above ─────
+    //  A relay in the consensus with no microdescriptor cannot be chosen by Tor
+    //  and cannot be extended to. MEASURED (tor 0.4.9.6, 2026-09-04): `demise`,
+    //  Germany's highest-bandwidth exit, was exactly that -- `ns/id` answered
+    //  for it, `md/id` refused with 552, and the app spent a 10 s wait plus
+    //  three ~10 s explicit builds discovering what one GETINFO would have said.
+    st.md = 'have';
+    ok(await ctl.hasDescriptor(WANT) === true,
+       'hasDescriptor() is true when Tor hands over a microdescriptor');
+    ok(await ctl.hasDescriptor('$' + WANT.toLowerCase()) === true,
+       'and it accepts the $-prefixed lower-case form the rest of the app passes around');
+    st.md = 'missing';
+    ok(await ctl.hasDescriptor(WANT) === false,
+       'false when Tor refuses the key -- which is how a missing md comes back, ' +
+       'because GETINFO has no code for "I looked and it is not there"');
+    ok(await ctl.hasDescriptor('nonsense') === null,
+       'null, not false, for a fingerprint that is not one');
+    const shut = new TorControl({ host: '127.0.0.1', port: srv.address().port, cookiePath: cookie });
+    ok(await shut.hasDescriptor(WANT) === null,
+       'and null when the question could not be asked at all -- a control port that is ' +
+       'not open is not evidence about a relay, and reading it as false would drop a ' +
+       'candidate that works');
+
+    //  The 552 that names the exit: every other pair would fail identically, so
+    //  the loop must stop. MEASURED in probe-force-pin run 3 -- three disjoint
+    //  pairs, three identical `No descriptor for "$3E10B71C…"`, ~30 s spent.
+    st.extend = 'nodesc-exit';
+    st.paths = [];
+    const r7 = await ctl.forceExitCircuit(WANT, { middles: [], tries: 3, buildMs: 300, pollMs: 40 });
+    ok(!r7.ok && r7.noDescriptor === true,
+       'a 552 naming the EXIT is reported as noDescriptor, so the caller can escalate ' +
+       'to the engine restart that fetches it instead of retrying', r7.reason);
+    ok(st.paths.length === 1,
+       'and it stops after ONE pair instead of spending the other two on the same answer',
+       `${st.paths.length} EXTENDCIRCUIT(s) sent`);
+    ok(/No descriptor/.test(r7.reason) && /descriptor for this relay yet/.test(r7.reason),
+       'with Tor\'s own words kept inside the app\'s', r7.reason);
+
+    st.extend = 'nodesc-guard';
+    st.paths = [];
+    const r8 = await ctl.forceExitCircuit(WANT, { middles: [], tries: 3, buildMs: 300, pollMs: 40 });
+    ok(!r8.ok && !r8.noDescriptor && st.paths.length === 2,
+       'but a 552 naming a BORROWED hop keeps going -- that is one unlucky donor, not ' +
+       'a verdict on the exit, and the pool is what it moves to',
+       `${st.paths.length} pair(s) tried, noDescriptor=${!!r8.noDescriptor}`);
 
     ctl.close();
     srv.close();

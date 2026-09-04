@@ -199,10 +199,16 @@ const call = async (cc, o) => { sent = null; await askEngineFailed(cc, o); retur
     {
         const c = src.indexOf('Detection point C');
         const seg = src.slice(c, src.indexOf('dnsViaTor     =', c));
-        ok(/if \(pick === 'wait'\)[\s\S]{0,900}?continue;/.test(seg),
+        ok(/if \(pick === 'wait'\)[\s\S]{0,1800}?continue;/.test(seg),
            '"keep trying" loops the whole attempt again rather than resuming one');
-        ok(/refreshRelayIndex\(\{ viaTor: false, force: true \}\)/.test(seg),
-           'and re-reads the live relay list first, so a relay that came back is used');
+        //  clearNetOk is part of the shape on purpose. Nothing is connected here,
+        //  so this re-read goes out in the clear, and refreshRelayIndex refuses
+        //  to do that unless a caller says so in as many words -- see
+        //  .build/probe-relay-cache.js, which asserts that exactly two callers
+        //  do and that both are viaTor:false.
+        ok(/refreshRelayIndex\(\{ viaTor: false, force: true, clearNetOk: true \}\)/.test(seg),
+           'and re-reads the live relay list first, so a relay that came back is ' +
+           'used -- explicitly opting into the cleartext read it needs');
         ok(/if \(pick === 'auto' && nearNow\)[\s\S]{0,600}?autoGranted = true;/.test(seg),
            '"nearest country" is recorded as GRANTED, not assumed');
         ok(/watchFor\s+= requestedCode;/.test(seg),

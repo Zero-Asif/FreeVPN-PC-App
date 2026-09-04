@@ -13,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { directGet } = require(path.join(__dirname, '..', 'lib', 'socks-fetch'));
-const { ExitStore, RelayIndex, v4Prefix16 } =
+const { ExitStore, RelayIndex, v4Prefix16, GEO_SOURCES } =
     require(path.join(__dirname, '..', 'lib', 'exit-selector'));
 const { fallbackFromMainJs } = require('./geo-from-main.js');
 
@@ -39,34 +39,90 @@ function check(label, cond, detail) {
         '-> ' + v4Prefix16('104.244.79.61'));
     check('v4Prefix16 rejects v6', v4Prefix16('2605:6400:30:f0ed::1') === null);
 
-    store.setVerified('lu', { fp: 'AAAA', nick: 'good', ip: '107.189.8.55' });
+    //  Real 40-character hex fingerprints, not 'AAAA'. ExitStore.load() now
+    //  validates what comes back off disk -- every field of it -- because the
+    //  `fp` in this file is pinned into an elevated tor's ExitNodes line without
+    //  being looked at again, and the file lives in a directory that was
+    //  writable by any local user until lib/state-dir.js ran. A four-character
+    //  fingerprint is something onionoo can never produce, so the fixture was
+    //  testing a shape the app does not have.
+    const FP_A = 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678';
+    const FP_B = 'B1B2C3D4E5F60718293A4B5C6D7E8F9012345678';
+    const FP_C = 'C1B2C3D4E5F60718293A4B5C6D7E8F9012345678';
+    const FP_D = 'D1B2C3D4E5F60718293A4B5C6D7E8F9012345678';
+
+    store.setVerified('lu', { fp: FP_A, nick: 'good', ip: '107.189.8.55' });
     check('verified survives a reload',
         new ExitStore(tmp, log).getVerified('lu')?.nick === 'good');
+    //  The other half of that: a record this app could not have written is
+    //  dropped rather than pinned. A newline in `fp` reaches torrc.
+    const poisoned = path.join(os.tmpdir(), 'fp-exit-poison-' + process.pid + '.json');
+    fs.writeFileSync(poisoned, JSON.stringify({ verified: { lu: {
+        fp: FP_A + '\nLog notice file C:\\\\poc.txt', nick: 'evil',
+        ip: '1.2.3.4', verifiedAt: Date.now() } }, rejected: {} }), 'utf8');
+    check('a fingerprint with a newline in it is refused, not pinned',
+        new ExitStore(poisoned, log).getVerified('lu') === null);
+    try { fs.unlinkSync(poisoned); } catch (e) {}
 
-    store.reject('lu', 'BBBB', '104.244.79.61');
-    check('rejects the exact fingerprint', store.isRejected('lu', 'BBBB', null));
-    check('rejects the whole /16', store.isRejected('lu', 'CCCC', '104.244.72.115'),
+    store.reject('lu', FP_B, '104.244.79.61');
+    check('rejects the exact fingerprint', store.isRejected('lu', FP_B, null));
+    check('rejects the whole /16', store.isRejected('lu', FP_C, '104.244.72.115'),
         '(the second mislabelled relay from the report)');
-    check('leaves other netblocks alone', !store.isRejected('lu', 'DDDD', '185.220.101.1'));
-    check('rejection is per country', !store.isRejected('de', 'BBBB', '104.244.79.61'));
+    check('leaves other netblocks alone', !store.isRejected('lu', FP_D, '185.220.101.1'));
+    check('rejection is per country', !store.isRejected('de', FP_B, '104.244.79.61'));
+    check('and the whole store survives a reload after a rejection',
+        new ExitStore(tmp, log).isRejected('lu', FP_B, null));
 
-    store.reject('lu', 'AAAA', '107.189.8.55');
+    store.reject('lu', FP_A, '107.189.8.55');
     check('rejecting the pinned relay clears its verified record',
         store.getVerified('lu') === null);
     try { fs.unlinkSync(tmp); } catch (e) {}
 
     // ── 2. directGet over real TLS ──────────────────────────────────
-    console.log('\n[2] socks-fetch directGet (real HTTPS)');
-    let r;
-    try {
-        r = await directGet('https://ipleak.net/json/', { timeoutMs: 20000 });
-        check('ipleak.net answered 200', r.status === 200, 'status=' + r.status);
-        const j = JSON.parse(r.body);
-        check('body parses as JSON with a country', !!j.country_code,
-            j.country_code + ' / ' + j.ip);
+    //  RESTATED, 2026-09-04. This asked ipleak.net and nothing else, and failed
+    //  the whole suite the day ipleak.net was unwell: `502` from their gateway,
+    //  then 200 in 22.2 s, then two 25 s timeouts -- MEASURED with curl, outside
+    //  this app entirely, so directGet, TLS and the chunked reader were never
+    //  what went wrong. A gate that turns red because someone else's server is
+    //  down teaches you to ignore it.
+    //
+    //  The app's own requirement was never "ipleak.net is up": probeExitLocation
+    //  asks all four GEO_SOURCES and weighs the votes, exactly so one of them
+    //  being down -- or rate-limiting one exit -- cannot decide the answer. So
+    //  this asks all four. At least one has to answer for the check to mean
+    //  anything, and a 200 whose body its own parser cannot read still FAILS:
+    //  that one is the chunked reader or the parser, i.e. ours.
+    console.log('\n[2] socks-fetch directGet (real HTTPS, every geo source)');
+    {
+        const rows = [];
+        for (const s of GEO_SOURCES) {
+            const t0 = Date.now();
+            let r;
+            try { r = await directGet(s.url, { timeoutMs: 20000 }); }
+            catch (e) { rows.push({ s, ms: Date.now() - t0, why: e.message }); continue; }
+            const ms = Date.now() - t0;
+            if (r.status !== 200) { rows.push({ s, ms, why: 'HTTP ' + r.status }); continue; }
+            let got = null, err = null;
+            try { got = s.parse(r.body); } catch (e) { err = e.message; }
+            check(`${s.name} answered 200, and its own parser read the body`,
+                  !!(got && got.cc),
+                  got && got.cc ? `${got.cc} / ${got.ip} in ${ms} ms`
+                                : `${r.body.length} bytes that did not parse: ${err}`);
+            rows.push({ s, ms, ok: !!(got && got.cc), got });
+        }
+        for (const q of rows.filter(q => !q.ok && q.why))
+            console.log(`    (${q.s.name} did not answer -- ${q.why}, after ${q.ms} ms. Not ` +
+                        'counted either way: a third party being down is not this build.)');
+        const live = rows.filter(q => q.ok);
+        check('at least one geo source answered over real TLS',
+              live.length > 0, `${live.length} of ${GEO_SOURCES.length}`);
+        //  Printed, not asserted. Two IP databases disagreeing about one address
+        //  is the reason probeExitLocation votes in the first place -- see the
+        //  relay that Onionoo puts in Luxembourg and ipleak.net in Switzerland.
+        const seen = [...new Set(live.map(q => q.got.cc))];
+        console.log(`    unproxied location: ${seen.join(' / ') || 'unknown'}` +
+                    (seen.length > 1 ? '  (sources disagree -- votes decide, by design)' : ''));
         console.log('    (this is the UNPROXIED location -- expected to be the real one here)');
-    } catch (e) {
-        check('ipleak.net reachable', false, e.message);
     }
 
     // ── 3. RelayIndex against live Onionoo ──────────────────────────

@@ -56,10 +56,13 @@ Files ../Extension/welcome.html and package/welcome.html differ
 not by inspection. No behaviour was changed to get published, and there is no
 store-only code path anywhere. What changed:
 
-- **`manifest.json`** — `version` 1.1.0 → 1.2.0; an `icons` block and a
-  four-size `action.default_icon` (the store shows an icon; a sideload never
-  had to). Permissions, host permissions, content scripts and
-  `minimum_chrome_version` are unchanged.
+- **`manifest.json`** — an `icons` block and a four-size
+  `action.default_icon` (the store shows an icon; a sideload never had to).
+  `version` is **1.2.0 in both** — the sideloaded copy was raised to match, so
+  a user who installs from Edge Add-ons and a user who has the app's own copy
+  are running the same numbered release rather than two that only look alike.
+  Permissions, host permissions, content scripts and `minimum_chrome_version`
+  are unchanged.
 - **`icons/`** — new: `icon-16`, `-32`, `-48`, `-128`. `icon.png` stays in the
   package as well, because `popup.html`, `welcome.html` and
   `background.js` (`chrome.runtime.getURL('icon.png')`, the install
@@ -85,20 +88,33 @@ node Extension-Store/build-zip.js
 ```
 
 It writes `FreeProxy-VPN-Extension-<version>.zip` beside itself and then reads
-the finished archive's central directory back to prove three things: that
-`manifest.json` is at the root, that the entry list matches `package/` exactly,
-and that no entry name contains a backslash.
+the finished archive back to prove four things: that `manifest.json` is at the
+root, that the entry list matches `package/` exactly, that no entry name
+contains a backslash, and that every entry **extracts** to the bytes in
+`package/`.
 
-That last check is not theoretical. PowerShell's `Compress-Archive` was tried
-first and it stored `flags\ae.svg` and `icons\icon-16.png` — with backslashes,
-which the zip format does not allow as a separator. Those are not files in
-folders, they are files with a backslash in the name, so `flags/bd.svg` and the
-manifest's `icons/icon-16.png` would both have been missing from an archive that
-uploaded and installed perfectly. The zip is therefore written by hand with
-`zlib`, and the bug is now an assertion.
+That last one is the difference between an index and a file. The entry list can
+be perfect while the bodies behind it are not: this script writes every header
+field twice, once in the local header and once in the central directory, and a
+stale offset or a wrong compressed size produces an archive whose 87 names all
+match and whose contents are the next entry's bytes. So each body is taken by
+following the central directory's offset — the route an unzipper takes, not the
+route this script remembers — inflated, checked against its stored CRC and
+compared with the file on disk. Both failures were induced deliberately once to
+confirm the check bites: an offset written one byte high reported `background.js:
+no local header where the index says (offset 1)`, and a body packed one byte
+longer than its header claims reported `inflates to 74178 bytes, header says
+74177`. It had been a thing done once by hand with .NET and written down here;
+a hand-check does not travel with the artifact, and the artifact is what gets
+uploaded.
 
-Verified once by extracting the built zip with .NET and diffing the result
-against `package/`: identical, byte for byte, all 87 files.
+The backslash check is not theoretical either. PowerShell's `Compress-Archive`
+was tried first and it stored `flags\ae.svg` and `icons\icon-16.png` — with
+backslashes, which the zip format does not allow as a separator. Those are not
+files in folders, they are files with a backslash in the name, so `flags/bd.svg`
+and the manifest's `icons/icon-16.png` would both have been missing from an
+archive that uploaded and installed perfectly. The zip is therefore written by
+hand with `zlib`, and the bug is now an assertion.
 
 ## Keeping the two in step
 

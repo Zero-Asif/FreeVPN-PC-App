@@ -38,7 +38,11 @@ const ok = (cond, name, extra) => {
 const log = { debug: () => {}, info: () => {}, success: () => {},
               warn: () => {}, error: (...a) => console.log('   ERROR:', ...a) };
 
-const strip = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+//  Comments out, code in -- see .build/srcstrip.js for why the obvious
+//  one-liner silently deleted 890 lines of main.js, this suite's five
+//  "handler is missing" failures included.
+const { stripComments } = require('./srcstrip.js');
+const strip = s => stripComments(s, 'main.js');
 const read = f => fs.readFileSync(path.join(ROOT, f), 'utf8');
 
 const mainSrc = strip(read('main.js'));
@@ -176,6 +180,38 @@ ok(/IfRebootFlag 0 \+2/.test(nsh), "NSIS's own reboot flag is read too");
 ok(!/SetRebootFlag/.test(nsh),
    'and never SET -- NSIS must not raise a second reboot dialog of its own');
 ok(/StrCpy \$4 ""/.test(nsh), '$4 starts empty, so a stale register cannot fake it');
+
+console.log('── the comment stripper these reads depend on ──');
+//  Five of the assertions below reported main.js handlers that were sitting
+//  right there in the file, because the old one-liner removed `/* ... */`
+//  BEFORE `// ...`: the `/*` inside a prose `Tun/**` paired with a `*/` 890
+//  lines later, inside a regex literal, and the code in between was gone before
+//  anything was checked. Proven here on text of its own, so it stays fixed even
+//  if main.js loses the comment that exposed it.
+{
+    const S = require('./srcstrip.js');
+    const swallowed = "//  package.json lists Tun/** under asarUnpack.\n" +
+                      "ipcMain.handle('get-pending-restart', f);\n" +
+                      "const why = r.out.match(/\\[(?:warn|err)\\][^\\r\\n]*/g);\n";
+    ok(S.stripComments(swallowed).includes("ipcMain.handle('get-pending-restart'"),
+       'a `/*` written in prose does not delete the code that follows it');
+    ok(!S.stripComments("/** calls neverCalled() */\nreal();\n").includes('neverCalled'),
+       'and a real block comment is still removed -- a name in prose is not a call site');
+    ok(S.stripComments("const u = 'https://x/y'; // why\n").includes('https://x/y'),
+       'a trailing // is left alone, or every URL and path in the file would lose its slashes');
+    let threw = null;
+    try { S.stripComments('/*' + '\n'.repeat(S.MAX_COMMENT_LINES + 5) + '*/', 'fake.js'); }
+    catch (e) { threw = e.message; }
+    ok(threw && /code being removed/.test(threw),
+       'and a removal too long to be a comment throws instead of returning a plausible string',
+       threw ? 'threw' : 'returned quietly');
+    const rawMain = read('main.js');
+    ok((rawMain.match(/ipcMain\.handle\(/g) || []).length ===
+       (mainSrc.match(/ipcMain\.handle\(/g) || []).length,
+       'so every ipcMain.handle in main.js survives the strip -- 17 of them, none in a comment',
+       `${(rawMain.match(/ipcMain\.handle\(/g) || []).length} raw, ` +
+       `${(mainSrc.match(/ipcMain\.handle\(/g) || []).length} after`);
+}
 
 console.log('── main.js reads that marker, at that path ──');
 ok(/RESTART_MARKER = path\.join\(APPDATA_PATH, 'restart-pending\.json'\)/.test(mainSrc),

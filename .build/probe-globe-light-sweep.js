@@ -34,8 +34,15 @@
 //    night  altitude 2.8 over the ANTI-solar point: the city lights and the dark
 //           sea, because a fix that dims those has broken something else
 //
-//  Candidate 0 is the shipped lighting, measured in this same process by this same
-//  code, so the before and after numbers are comparable by construction.
+//  Candidate 0 of each set is the PRE-FIX lighting, restored in this same process by
+//  this same code, so the before and after numbers are comparable by construction.
+//  It was called "shipped" while it was, and the answer this file arrived at has been
+//  in globe-controller.js since -- so read row 0 as the picture being replaced. Two
+//  caveats about it, said rather than left to be discovered: the sweep restores the
+//  four INTENSITIES only, so a row that does not name `spec` inherits whatever the
+//  shipped material has now (black, per that file's own reasoning), and the shipped
+//  numbers themselves came from .build/probe-globe-night.js, which measures the
+//  night hemisphere this file never looks at.
 //
 //  Nothing is started, no port is bound, every request is cancelled, and the only
 //  things touched are the camera, four light intensities and the renderer's tone
@@ -106,7 +113,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 //  specular halved, zeroed or tightened, to find the row that keeps SET 1 row 1's
 //  colour and SET 1 row 2's roll-off.
 const SETS = { 1: [
-    { n: 'shipped',              vAmb: 1.00, vDir: 0.60, aAmb: 0.28, aDir: 1.55, tone: 'None', exp: 1.00 },
+    { n: 'pre-fix (old app)',    vAmb: 1.00, vDir: 0.60, aAmb: 0.28, aDir: 1.55, tone: 'None', exp: 1.00 },
     { n: 'vendor pair off',      vAmb: 0.00, vDir: 0.00, aAmb: 0.28, aDir: 1.55, tone: 'None', exp: 1.00 },
     { n: 'off + ACES 1.00',      vAmb: 0.00, vDir: 0.00, aAmb: 0.28, aDir: 1.55, tone: 'ACESFilmic', exp: 1.00 },
     { n: 'off + ACES 0.85',      vAmb: 0.00, vDir: 0.00, aAmb: 0.28, aDir: 1.55, tone: 'ACESFilmic', exp: 0.85 },
@@ -395,21 +402,54 @@ async function sweep() {
     ok(st.counts.ambient === 2 && st.counts.directional === 2,
        'there are exactly two ambient and two directional lights, as the doubling implies',
        JSON.stringify(st.counts));
-    //  Scene order says vendor-then-app; the colours and the positions have to say
-    //  it too, or the wrong light is about to be turned down.
-    ok(st.found.vAmb && st.found.vAmb.col === 'bbbbbb' && st.found.vAmb.i === 1,
-       "the first ambient is globe.gl's own #bbbbbb at intensity 1",
+    //  WHAT THESE USED TO ASSERT, and why they no longer do. Four checks pinned the
+    //  intensities this sweep was run to REPLACE -- vendor 1.00/0.60 under the app's
+    //  0.28/1.55 -- so the moment the sweep's own answer shipped, all four went red
+    //  and stayed red, one of them calling globe-controller.js's ambient "white 0.28"
+    //  when that file has said 0.90 since. A check that asserts the presence of the
+    //  bug it was written to remove cannot be told from a regression by anyone
+    //  reading the output, and its detail text teaches the wrong number besides.
+    //
+    //  What has to be true for the table below to mean anything is not the
+    //  intensities but WHICH LIGHT IS WHICH: APPLY drives amb[0]/dir[0] as globe.gl's
+    //  and amb[1]/dir[1] as the app's, so if that order ever flipped, every row would
+    //  be turning down the wrong light and the whole sweep would be fiction. globe.gl
+    //  gives its ambient #bbbbbb and leaves its directional at three.js's default
+    //  (0,1,0); the app's are white and aimed along SUN_DIR. Colour and position --
+    //  the two things this file never touches.
+    ok(st.found.vAmb && st.found.vAmb.col === 'bbbbbb',
+       "the first ambient is globe.gl's own, by its #bbbbbb colour",
        JSON.stringify(st.found.vAmb));
-    ok(st.found.aAmb && st.found.aAmb.col === 'ffffff' && Math.abs(st.found.aAmb.i - 0.28) < 1e-9,
-       "the second ambient is globe-controller.js's white 0.28",
+    ok(st.found.aAmb && st.found.aAmb.col === 'ffffff',
+       "the second ambient is the white one globe-controller.js adds",
        JSON.stringify(st.found.aAmb));
-    ok(st.found.vDir && Math.abs(st.found.vDir.i - 0.6) < 1e-9 &&
-       st.found.vDir.pos[0] === 0 && st.found.vDir.pos[1] === 1 && st.found.vDir.pos[2] === 0,
-       "the first directional is globe.gl's 0.6 still at three.js's default (0,1,0)",
+    ok(st.found.vDir && st.found.vDir.pos[0] === 0 && st.found.vDir.pos[1] === 1 &&
+       st.found.vDir.pos[2] === 0,
+       "the first directional is globe.gl's, still at three.js's default (0,1,0)",
        JSON.stringify(st.found.vDir));
-    ok(st.found.aDir && Math.abs(st.found.aDir.i - 1.55) < 1e-9 && st.found.aDir.pos[0] === 260,
-       "the second directional is globe-controller.js's 1.55 aimed along SUN_DIR",
+    ok(st.found.aDir && st.found.aDir.pos[0] === 260 && st.found.aDir.pos[1] === 140 &&
+       st.found.aDir.pos[2] === 190,
+       "and the second is the app's, aimed along SUN_DIR (260, 140, 190)",
        JSON.stringify(st.found.aDir));
+
+    //  The intensities are read against globe-controller.js itself rather than against
+    //  a second copy of the numbers here, because that copy is exactly what rotted:
+    //  whatever that file ships is what the rows below are candidates AGAINST, and a
+    //  lighting change there now updates this check for free instead of turning it red.
+    const SRC  = fs.readFileSync(path.join(ROOT, 'globe-controller.js'), 'utf8');
+    const mAmb = SRC.match(/new window\.THREE\.AmbientLight\(0x[0-9a-fA-F]+,\s*([\d.]+)\)/);
+    const mDir = SRC.match(/new window\.THREE\.DirectionalLight\(0x[0-9a-fA-F]+,\s*([\d.]+)\)/);
+    ok(mAmb && mDir, 'globe-controller.js states its two intensities where they can be read',
+       `ambient ${mAmb && mAmb[1]}, directional ${mDir && mDir[1]}`);
+    ok(mAmb && mDir && st.found.aAmb && st.found.aDir &&
+       Math.abs(st.found.aAmb.i - +mAmb[1]) < 1e-9 && Math.abs(st.found.aDir.i - +mDir[1]) < 1e-9,
+       `and the scene arrives carrying them: ambient ${mAmb ? mAmb[1] : '?'}, directional ` +
+       `${mDir ? mDir[1] : '?'}`,
+       JSON.stringify([st.found.aAmb && st.found.aAmb.i, st.found.aDir && st.found.aDir.i]));
+    ok(st.found.vAmb && st.found.vDir && st.found.vAmb.i === 0 && st.found.vDir.i === 0,
+       "with globe.gl's pair silenced, which is the fix this sweep chose -- so row 0 " +
+       'below is a lighting being RESTORED for comparison, not the one that ships',
+       JSON.stringify([st.found.vAmb && st.found.vAmb.i, st.found.vDir && st.found.vDir.i]));
 
     //  autoRotate would move the terminator between one candidate and the next and
     //  make the columns incomparable. It is a camera setting; the lighting is fixed
@@ -513,8 +553,9 @@ function table(rows) {
     }
     console.log('\n   sand/arab are the r-b spread at the Sahara and at Arabia: what makes them ' +
                 'read as\n   desert rather than as paper. Congo/Ocean/stars/LA are the four ' +
-                'things a fix\n   must not dim. Set 1 row 0 is the shipped lighting, measured ' +
-                'by this same code.');
+                'things a fix\n   must not dim. Row 0 is the PRE-FIX lighting, restored by this ' +
+                'same code in this\n   same process -- the picture that was replaced, not the one ' +
+                'that ships now.');
 }
 
 function report() {

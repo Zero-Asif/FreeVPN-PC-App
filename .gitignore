@@ -38,6 +38,11 @@ release/
 !.build/make-badges.js
 !.build/readme-fixtures.js
 !.build/readme-popup-preload.js
+# And the comment stripper, for the same reason once more: check-callsites.js,
+# test-restart-marker.js and test-browser-intro.js all require('./srcstrip.js')
+# on their first lines. It exists because the one-liner each of them used to
+# carry deleted 890 lines of main.js before a single assertion ran.
+!.build/srcstrip.js
 
 # Editor directories and files
 .vscode/

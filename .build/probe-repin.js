@@ -44,6 +44,10 @@ const path = require('path');
 const { TorControl } = require('../lib/tor-control.js');
 const { RelayIndex, ExitStore } = require('../lib/exit-selector.js');
 const { directGet } = require('../lib/socks-fetch.js');
+//  The one comment stripper: a `/*` written in prose pairs with the next `*/`
+//  in the file, and doing block comments first once deleted 890 lines of
+//  main.js between an ordinary `//` line and a regex literal.
+const { stripComments } = require('./srcstrip.js');
 
 const SOCKS = Number(process.env.PR_SOCKS) || 9350;
 const CTRL  = Number(process.env.PR_CTRL)  || 9351;
@@ -382,10 +386,36 @@ async function finish() {
     ok(usable.length === 0 || builtOfUsable === usable.length,
        'every relay Tor CAN use gave a circuit inside the app\'s own timeout',
        (usable.length - builtOfUsable) + ' usable one(s) still failed');
-    ok(known.length > 0 && (noNs.length + noMd.length) === 0,
-       `every top candidate the app would pick is usable by the Tor it asks`,
-       `${noNs.length + noMd.length} of ${known.length} across ${CCS.length} countries are not -- ` +
-       'the app picks from onionoo and never asks Tor whether it can use the relay');
+
+    //  RESTATED. This used to assert `noNs.length + noMd.length === 0` -- "every
+    //  top candidate the app would pick is usable by the Tor it asks" -- which is
+    //  the ABSENCE of the bug this probe was written to find. It can never be
+    //  true: onionoo lists a relay as Running from the directory authorities'
+    //  view, and whether THIS Tor holds its microdescriptor is a different fact,
+    //  so a red line sat here for ever and its detail text still said the app
+    //  "never asks Tor whether it can use the relay" -- which stopped being true
+    //  when main.js started asking. A permanently-red check is unreadable: nobody
+    //  can tell it from a regression.
+    //
+    //  So: the count stays (printed above -- it is the finding), and what is
+    //  asserted is the thing that can actually rot. The two checks above already
+    //  prove md/id is a sufficient discriminator in both directions on live
+    //  relays; this one proves the shipped app asks it, in front of the wait it
+    //  exists to save. .build/test-exit-persistence.js proves the branch's
+    //  behaviour on scripted sockets; here it is read out of main.js itself.
+    console.log(`   -> ${noNs.length + noMd.length} of ${known.length} across ${CCS.length} ` +
+                'countries are relays onionoo offers and this Tor cannot use. That number is ' +
+                'not a defect and cannot be driven to zero from here -- what matters is ' +
+                'whether the app finds out before it spends 25 s.');
+    const mainSrc = stripComments(
+        fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8'), 'main.js');
+    const asks = mainSrc.indexOf('await ctl.hasDescriptor(cand.fp)');
+    const waits = mainSrc.indexOf('await ctl.waitForExit(cand.fp');
+    ok(asks > 0 && waits > 0 && asks < waits,
+       'and the app asks that one GETINFO before the wait -- md/id/<fp>, the same question ' +
+       'this probe just asked ' + known.length + ' times',
+       asks < 0 ? 'main.js does not call ctl.hasDescriptor(cand.fp) at all'
+                : 'it is called, but AFTER waitForExit, which saves nothing');
 
     return finish();
 })().catch(async e => {

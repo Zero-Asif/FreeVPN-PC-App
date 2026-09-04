@@ -65,25 +65,35 @@ the complete list — nothing else in any image differs from what you get.
   override it, because a screenshot in a privacy README should not name
   somebody else's bank or somebody else's streaming service.
 * **The `BEST` badge sits on the United States.** The harness answers
-  `get-fastest-server` with `us`; the shipping handler at `main.js:1896` answers
-  `sg` unconditionally, because it is a stub. See the defect below — the badge
-  is not a measurement in either place, and the README does not describe it as
-  a feature.
+  `get-fastest-server` with `us`. The shipping handler at
+  [`main.js:3302`](../../main.js#L3302) answers with whichever country has the
+  most advertised exit bandwidth in the live relay list, so on a real machine it
+  moves. It is still not a speed test — nothing is timed, in either place — and
+  the badge's own tooltip says so.
 
-Two things the screenshots show are real defects, kept in frame rather than
-airbrushed out, and reported instead of quietly patched. A third is invisible in
-the pictures but is the reason the badge above is a fixture:
+Three things these screenshots caught were real defects. They were kept in frame
+rather than airbrushed out, reported here rather than quietly patched, and all
+three are fixed in v2.0.5 — so what follows is a record of what the pictures
+show, not a list of what is still wrong:
 
 * `09-comes-back.png` — the footer says "Nothing is connected right now…" while
-  the body says "You are currently connected through India." The ask raised at
-  `main.js:3014` passes no `foot`, so `renderer.js:664` falls back to the idle
-  line.
+  the body says "You are currently connected through India." The ask passed no
+  `foot`, so [`renderer.js:749`](../../renderer.js#L749) fell back to the idle
+  line. **Fixed:** that ask is the one question this app raises while the tunnel
+  is up, and it now sends its own footer
+  ([`main.js:4539`](../../main.js#L4539)).
 * `30-welcome.png` — a full stop sits on its own line. `welcome.html`'s
-  `ol.steps li b { display: block; }` also matches the inline
-  `<b>FreeProxy VPN Extension</b>` on line 257.
-* `main.js:1896` — `get-fastest-server` returns `{ best: 'sg', others: ['hk',
-  'jp'] }` no matter what, and `renderer.js:824` paints a `BEST` badge from it.
-  Nothing is timed. Either measure it or drop the badge.
+  `ol.steps li b { display: block; }` also matched the inline
+  `<b>FreeProxy VPN Extension</b>` on line 257. **Fixed:** the rule is
+  `ol.steps li > b:first-child`
+  ([`welcome.html:157`](../../Extension/welcome.html#L157)).
+* `get-fastest-server` returned `{ best: 'sg', others: ['hk', 'jp'] }` no matter
+  what, and the dropdown painted a `BEST` badge from it. **Fixed:** it now ranks
+  the same exit-capacity table the dropdown is sorted by, answers `best: null`
+  when no relay list has arrived yet — no badge rather than a wrong one — and
+  carries `measured: false` so nothing downstream can mistake it for a timing.
+  Tor exit throughput cannot be ranked from a sample, so it is not claimed to
+  be.
 
 ## What the art gate refuses
 

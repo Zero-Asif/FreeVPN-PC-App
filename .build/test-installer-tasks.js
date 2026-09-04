@@ -313,7 +313,14 @@ console.log('\n── the two sweeps that reconfigure the machine: source level 
     //  the firewall after uninstall forever.
     {
         const roots = ['main.js', 'installer.nsh', path.join('lib', 'geo-spoof.js'),
-                       path.join('lib', 'installer-tasks.js'), path.join('lib', 'geo-ext.js')];
+                       path.join('lib', 'installer-tasks.js'), path.join('lib', 'geo-ext.js'),
+                       //  lib/containment.js owns the eight "FreeProxy Allow *"
+                       //  names that make default-deny survivable. It was missing
+                       //  from this list, so the one module whose rules can leave
+                       //  a machine with no internet at all was the one module
+                       //  this check did not read.
+                       path.join('lib', 'containment.js'),
+                       path.join('lib', 'tunnel.js')];
         const created = new Set();
         for (const rel of roots) {
             const f = path.join(__dirname, '..', rel);
@@ -345,6 +352,28 @@ console.log('\n── the two sweeps that reconfigure the machine: source level 
         ok(srcText.includes(`delete rule name="${r}"`) ||
            srcText.includes('FW_RULES.map') || srcText.includes('of FW_RULES'),
            `sweepNetwork removes ${r}`);
+    }
+    //  THE SECOND LIST, and the one that matters when the first cannot run.
+    //  electron-builder does not guarantee that "FreeProxy VPN.exe" still exists
+    //  when customUnInstall runs, so installer.nsh deletes the same names again
+    //  in plain netsh. That duplication is deliberate and this is what keeps it
+    //  honest: a name added to FW_RULES and not to installer.nsh is a rule that
+    //  survives an uninstall the exe did not get to take part in.
+    {
+        const nsh = fs.readFileSync(path.join(__dirname, '..', 'installer.nsh'), 'utf8');
+        const missing = tasks.FW_RULES.filter(r =>
+            !nsh.includes(`delete rule name="${r}"`));
+        ok(missing.length === 0,
+           'installer.nsh deletes every name in FW_RULES without needing the exe',
+           missing.length ? 'not deleted: ' + JSON.stringify(missing) : '');
+        //  And the order: the outbound policy must be handed back BEFORE the
+        //  allow rules go, or the uninstall takes the machine off the network
+        //  instead of putting it back. Compared by position in the file.
+        const iPolicy = nsh.indexOf('firewallpolicy blockinbound,allowoutbound');
+        const iAllow  = nsh.indexOf('delete rule name="FreeProxy Allow ');
+        ok(iPolicy > 0 && iAllow > 0 && iPolicy < iAllow,
+           'the uninstaller allows outbound again before deleting the allow rules',
+           `policy at ${iPolicy}, first allow-rule delete at ${iAllow}`);
     }
     ok(/^HKCU\\/.test(tasks.PROXY_KEY), 'the proxy key is per-user, as the app writes it',
        tasks.PROXY_KEY);

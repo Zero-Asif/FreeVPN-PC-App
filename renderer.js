@@ -28,10 +28,39 @@ let _realGeolocation = null;
 //  is how it came to say "Connected via Luxembourg" while ipleak.net
 //  showed a Swiss exit IP. This resolves the reply into what to show.
 // ══════════════════════════════════════════════════════════════════
+//  ccName()'s return value is interpolated into innerHTML in nine places (the
+//  dropdown rows, the selected-server label, four toasts). Intl.DisplayNames
+//  returns a real country name for a real code, but for anything it does not
+//  recognise it returns the INPUT unchanged rather than throwing -- so the
+//  catch below was never the path that mattered, and `code.toUpperCase()` was
+//  reached with whatever came in. Two letters or nothing: a code this app
+//  cannot name is not a country, and printing it verbatim into markup is not
+//  worth the one case it would help.
 function ccName(code) {
-    if (!code) return '';
-    try { return regionNames.of(code.toUpperCase()); } catch (e) { return code.toUpperCase(); }
+    if (!/^[a-z]{2}$/i.test(String(code || ''))) return '';
+    const up = String(code).toUpperCase();
+    try { return regionNames.of(up) || up; } catch (e) { return up; }
 }
+
+//  The label that goes BESIDE getFlagImg() in an innerHTML, for the six sites
+//  that each used to carry their own copy of
+//
+//      let n = code.toUpperCase();
+//      try { n = regionNames.of(code.toUpperCase()); } catch (e) {}
+//
+//  -- the selected-server label written from the dropdown click, from
+//  updateUI(), from the extension's sync-ui-state, the disconnect toast's
+//  country, and the two in the capture-phase switch interceptor at the bottom
+//  of this file. Every one of them had the same defect ccName() was fixed for:
+//  Intl.DisplayNames returns its INPUT unchanged for a code it does not know,
+//  so `n` became the raw code and went into innerHTML.
+//
+//  '??' rather than '' when the code cannot be named, because these six all
+//  render as `getFlagImg(code) + ' ' + name` and getFlagImg() already draws
+//  ?? for exactly the same input -- so the two halves of one label cannot
+//  disagree about whether the country is known. It is a literal, so it is
+//  also the safe half.
+const ccLabel = code => ccName(code) || '??';
 
 //  Only a literal dotted-quad is ever shown. Two reasons, and both matter:
 //  this string arrives in a JSON body from a third-party geolocation service
@@ -142,10 +171,23 @@ function announceExit(x, verb) {
 //  Windows Chrome has no flag-emoji glyphs, so the badge is also the only
 //  fallback that can render at all.
 function getFlagImg(code) {
-    const u  = (code || '??').toUpperCase();
-    //  Only ever a two-letter code goes into the src. Country codes reach this
-    //  function from the live relay index, which is off the network.
+    //  Only ever a two-letter code goes into the src, AND into the badge text,
+    //  AND into the title="" attribute. The `u` on this line used to be
+    //  `(code || '??').toUpperCase()` -- the raw argument, uppercased -- while
+    //  only `cc` was pattern-checked, so the src was safe and the other two
+    //  were not: a value like  x" style="position:fixed;inset:0  closes the
+    //  title attribute and adds attributes of its own. index.html's CSP has no
+    //  'unsafe-inline' in script-src, so that cannot become script; style-src
+    //  does allow inline styles, so it can become a full-window overlay drawn
+    //  over a VPN's connection state, which is bad enough to close.
+    //
+    //  Where a value like that could come from: onionoo's `country` field.
+    //  lib/exit-selector.js now rejects a relay whose country is not two
+    //  letters, so this is the second of two independent checks rather than
+    //  the only one -- deliberately, because this function is also called with
+    //  codes from settings on disk and from the ask dialog.
     const cc = /^[a-z]{2}$/i.test(code || '') ? String(code).toLowerCase() : '';
+    const u  = cc ? cc.toUpperCase() : '??';
     let h = 0;
     for (let i = 0; i < u.length; i++) h = (h * 131 + u.charCodeAt(i)) % 360;
     const img = cc
@@ -533,7 +575,43 @@ function showToast(message, type = 'info', durationMs = 5000) {
 
 // ════════════════════════════════════════════════════════════
 //  📋 LOG VIEWER
+//
+//  WHY EVERY LINE IS ESCAPED BEFORE IT IS HIGHLIGHTED
+//
+//  This is the one place in the app where text that someone else chose is put
+//  into innerHTML. A log line is not app-authored data: Logger's metadata
+//  object carries, among other things, the Origin header of a refused
+//  WebSocket handshake and the split-tunnel entries bypassToProxyOverride()
+//  dropped -- and UPDATE_BYPASS is reachable by any local process that opens
+//  ws://127.0.0.1:8080 without an Origin header, because an absent Origin is
+//  how the extension's own service worker presents itself. So a local user
+//  with no privileges can put a chosen string in this app's log and wait for
+//  the person running it to press "View Logs".
+//
+//  What that string could NOT do, stated exactly, because overstating a hole
+//  is its own kind of dishonesty: index.html's CSP is
+//  `script-src 'self' file:` with no 'unsafe-inline', so an injected
+//  onerror=/onload=/javascript: does not run, an injected <script> never runs
+//  from innerHTML at all, and img-src/frame-src/object-src/form-action name no
+//  remote host. There is no script execution here and no request off the
+//  machine.
+//
+//  What it COULD do is what style-src 'unsafe-inline' still permits: markup
+//  with a style attribute. `<div style="position:fixed;inset:0;...">` drawn
+//  from a log line covers the window -- and this window is where the user
+//  reads whether they are connected, which exit country they have, and whether
+//  the Kill Switch is on. A VPN whose connection state can be repainted by an
+//  unprivileged local process is not one this app is willing to ship, and the
+//  fix is one function.
+//
+//  esc() runs FIRST and the three highlight regexes run on its output. That
+//  order is the whole point: they match digits, `%` and plain words, so they
+//  cannot match anything esc() produced, and the only tags in the result are
+//  the ones written on the lines below.
 // ════════════════════════════════════════════════════════════
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 async function openLogModal() {
     const modal   = document.getElementById('log-modal');
     const content = document.getElementById('log-content');
@@ -557,14 +635,18 @@ async function refreshLogContent(level = 'ALL') {
             else if (line.includes('[WARN   ]')) cls = 'WARN';
             else if (line.includes('[SUCCESS]')) cls = 'SUCCESS';
             else if (line.includes('[DEBUG  ]')) cls = 'DEBUG';
-            const hl = line
+            //  The class is decided on the RAW line and only the body is
+            //  escaped: `cls` is one of five literals from this function and
+            //  never comes from the log, so it is not a second hole even though
+            //  it lands in an attribute.
+            const hl = esc(line)
                 .replace(/(\d+%)/g, '<strong>$1</strong>')
                 .replace(/(ERROR|FAIL|failed)/gi, '<span style="color:#f87171;font-weight:700">$1</span>')
                 .replace(/(SUCCESS|connected|secured|spoofed)/gi, '<span style="color:#4ade80;font-weight:700">$1</span>');
             return `<div class="log-line ${cls}">${hl}</div>`;
         }).join('');
     } catch(e) {
-        content.innerHTML = `<div class="log-line ERROR">Failed to load logs: ${e.message}</div>`;
+        content.innerHTML = `<div class="log-line ERROR">Failed to load logs: ${esc(e.message)}</div>`;
     }
 }
 
@@ -696,6 +778,38 @@ ipcRenderer.on('ask-user',       (event, ask) => openAskDialog(ask));
 ipcRenderer.on('ask-user-close', (event, d)   => closeAskDialog(d && d.id));
 
 // ════════════════════════════════════════════════════════════
+//  🚨 A FAULT IN THE APP ITSELF
+//
+//  main.js's reportFault() has been sending on this channel from the moment it
+//  was written -- for an uncaught exception, an unhandled rejection, a dead
+//  renderer, a dead utility child, and for the full-device tunnel failing to
+//  start. Nothing in this file was listening, so every one of those sends
+//  landed nowhere. The comment above reportFault() says each fault is "logged
+//  AND sent to the window"; the second half of that sentence was true of the
+//  send and false of the window, which is exactly the kind of claim this
+//  project does not get to make.
+//
+//  ESCAPED, unlike every other showToast() caller. `message` is app-authored
+//  HTML by contract -- that is why half the toasts can carry <strong> and a
+//  <br> -- but `detail` here is an Error's own `message`, or Electron's
+//  `d.reason`, and an Error's message is whatever text the throwing code put
+//  in it: a path, a URL, a header, an argument. It is the one thing arriving
+//  on this channel that this app did not word itself, so it goes through esc()
+//  before it becomes part of the HTML.
+//
+//  15 s, and no auto-reload note: main.js decides whether to reload the window
+//  (twice, then it stops). This is only the part the user can see.
+// ════════════════════════════════════════════════════════════
+ipcRenderer.on('app-fault', (event, d) => {
+    const kind   = esc(String((d && d.kind) || 'Something went wrong'));
+    const detail = esc(String((d && d.detail) || ''));
+    showToast(`🚨 <strong>${kind}</strong>` +
+              (detail ? `<br>${detail}` : '') +
+              `<br><span style="opacity:.8">It is in the log — View Logs has the full entry.</span>`,
+              'error', 15000);
+});
+
+// ════════════════════════════════════════════════════════════
 //  📡 CONNECTION PROGRESS  (IPC from main.js)
 // ════════════════════════════════════════════════════════════
 ipcRenderer.on('connection-progress', (event, { percent, message, status, kept }) => {
@@ -771,8 +885,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             dropdownList.classList.remove('show');
     });
 
-    try { fastData = await ipcRenderer.invoke('get-fastest-server'); } catch(e) {}
-
     bypassInput.addEventListener('blur', async () => {
         const val = bypassInput.value.trim();
         bypassInput.value = val
@@ -797,6 +909,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!counts || !Object.keys(counts).length) return;
 
         isLoading=false; liveNodeCounts=counts;
+        //  Asked HERE, not once at startup. main.js derives `best` from the same
+        //  relay list `counts` came from, and at startup that list is usually
+        //  still empty -- so asking then meant `best: null` for the rest of the
+        //  session and a badge that never appeared. Asked on each refresh, it
+        //  tracks the list.
+        try { fastData = await ipcRenderer.invoke('get-fastest-server'); } catch(e) {}
         const loadingMsg = dropdownList.querySelector('li:not([data-value])');
         if (loadingMsg) loadingMsg.remove();
 
@@ -808,8 +926,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         sorted.forEach(code => {
             const { count=0, bandwidth=0 } = counts[code]||{};
             if (!count) return;
-            let name = code.toUpperCase();
-            try { name = regionNames.of(code.toUpperCase()); } catch(e) {}
+            //  ccName(), not a seventh copy of the regionNames.of() fallback.
+            //  There were seven in this file -- this one, five more below, and
+            //  ccName itself -- and all of them had the same defect:
+            //  Intl.DisplayNames returns its INPUT unchanged for a code it does
+            //  not recognise, so `name` became the raw code and went straight
+            //  into innerHTML further down. These codes are keys from the live
+            //  relay index, i.e. onionoo's `country` field.
+            //
+            //  ccName() returns '' for anything that is not two letters, and a
+            //  row this app cannot name is not a server the user can pick, so
+            //  it is skipped the same way a zero-exit row is. That skip is also
+            //  what makes the `li[data-value="${code}"]` selector below safe:
+            //  past this line `code` is two ASCII letters, so it cannot close
+            //  the attribute and throw a SyntaxError at the querySelector.
+            const name = ccName(code);
+            if (!name) return;
             const mbps = bandwidth / 1_000_000;
             let cls, label;
             //  The band below is real -- exit count and bandwidth, both from the
@@ -821,7 +953,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             else if (count>200 || mbps>50)  { cls='status-fast'; label=exits; }
             else if (count>50  || mbps>10)  { cls='status-busy'; label=exits; }
             else                             { cls='status-slow'; label=exits; }
-            const badge = (fastData && code===fastData.best) ? `<span class="fastest-badge">BEST</span>` : '';
+            //  A literal either way, `title` included, so this stays outside the
+            //  injection question entirely. The tooltip is there because "BEST"
+            //  on its own reads as a speed test and main.js does not run one --
+            //  see get-fastest-server: it marks the country with the most
+            //  advertised exit bandwidth, which is what this list is sorted by.
+            const badge = (fastData && code===fastData.best) ? `<span class="fastest-badge" title="Most exit bandwidth advertised in the live relay list -- not a speed test">BEST</span>` : '';
             const existing = dropdownList.querySelector(`li[data-value="${code}"]`);
             if (existing) {
                 const sp = existing.querySelector('.server-status');
@@ -846,8 +983,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const li = e.target.closest('li');
         if (!li || !li.hasAttribute('data-value')) return;
         currentServer = li.getAttribute('data-value');
-        let cName = currentServer.toUpperCase();
-        try { cName = regionNames.of(currentServer.toUpperCase()); } catch(e) {}
+        const cName = ccLabel(currentServer);
         selectedText.innerHTML = `${getFlagImg(currentServer)} ${cName}`;
         dropdownList.classList.remove('show');
 
@@ -905,8 +1041,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         isAppConnected=connected;
         if (serverValue) {
             currentServer=serverValue;
-            let cName=serverValue.toUpperCase();
-            try { cName=regionNames.of(serverValue.toUpperCase()); } catch(e) {}
+            const cName=ccLabel(serverValue);
             selectedText.innerHTML=`${getFlagImg(serverValue)} ${cName}`;
         }
         dropdownList.querySelectorAll('li[data-value]').forEach(li =>
@@ -940,8 +1075,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     connectButton.addEventListener('click', async () => {
         if (isLoading) { showToast('🔄 Please wait — fetching live server list…','info',3000); return; }
         const bypassValue=bypassInput.value;
-        let cName=currentServer.toUpperCase();
-        try { cName=regionNames.of(currentServer.toUpperCase()); } catch(e) {}
+        const cName=ccLabel(currentServer);
 
         // ── DISCONNECT ────────────────────────────────────
         if (isAppConnected) {
@@ -1018,7 +1152,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     killSwitchToggle.addEventListener('change', async e => {
         const on=e.target.checked;
         localStorage.setItem('killSwitch', on?'true':'false');
-        if (!isAppConnected) await ipcRenderer.invoke('toggle-killswitch', on);
+        //  Called in BOTH states now. It used to be skipped while connected, so
+        //  main never learned the new value and every decision it makes from the
+        //  Kill Switch -- what a dropped tunnel does, what disconnect leaves
+        //  behind, whether the firewall blocks non-tunnel traffic -- ran on the
+        //  stale one. main picks the right job for the state it is in.
+        await ipcRenderer.invoke('toggle-killswitch', on);
         showToast(on ? '🔒 Kill Switch <strong>ON</strong> — Internet blocked if VPN drops.'
                      : '🔓 Kill Switch <strong>OFF</strong>.', on?'warning':'info', 3500);
     });
@@ -1027,14 +1166,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     ipcRenderer.on('sync-ui-state', (event, state) => {
         if (currentServer!==state.serverCode) {
             currentServer=state.serverCode;
-            let cName=currentServer.toUpperCase();
-            try { cName=regionNames.of(currentServer.toUpperCase()); } catch(e) {}
+            const cName=ccLabel(currentServer);
             selectedText.innerHTML=`${getFlagImg(currentServer)} ${cName}`;
         }
         if (killSwitchToggle.checked!==state.killSwitch) {
             killSwitchToggle.checked=state.killSwitch;
             localStorage.setItem('killSwitch', state.killSwitch?'true':'false');
-            if (!isAppConnected) ipcRenderer.invoke('toggle-killswitch', state.killSwitch);
+            //  Same reason as the change listener above: while connected this
+            //  used to do nothing at all, so a toggle from the browser popup
+            //  moved the switch on screen and left the machine unchanged.
+            ipcRenderer.invoke('toggle-killswitch', state.killSwitch);
         }
         if (bypassInput.value!==state.bypassList) {
             bypassInput.value=state.bypassList;
@@ -1052,6 +1193,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     //  dropdown, including the revert if the new country has no usable exit.
     ipcRenderer.on('force-switch-ui', (event, code) => {
         if (!code || code === currentServer) return;
+        //  Two letters or nothing, and checked HERE rather than at the two
+        //  sinks below. `code` arrives from the browser extension over the
+        //  local WebSocket, which accepts a connection with no Origin header
+        //  on purpose -- that is how the extension's own service worker
+        //  presents itself -- so any local process can choose this string.
+        //  Below it would reach a CSS attribute selector, where a `"` is a
+        //  SyntaxError that takes out the whole dropdown render, and a
+        //  data-value that the next refresh reads back out again.
+        //
+        //  Rejecting is also the correct answer on its own terms: there is no
+        //  country to switch to, so there is nothing this handler could do
+        //  with the value even if it were harmless.
+        if (!/^[a-z]{2}$/i.test(code)) return;
         let li = dropdownList.querySelector(`li[data-value="${code}"]`);
         if (!li) {
             //  The popup can choose a country before the first relay fetch has
@@ -1105,8 +1259,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // the real updateUI() is out of scope for this listener.
         function applyConnectedUI(serverValue) {
             currentServer = serverValue;
-            let n = serverValue.toUpperCase();
-            try { n = regionNames.of(serverValue.toUpperCase()); } catch(_) {}
+            const n = ccLabel(serverValue);
             setFlag(serverValue, n);
             if (dl2) dl2.querySelectorAll('li[data-value]').forEach(x =>
                 x.classList.toggle('active-server', x.getAttribute('data-value') === currentServer));
@@ -1125,8 +1278,7 @@ document.addEventListener('DOMContentLoaded', () => {
             isAppConnected = false;
         }
 
-        let cName = newCode.toUpperCase();
-        try { cName = regionNames.of(newCode.toUpperCase()); } catch(_) {}
+        const cName = ccLabel(newCode);
         setFlag(newCode, cName);
         btn.textContent = `Switching to ${cName}…`; btn.disabled = true;
         btn.classList.remove('connected');

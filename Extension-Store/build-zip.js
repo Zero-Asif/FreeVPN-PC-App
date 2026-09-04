@@ -28,6 +28,16 @@
 //  backslash that started this. A zip this script calls good is one whose
 //  index was parsed off the disk, not one that a packer exited 0 on.
 //
+//  AND THE INDEX IS NOT THE CONTENTS. An entry list can be perfect while the
+//  bytes behind it are not: every field in a local header is written twice by
+//  this script -- once there and once in the central directory -- and a wrong
+//  compressed size or a stale offset produces a file whose names all match and
+//  whose bodies are garbage from the entry after it. So step 6 inflates every
+//  entry back out of the finished file and compares it byte for byte with
+//  package/. That round trip used to be a thing done once by hand with .NET and
+//  written down; it is an assertion now, because the zip is the artifact that
+//  gets uploaded and a hand-check does not travel with it.
+//
 //  USAGE:  node Extension-Store/build-zip.js
 //  Output: Extension-Store/FreeProxy-VPN-Extension-<version>.zip
 // ═══════════════════════════════════════════════════════════════════════
@@ -193,16 +203,27 @@ function zipEntries(file) {
     if (eocd < 0) return null;                     // not a zip at all
     const count = buf.readUInt16LE(eocd + 10);
     let at = buf.readUInt32LE(eocd + 16);
-    const names = [];
+    const entries = [];
     for (let n = 0; n < count; n++) {
         if (at + 46 > buf.length || buf.readUInt32LE(at) !== 0x02014b50) return null;
         const nameLen  = buf.readUInt16LE(at + 28);
         const extraLen = buf.readUInt16LE(at + 30);
         const cmtLen   = buf.readUInt16LE(at + 32);
-        names.push(buf.toString('utf8', at + 46, at + 46 + nameLen));
+        entries.push({
+            name:   buf.toString('utf8', at + 46, at + 46 + nameLen),
+            method: buf.readUInt16LE(at + 10),
+            crc:    buf.readUInt32LE(at + 16),
+            csize:  buf.readUInt32LE(at + 20),
+            usize:  buf.readUInt32LE(at + 24),
+            //  Where the central directory SAYS the body is. Followed rather
+            //  than assumed: this offset is the one field a writer can get
+            //  wrong without any size or count disagreeing.
+            at:     buf.readUInt32LE(at + 42),
+        });
         at += 46 + nameLen + extraLen + cmtLen;
     }
-    return names;
+    entries.buf = buf;
+    return entries;
 }
 
 const got = zipEntries(OUT);
@@ -213,7 +234,8 @@ if (!got) fail('the file was written but its central directory does not parse --
 //  a browser does not read them -- so any that turned up would mean the
 //  writer above did something other than what it says. Filtered, then the
 //  count is compared, so an unexpected one cannot pass unnoticed.
-const files = got.filter(n => !n.endsWith('/'));
+const entries = got.filter(e => !e.name.endsWith('/'));
+const files = entries.map(e => e.name);
 
 //  The measured Compress-Archive bug, kept as an assertion now that the
 //  writer is ours: a backslash in an entry name is a file called
@@ -237,7 +259,42 @@ if (!files.includes('manifest.json'))
     fail('manifest.json is not at the root of the zip -- the folder was packed ' +
          'instead of its contents, and Partner Center will refuse this upload');
 
+//  ── 6. inflate every entry back out and compare it with package/ ────
+//  The step the entry list cannot do. Each body is taken by FOLLOWING the
+//  central directory's offset into the local header -- the same route an
+//  unzipper takes -- and not by remembering where this script put it, so a
+//  wrong offset, a wrong compressed size or a wrong method fails here instead
+//  of at a reviewer. Then the stored CRC is recomputed over what came out, and
+//  what came out is compared with the file on disk.
+const wrong = [];
+for (const e of entries) {
+    const lh = e.at;
+    if (lh + 30 > got.buf.length || got.buf.readUInt32LE(lh) !== 0x04034b50) {
+        wrong.push(`${e.name}: no local header where the index says (offset ${lh})`);
+        continue;
+    }
+    const start = lh + 30 + got.buf.readUInt16LE(lh + 26) + got.buf.readUInt16LE(lh + 28);
+    const raw = got.buf.subarray(start, start + e.csize);
+    let body;
+    try {
+        body = e.method === 0 ? Buffer.from(raw) : zlib.inflateRawSync(raw);
+    } catch (err) {
+        wrong.push(`${e.name}: its body does not inflate -- ${err.message}`);
+        continue;
+    }
+    const disk = fs.readFileSync(path.join(PKG, e.name.split('/').join(path.sep)));
+    if (body.length !== e.usize)
+        wrong.push(`${e.name}: inflates to ${body.length} bytes, header says ${e.usize}`);
+    else if (CRC(body) !== e.crc)
+        wrong.push(`${e.name}: CRC of the extracted body does not match the stored one`);
+    else if (!body.equals(disk))
+        wrong.push(`${e.name}: extracts to ${body.length} bytes that are not package/'s`);
+}
+if (wrong.length) fail('the archive parses but does not extract to package/:\n         ' +
+                       wrong.slice(0, 8).join('\n         '));
+
 const kb = (fs.statSync(OUT).size / 1024).toFixed(0);
 console.log(`\n  OK  ${path.basename(OUT)}  (${kb} KB)`);
 console.log(`      manifest.json is at the root; ${files.length} files match package/`);
+console.log(`      all ${entries.length} entries extract byte-for-byte from the finished zip`);
 console.log('      upload this file at Partner Center > Extensions > Update > Package\n');

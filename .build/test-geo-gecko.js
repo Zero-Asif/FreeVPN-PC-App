@@ -150,9 +150,23 @@ ok(fs.readFileSync(path.join(P1, 'user.js'), 'utf8').trim() === USER_LINE,
 ok(!fs.existsSync(path.join(P2, 'user.js')),
    'a user.js we created is deleted, not left empty');
 const pj = fs.readFileSync(path.join(P1, 'prefs.js'), 'utf8');
-ok(!pj.includes('geo.provider.network.url') && !pj.includes('geo.wifi.uri'),
-   'prefs.js is scrubbed too -- user.js values are copied there on every start, ' +
-   'so removing user.js alone would leave the spoof behind');
+ok(!pj.includes('data:application/json,'),
+   'the SPOOFED value is gone from prefs.js too -- user.js values are copied there ' +
+   'on every start, so removing user.js alone would leave the spoof behind');
+//  Not merely "the pref name is absent". From 2.0.5 the user's own value for
+//  every pref this module overwrites is journaled before the first write and
+//  handed back here verbatim, because filtering alone would reset a user who
+//  had chosen Mozilla's service -- or a corporate manual proxy -- to Gecko's
+//  factory default. That would be this app breaking a setting it never owned.
+ok(pj.includes('user_pref("geo.provider.network.url", ' +
+               '"https://location.services.mozilla.com/v1/geolocate");') &&
+   pj.includes('user_pref("geo.wifi.uri", ' +
+               '"https://location.services.mozilla.com/v1/geolocate");'),
+   "the user's OWN value for those prefs is back, verbatim -- not deleted, and " +
+   'not reset to a default they never chose');
+ok((pj.match(/geo\.provider\.network\.url/g) || []).length === 1,
+   'and exactly once -- the spoofed line was removed before the original was ' +
+   'appended, so the file does not end up with both');
 ok(pj.includes('dom.webnotifications.enabled') && pj.includes('browser.startup.homepage'),
    "every other pref in prefs.js is untouched");
 

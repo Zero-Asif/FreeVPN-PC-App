@@ -45,7 +45,14 @@ const REL = path.join(ROOT, 'release');
 const UNPACKED = path.join(REL, 'win-unpacked');
 const RES = path.join(UNPACKED, 'resources');
 const ASAR = path.join(RES, 'app.asar');
-const SETUP = path.join(REL, 'FreeProxy-VPN-Setup-2.0.0.exe');
+//  Read out of package.json, not typed here. electron-builder names the
+//  artifact after that field, so a version bump renamed the .exe and this line
+//  went looking for a 2.0.0 installer that no build would ever produce again --
+//  which fails as "no installer" and takes the twelve checks that read its size
+//  and mtime down with it. Third time a pinned detail has rotted in this
+//  directory; the version has exactly one home.
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+const SETUP = path.join(REL, `FreeProxy-VPN-Setup-${VERSION}.exe`);
 
 let pass = 0, fail = 0;
 const ok = (cond, name, extra) => {

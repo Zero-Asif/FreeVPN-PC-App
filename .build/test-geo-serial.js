@@ -52,7 +52,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  * an empty chain rather than inheriting the previous one's.
  */
 function build({ answer }) {
-    const seen = { starts: [], ends: [], inproc: [], logs: [], live: 0, maxLive: 0 };
+    const seen = { starts: [], ends: [], inproc: [], gecko: [], logs: [],
+                   live: 0, maxLive: 0 };
     const runOffThread = async (job, payload) => {
         seen.starts.push({ job, payload });
         seen.live++;
@@ -64,16 +65,21 @@ function build({ answer }) {
     };
     const Logger = { debug: m => seen.logs.push(String(m)), warn: m => seen.logs.push(String(m)),
                      info(){}, error(){}, success(){} };
-    const geoEngine = () => ({ applyAll(c) {
-        seen.inproc.push(c && c.city);
-        if (c && c.throwHere) throw new Error('in-process applyAll failed');
-    } });
+    const geoEngine = () => ({
+        applyAll(c) {
+            seen.inproc.push(c && c.city);
+            if (c && c.throwHere) throw new Error('in-process applyAll failed');
+        },
+        applyGecko(c) { seen.gecko.push(c && c.city); return 0; },
+    });
     const fn = new Function('runOffThread', 'APPDATA_PATH', 'Logger', 'geoEngine',
-        text + '\n; return runGeoApply;')(runOffThread, 'C:\\STATE\\DIR', Logger, geoEngine);
-    return { runGeoApply: fn, seen };
+        text + '\n; return { runGeoApply, runGeckoApply };')(
+            runOffThread, 'C:\\STATE\\DIR', Logger, geoEngine);
+    return { runGeoApply: fn.runGeoApply, runGeckoApply: fn.runGeckoApply, seen };
 }
 
 const CITY = (city, ms) => ({ lat: 1, lng: 2, accuracy: 10, city, _ms: ms });
+const PROXY = { host: '127.0.0.1', port: 9050, bypass: 'example.com' };
 
 (async () => {
     console.log(`\n── two switches in a row, one child at a time -- ${new Date().toISOString()} ──`);
@@ -85,8 +91,8 @@ const CITY = (city, ms) => ({ lat: 1, lng: 2, accuracy: 10, city, _ms: ms });
         const { runGeoApply, seen } = build({
             answer: async p => { await sleep(p.coord._ms); return { ok: true }; },
         });
-        const a = runGeoApply(CITY('stockholm', 120));
-        const b = runGeoApply(CITY('berlin', 10));
+        const a = runGeoApply(CITY('stockholm', 120), PROXY);
+        const b = runGeoApply(CITY('berlin', 10), PROXY);
         await Promise.all([a, b]);
 
         ok(seen.maxLive === 1, 'never more than one child alive at once',
@@ -101,6 +107,17 @@ const CITY = (city, ms) => ({ lat: 1, lng: 2, accuracy: 10, city, _ms: ms });
         ok(seen.starts[1].payload.coord.city === 'berlin' &&
            seen.starts[1].payload.coord.lat === 1 && seen.starts[1].payload.coord.lng === 2,
            'the coordinates go across untouched');
+        //  2.0.5: the Gecko family's share of the tunnel travels the same way.
+        //  It has to arrive INTACT -- a port that crossed as a string, or a
+        //  bypass list that was dropped, would have geo-spoof.js either throw
+        //  or write a Firefox that tunnels a host the rest of the machine sends
+        //  direct. Neither failure is visible from the parent.
+        ok(seen.starts.every(s => s.payload.proxy &&
+                                  s.payload.proxy.host === '127.0.0.1' &&
+                                  s.payload.proxy.port === 9050 &&
+                                  s.payload.proxy.bypass === 'example.com'),
+           'and the SOCKS descriptor crosses with it, whole -- host, numeric port ' +
+           'and the split-tunnel list', JSON.stringify(seen.starts[0].payload.proxy));
         ok(seen.inproc.length === 0, 'and nothing ran on the main thread while the child worked');
     }
 
@@ -135,17 +152,68 @@ const CITY = (city, ms) => ({ lat: 1, lng: 2, accuracy: 10, city, _ms: ms });
            seen.inproc.join(','));
     }
 
+    console.log('\n── a split-tunnel edit shares the SAME queue as a country switch ──');
+    {
+        //  applyLiveBypass() rewrites the Gecko no_proxies_on list while the
+        //  session is up, and that touches the same journal and the same
+        //  user.js files a country switch does. On its own chain it would be a
+        //  second writer -- the race this whole file exists to close, reopened
+        //  by the fix for the freeze.
+        const { runGeoApply, runGeckoApply, seen } = build({
+            answer: async p => { await sleep(p.coord._ms); return { ok: true }; },
+        });
+        const a = runGeoApply(CITY('lisbon', 90), PROXY);
+        const b = runGeckoApply(CITY('lisbon', 5), { ...PROXY, bypass: 'edited.test' });
+        await Promise.all([a, b]);
+        ok(seen.maxLive === 1, 'still never two children at once', 'peak ' + seen.maxLive);
+        ok(seen.starts.map(s => s.job).join(',') === 'geo-apply,geo-gecko',
+           'the bypass edit waits for the switch, and asks for the narrower job',
+           seen.starts.map(s => s.job).join(','));
+        ok(seen.starts[1].payload.proxy.bypass === 'edited.test',
+           'and the edited list is the one that lands last');
+        ok(seen.starts[1].payload.coord && seen.starts[1].payload.coord.city === 'lisbon',
+           'the connected country goes WITH it -- the fenced block is rewritten whole, ' +
+           'so a proxy-only call would delete the spoofed location');
+    }
+
     console.log('\n── the call site really uses it ──');
     {
-        const at = src.indexOf('await runGeoApply(coord);');
-        ok(at > 0, 'applyGeolocationSpoof awaits runGeoApply(coord)');
+        const at = src.indexOf('await runGeoApply(coord, proxy);');
+        ok(at > 0, 'applyGeolocationSpoof awaits runGeoApply(coord, proxy)');
         ok(src.indexOf('geo.applyAll(') < 0,
            'and nothing in main.js calls applyAll on the main thread outside that fallback',
            'still present at ' + src.indexOf('geo.applyAll('));
-        const direct = [...src.matchAll(/runOffThread\('geo-apply'/g)];
-        ok(direct.length === 1,
-           'there is exactly one place that forks the geo child, so nothing can bypass ' +
-           'the queue', String(direct.length));
+        const direct = [...src.matchAll(/runOffThread\('geo-(apply|gecko)'/g)];
+        ok(direct.length === 2,
+           'there are exactly two places that fork the geo child -- one per job -- so ' +
+           'nothing can bypass the queue', String(direct.length));
+        //  Both must be built on the shared chain, by name. Two `let` chains
+        //  would look identical from the outside and serialise nothing.
+        ok((text.match(/_geoApplyChain\.then\(step, step\)/g) || []).length === 2 &&
+           (text.match(/let _geoApplyChain/g) || []).length === 1,
+           'and both hang off the one chain variable, not a second one of their own');
+        //  The descriptor is built where SOCKS_PORT and appState are in scope,
+        //  and passed in. Read from a global it would be undefined -- the
+        //  wrapper is at module scope, outside runAdminApp().
+        ok(/applyGeolocationSpoof\(\s*\n?\s*mainWindow, finalCode,\s*\n?\s*\{ socksPort: SOCKS_PORT, bypass: appState\.bypassList \}\)/
+           .test(src),
+           'the connect path hands the wrapper the SOCKS port and the split-tunnel list');
+        //  The country the handler passes, not the fact that it passes one. It
+        //  used to be pinned as `GEO_COORDS[` literally, which broke the day the
+        //  table stopped being indexed at the call site: geoCoord() is a checked
+        //  accessor over that same table (it rejects a non-string, lower-cases,
+        //  demands two letters, and uses hasOwnProperty so a country called
+        //  'constructor' cannot resolve to a function). So the assertion asks
+        //  for either shape and then asks the thing that actually matters -- the
+        //  argument is the CONNECTED country, and it is not null.
+        const gecko = src.match(/runGeckoApply\(\s*\n?\s*([^,]+),/);
+        ok(!!gecko && /^(?:geoCoord\(|GEO_COORDS\[)/.test(gecko[1].trim()),
+           'and the split-tunnel handler re-applies the Gecko half with the current country',
+           gecko ? 'first argument is ' + gecko[1].trim() : 'no runGeckoApply call found');
+        ok(!!gecko && /appState\.serverCode/.test(gecko[1]),
+           'and that country is read from appState.serverCode, so the block it rewrites ' +
+           'carries the country the user is connected under rather than a stale one',
+           gecko ? gecko[1].trim() : '');
     }
 
     console.log(`\n${pass}/${pass + fail} checks passed`);

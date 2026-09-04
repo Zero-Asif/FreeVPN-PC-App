@@ -758,6 +758,42 @@ console.log('\n── and what it packages is the Tor bundle, not this machine\'
         const extra = tracked.filter(f => !MUST_SHIP.includes(f));
         ok(!extra.length, 'and the tracked Tor bundle is those four files and nothing else',
            JSON.stringify(extra));
+
+        //  The same agreement, one directory over, where it has bitten twice.
+        //  .gitignore ignores `.build/*` and then names the files back one at a
+        //  time -- so a helper a committed suite require()s, but nobody
+        //  remembered to un-ignore, is present here and absent from every clone.
+        //  The suite does not fail there, it dies on its first line: MODULE_NOT_
+        //  FOUND, exit 1, no assertion run and nothing to say which. The
+        //  .gitignore comment records this happening for geo-from-main.js and
+        //  again for readme-fixtures.js; this is what makes the third time fail
+        //  here instead of in a clone.
+        const buildFiles = require('child_process')
+            .execFileSync('git', ['ls-files', '--', '.build/'], { cwd: ROOT, encoding: 'utf8' })
+            .split(/\r?\n/).filter(f => /\.js$/.test(f));
+        const missing = [];
+        for (const f of buildFiles) {
+            const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
+            for (const m of text.matchAll(/require\(\s*'\.\/([^']+)'\s*\)/g)) {
+                const dep = '.build/' + (/\.js$/.test(m[1]) ? m[1] : m[1] + '.js');
+                if (!buildFiles.includes(dep)) missing.push(`${f} -> ${dep}`);
+            }
+        }
+        ok(!missing.length,
+           'and every .build/ helper a committed suite require()s is committed too -- a clone ' +
+           'can run its own checks',
+           missing.join(', '));
+        //  And nobody goes back to the one-liner. This exact idiom -- block
+        //  comments out first, line comments second -- is what paired the `/*`
+        //  in a prose `Tun/**` with a `*/` inside a regex 890 lines later and
+        //  removed the code in between. srcstrip.js is the only place allowed to
+        //  take comments out of a JS source file.
+        const NAIVE = ".replace(/\\/\\*[\\s\\S]*?\\*\\//g, '')";
+        const naive = buildFiles.filter(f => f !== '.build/srcstrip.js' &&
+            fs.readFileSync(path.join(ROOT, f), 'utf8').includes(NAIVE));
+        ok(!naive.length,
+           'and no suite strips JS comments by itself -- one stripper, the one that cannot eat ' +
+           'code', naive.join(', '));
     } else {
         console.log('       (git unavailable here -- the .gitignore agreement checks are skipped, not passed)');
     }

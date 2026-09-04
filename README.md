@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/badges/version.svg" alt="release v2.0.0">
+  <img src="docs/media/badges/version.svg" alt="release v2.0.5">
   <img src="docs/media/badges/platform.svg" alt="platform Windows 10 / 11 x64">
   <img src="docs/media/badges/license.svg" alt="license MIT">
   <img src="docs/media/badges/tor.svg" alt="tor 0.4.9.6">
   <img src="docs/media/badges/electron.svg" alt="electron 41.3.0">
-  <img src="docs/media/badges/extension.svg" alt="extension MV3 v1.1.0">
+  <img src="docs/media/badges/extension.svg" alt="extension MV3 v1.2.0">
 </p>
 <p align="center">
   <img src="docs/media/badges/countries.svg" alt="74 exit countries spoofable">
@@ -16,7 +16,7 @@
   <img src="docs/media/badges/telemetry.svg" alt="telemetry none">
   <img src="docs/media/badges/accounts.svg" alt="sign-up not required">
   <img src="docs/media/badges/admin.svg" alt="runs as administrator">
-  <img src="docs/media/badges/probes.svg" alt="probe suite 111 scripts">
+  <img src="docs/media/badges/probes.svg" alt="probe suite 125 scripts">
 </p>
 
 <h3 align="center">Pick a country. Everything on this PC comes out there — including where the web thinks you are standing.</h3>
@@ -32,7 +32,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/walkthrough.svg" width="100%" alt="Six panels. One: run the installer once, a per-machine NSIS setup marked requireAdministrator, with the Visual C++ redistributable inside it, asking for one restart. Two: pick where to come out, 74 countries on a globe or in the popup, pinned in the torrc with StrictNodes 1. Three: press Connect, seven stages in the app's own words, the exit read back through the circuit rather than assumed. Four: the whole machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 853 shut elsewhere, IPv6 blocked both ways, 14 browsers and 7 firewall rules. Five: switch country or split it, and the wipe is browser-wide. Six: check every claim yourself, with no account, no telemetry and no update check.">
+  <img src="docs/media/walkthrough.svg" width="100%" alt="Six panels. One: run the installer once, a per-machine NSIS setup marked requireAdministrator, with the Visual C++ redistributable inside it, asking for one restart. Two: pick where to come out, 74 countries on a globe or in the popup, pinned in the torrc with StrictNodes 1. Three: press Connect, seven stages in the app's own words, the exit read back through the circuit rather than assumed. Four: the whole machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 853 shut elsewhere, IPv6 blocked both ways, 14 browsers and 9 firewall rules. Five: switch country or split it, and the wipe is browser-wide. Six: check every claim yourself, with no account, no telemetry and no update check.">
 </p>
 
 <p align="center">
@@ -40,7 +40,7 @@
     <b>1</b> <a href="#getting-it-running">install</a> &nbsp;·&nbsp;
     <b>2</b> <a href="#the-tour">pick a country</a> &nbsp;·&nbsp;
     <b>3</b> <a href="#one-press-of-connect">connect</a> &nbsp;·&nbsp;
-    <b>4</b> <a href="#leak-protection-and-a-kill-switch-that-means-it">the machine follows</a> &nbsp;·&nbsp;
+    <b>4</b> <a href="#the-whole-machine-not-just-the-browser">the machine follows</a> &nbsp;·&nbsp;
     <b>5</b> <a href="#what-a-switch-wipes-and-why">switch, or split</a> &nbsp;·&nbsp;
     <b>6</b> <a href="#it-writes-down-what-it-did">check it yourself</a>
   </sub>
@@ -57,7 +57,7 @@ into it.
 
 | It **does** | It **does not** |
 |---|---|
-| Route the whole machine through Tor — every app, not just a browser | Encrypt anything Tor does not; a site on plain HTTP is still plain HTTP to the exit |
+| [Route the whole machine through Tor](#the-whole-machine-not-just-the-browser) — every program's TCP, not just a browser's | Encrypt anything Tor does not; a site on plain HTTP is still plain HTTP to the exit |
 | Let you pin the exit to one of **74 countries** and switch without a reconnect | Promise a country is available right now; if a country has no usable exit, it says so and offers alternatives |
 | Make `navigator.geolocation` report the connected country's real coordinates in **14 browsers** | Fake the Windows location provider — that has no supported route, so the position is **withheld** instead ([why](#geolocation-the-part-that-is-usually-missing)) |
 | Close DNS, IPv6 and pre-existing sockets so they cannot leak around the tunnel | Hide from your ISP that you are using Tor, unless a bridge round happens to work |
@@ -121,7 +121,7 @@ browser.
 
 ### 1 · Install
 
-Run **`FreeProxy-VPN-Setup-2.0.0.exe`**. It installs per machine and asks for
+Run **`FreeProxy-VPN-Setup-2.0.5.exe`**. It installs per machine and asks for
 administrator **once**.
 
 That prompt is not cosmetic: the extension is offered from `HKLM`, and DNS,
@@ -225,8 +225,8 @@ What step 4 reports, and what each answer means:
 |---|---|
 | **This app** | Electron 41.3.0, one window. The main process writes the `torrc` and seals the tunnel, the renderer draws the globe and the live log, 18 IPC channels connect the two, and the parts Windows guards run elevated. |
 | **The Tor engine** | The bundled `tor.exe` 0.4.9.6, started by this app with a configuration this app writes: `SocksPort 9050`, `HTTPTunnelPort 9080`, `ControlPort 9051` — cookie auth, never a password — and `DNSPort 53`, falling back to `9053` when something already holds 53. |
-| **Windows** | System proxy, per-adapter DNS, firewall rules, IPv6 and the location service. Each is changed by name, and each is changed back by name on disconnect — not at the next reboot. |
-| **The surfaces** | 8 Chromium browsers (proxy **and** the bundled MV3 extension), 5 Gecko browsers (proxy and prefs, per real profile), Internet Explorer (proxy only — it has no extension model), and every other program on the machine (proxy; position withheld, never faked). |
+| **Windows** | Both proxy stores — WinINET per user and WinHTTP per machine — plus per-adapter DNS, firewall rules, IPv6 and the location service. Each is changed by name, and each is changed back by name on disconnect — not at the next reboot. |
+| **The surfaces** | 8 Chromium browsers (proxy, policy **and** the bundled MV3 extension), 5 Gecko browsers (the geolocation prefs per real profile, **and a real SOCKS5 proxy of their own** — `network.proxy.type=1` at `127.0.0.1:9050` with remote DNS, read back out of the file before it counts as applied), Internet Explorer (proxy only — it has no extension model), Windows' own services and every other program on the machine (the machine proxy, and with the full-device tunnel on, every TCP connection whether the program knows what a proxy is or not; position withheld, never faked). |
 
 Two further loopback channels run underneath all of it.
 `ws://127.0.0.1:8080` carries the country, the city and an accuracy to every
@@ -313,6 +313,23 @@ the same instant.
 A browser that is not installed is never touched and never named. Gecko
 profiles are enumerated per browser, so a second Firefox profile gets the same
 prefs as the first rather than being silently skipped.
+
+Gecko takes a **real SOCKS5 proxy**, not the machine's — `network.proxy.type=1`
+at `127.0.0.1:9050` with `socks_remote_dns` on, written into the same fenced
+block as the coordinates and read back out of the file before it is called
+applied. Three things follow from where those prefs live, and all three are
+limits rather than bugs:
+
+- **It takes effect at the browser's next start.** `user.js` is read once, at
+  startup. A change written while Firefox is open changes nothing until it is
+  closed and reopened.
+- **A browser that is running when you connect is left alone.** Writing
+  `user.js` under a live Gecko process is how a profile gets corrupted, so it is
+  skipped, named in the log, and picked up on the next connect.
+- **WebRTC is switched off** (`media.peerconnection.enabled=false`) for the
+  duration. Tor's SOCKS5 has no UDP, so a WebRTC call would either fail or leak
+  the real address around the tunnel. Video calls in a Gecko browser do not work
+  while connected; the pref is removed again on disconnect.
 
 <details>
 <summary><b>How the extension actually gets in, and why there are four routes</b></summary>
@@ -448,6 +465,84 @@ to its own console that history, cache and cookies could not be cleared for that
 switch, and carries on with the steps it *can* do. It does not report a wipe it
 did not perform.
 
+
+<img src="docs/media/divider.svg" width="100%" alt="">
+
+## The whole machine, not just the browser
+
+A proxy setting is a request, not a rule. Up to v2.0.0 this app made that request
+in four places — the per-user WinINET store, the machine-wide WinHTTP store, a
+Chromium policy, and a pref per Gecko profile — and anything that ignored all
+four went out over the real IP: a game, an installer, a mail client, a stub
+resolver with its own hardcoded DNS. **v2.0.5 adds two layers that need no
+cooperation from the program at all.** They answer different halves of the same
+problem — one redirects traffic, the other drops what cannot be redirected — and
+neither replaces the other.
+
+| Layer | What it actually is | What it cannot do |
+|---|---|---|
+| **Full-device tunnel** — `Tun\wintun.dll` (Wintun 0.14.1) + `Tun\tun2socks.exe` (2.7.0) | A layer-3 adapter named `FreeProxyTun` at `10.77.77.1/24` owns the route table; `tun2socks` terminates every TCP connection that arrives there in userspace and re-dials it through `127.0.0.1:9050`. Every program's TCP rides Tor, whether that program has ever heard of a proxy or not. **On by default** | Carry **UDP** — Tor's SOCKS5 has no `UDP ASSOCIATE`, so QUIC, WebRTC, games and VoIP have nowhere to ride. **ICMP** is not carried either: `ping` and `tracert` go quiet |
+| **Containment** — default-deny outbound | `blockinbound,blockoutbound` on all three firewall profiles, so the Windows Filtering Platform drops every outbound packet no ALLOW rule matches, for every process. The allow list is deliberately tiny: `tor.exe`, `lyrebird.exe`, this app, the tunnel adapter, loopback and DHCP. **Armed by the Kill Switch, not by connecting** | Redirect anything. WFP can permit a packet or drop it; it cannot rewrite the destination, which is why default-deny on its own is a wall rather than a VPN. Local-subnet traffic is deliberately **allowed** — it cannot reach the internet, so blocking it would kill printers and NAS boxes to close a hole that is not there |
+
+Four decisions in that first row are worth stating, because each of them is the
+difference between a tunnel and a machine you have to repair:
+
+* **Two `/1` routes, never `0.0.0.0/0`.** `0.0.0.0/1` and `128.0.0.0/1` cover the
+  same address space as a default route without touching the real one — so
+  teardown is *delete two routes* rather than *restore something we overwrote*, a
+  crash leaves the original default in place, and anything with a longer prefix
+  (your LAN, loopback, a Hyper-V switch) still routes normally.
+* **`10.77.77.0/24`**, picked to sit outside every range a home router hands out.
+  If a network really does use it, that `/24` is a longer prefix than the `/1`
+  pair and keeps winning — the LAN still works, the tunnel just cannot reach that
+  one range.
+* **Tor's own relays are routed around the adapter.** Otherwise `tor.exe`'s
+  connection to a relay would itself be captured and handed back to `tor.exe`,
+  which is a loop, not a tunnel. The app reads `netstat -ano` for Tor's PID every
+  4 seconds and pins each live peer with a host route via the physical gateway,
+  then deletes exactly those addresses on the way down.
+* **The order is not interchangeable.** Arming goes tunnel → containment, because
+  containment needs the tunnel's local address to write the one rule that lets
+  in-tunnel traffic out. Disarming goes containment → tunnel, because pulling the
+  routes first would leave the PC with outbound still denied and nothing left
+  allowed to carry traffic — *"the VPN broke my internet"*, at the exact moment
+  you asked to be back to normal.
+
+> [!WARNING]
+> **While containment is armed, this process is the only thing between the
+> machine and no internet at all.** So it refuses to arm until a standalone
+> recovery script exists on disk; the outbound policy is handed back at every
+> startup, on `will-quit`, and on the kill-switch-off path; and **Restore
+> Internet** undoes all of it in one double-click. That last one is a Start Menu
+> entry next to the app's own, pointing at a self-elevating `restore-internet.bat`
+> in `C:\ProgramData\freeproxy-vpn` — it needs neither this app nor Node nor the
+> install directory, because a `.bat` nobody can find is no use to somebody who
+> cannot reach a search engine to be told it is there.
+
+The tunnel is the one layer you can turn off without giving up the rest.
+`"fullTunnel": false` in `settings.json` — in the app's own data folder,
+`%APPDATA%\FreeProxy VPN` — leaves the proxies, the policies, the extension and
+the leak blocks exactly as they are and simply never creates the adapter. It is
+an edit rather than a switch on purpose: the window's design is frozen, and
+somebody who needs UDP back for a game or a video call should not have to wait
+for a rebuild. Absent or malformed reads as **on**, and the log says which one it
+did — `Full-device tunnel UP` or `Full-device tunnel is disabled in settings.json`.
+If either binary is missing from a build, the availability check says so and the
+start path refuses; there is no route through this code that reports a tunnel the
+kernel does not have.
+
+> [!NOTE]
+> **What is verified, and what is not — exactly.**
+> `.build/probe-tunnel.js` checks everything that needs no privileges: that the
+> `/1` pair is what would be installed, that the `netstat` filter picks Tor's own
+> peers out of a live table, and that a build missing either binary reports
+> unavailable and **refuses to start** instead of claiming a tunnel. The four
+> steps that need administrator — **creating the adapter, reading its address
+> back, reading the routes back, and tearing it down** — print
+> `NOT VERIFIED (needs admin)` in that probe's own output on an unelevated run,
+> and that is exactly what they are here. `node .build/probe-tunnel.js --live`
+> from an elevated shell runs them; it deliberately creates the adapter *without*
+> the capture routes, so your routing is untouched either way.
 
 <img src="docs/media/divider.svg" width="100%" alt="">
 
@@ -589,24 +684,31 @@ to upload it to.
 | Setting | While connected | Put back by |
 |---|---|---|
 | **System proxy** — `HKCU\…\Internet Settings` | `ProxyServer`, `ProxyEnable=1`, `ProxyOverride` | disconnect and uninstall: the values are **deleted**, and `ProxyEnable` set to `0` |
+| **Machine proxy** — WinHTTP | `netsh winhttp set proxy` to Tor's HTTP tunnel port, so Windows Update, the Microsoft Store, the update services and .NET / PowerShell clients follow too — they never read the per-user key above | `netsh winhttp reset proxy`, on disconnect, on exit, at the next start after a crash, and from the uninstaller |
 | **DNS**, per adapter | every adapter's resolver pinned to `127.0.0.1` | adapters reset to DHCP, the per-interface `NameServer` removed, `dnscache` started again |
-| **Firewall** | 7 named rules — 2 allow, 4 block, 1 location shield | each deleted **by name**, so nothing else in your profile is touched |
+| **Network adapter and routes** — `FreeProxyTun` | a Wintun layer-3 adapter at `10.77.77.1/24`, the `0.0.0.0/1` + `128.0.0.0/1` pair pointing at it, and one host route per live Tor relay via your real gateway | the two `/1` routes and every `/32` it added are deleted **by address**, the adapter itself goes when `tun2socks.exe` exits, and one left behind by a crash is cleaned up at the next start before anything is armed |
+| **Firewall** | 9 named rules — 3 outbound allows for this app's own binaries, 5 blocks (IPv6 both ways, DNS on UDP/53 and TCP/53, DoT on 853) and 1 location shield. With the Kill Switch armed, 8 more: the allow list that makes default-deny survivable | each deleted **by name**, so nothing else in your profile is touched — and the outbound policy is handed back **before** the allow rules go, in that order, because the other order would leave the PC with no internet at all |
+| **Outbound firewall policy** | with the Kill Switch armed: `firewallpolicy blockinbound,blockoutbound` on all three profiles — the policy itself, which is a different object from the rules above | set back to `blockinbound,allowoutbound` on disconnect, on exit, at the next start after a crash, by **Restore Internet**, and by the recovery script even with this app uninstalled |
 | **IPv6** | binding off, `DisabledComponents=255`, Teredo / ISATAP / 6to4 off | binding on, `DisabledComponents=0`, all three tunnels back to `default` |
 | **Location service** | `lfsvc` stopped, the sensor denied | `sc config lfsvc start= demand`, then the resolver cache flushed |
 | **Chromium policy & external-extension entries** | the four routes above, for installed forks only | removed — and only where the entry's update URL is *this machine's own loopback*, so a workplace deployment survives untouched |
-| **Gecko prefs** | `geo.provider.network.url` and the proxy prefs, per real profile | restored from the revert journal, which is the only step that can put back what *you* had rather than a Windows default |
+| **Gecko prefs** | one fenced block per real profile in `user.js`, holding **17 prefs**: the geolocation six (`geo.provider.network.url`, `geo.wifi.uri` and the four native-provider switches) and eleven for the tunnel — `network.proxy.type=1` at `127.0.0.1:9050`, `socks_remote_dns`, `no_proxies_on` mirroring your split-tunnel list, `network.trr.mode=5`, and `media.peerconnection.enabled=false`. Every one is read back out of the file before it is reported applied | the fenced block is removed, the values Gecko copied into `prefs.js` at its last shutdown are filtered out of there too, and the revert journal is replayed — the only step that can put back what *you* had rather than a browser default |
+| **Gecko prefs, with this app gone** | — | `restore-gecko-prefs.ps1`, written into the state directory at every start and run as step 6 of **Restore Internet** and by the uninstaller. Every other recovery step is a Windows setting a proxied Gecko browser does not read, so without this one "Restore Internet" would leave Firefox unable to load a page |
 | **hosts file** | one marked block | removed line by line between its markers; hand-written entries above and below survive byte for byte |
 | **Certificates** | one, if the geo shield needed it | removed from all six stores, matched on this app's `FriendlyName` or on a **self-signed** `CN=www.googleapis.com`, which a real Google certificate never is |
 | **Scheduled tasks** | `FreeProxy VPN Boot Setup`, `FreeProxy VPN Extension Delivery` | deleted, including the belt-and-braces pass that needs no executable |
 | **Files** | `C:\ProgramData\freeproxy-vpn`, `%LOCALAPPDATA%\FreeProxy VPN` | removed on uninstall — Tor state, logs, the staged extension **and the RSA signing key** |
 
 > [!NOTE]
-> **The proxy row is a deletion, not a restore, and that is worth saying out
-> loud.** No version of this app ever took a snapshot of your previous proxy
-> setting, so on the way out it removes what *it* wrote instead of pretending to
-> put back something it never read. If you were using a proxy of your own before
-> installing this, you will need to set it again. Everything else in that table
-> either restores a Windows default or replays the app's own revert journal.
+> **The two proxy rows are a deletion and a reset, not a restore, and that is
+> worth saying out loud.** No version of this app ever took a snapshot of your
+> previous proxy setting, so on the way out it removes what *it* wrote instead of
+> pretending to put back something it never read. The per-user values are
+> deleted; the machine-wide one goes back to `direct access`, which is the
+> Windows default and what the overwhelming majority of PCs have. If you were
+> using a proxy of your own before installing this — either kind — you will need
+> to set it again. Everything else in that table either restores a Windows
+> default or replays the app's own revert journal.
 
 The uninstaller is written so that every one of those reverts still happens
 **even if the program files are already gone** — electron-builder does not
@@ -624,7 +726,7 @@ nothing here that phones home.
 
 | Host | Why | When |
 |---|---|---|
-| `onionoo.torproject.org` | the live relay index — which countries have usable exits, and how many | on start, and when you open the country list |
+| `onionoo.torproject.org` | the live relay index — which countries have usable exits, and how many | only when the copy on disk cannot answer (see below); the refresh after that goes **through Tor** |
 | `ipleak.net`, `get.geojs.io`, `api.country.is`, `ipinfo.io` | to read back **where the circuit actually came out**, asked *through* the circuit itself | stage 98 of every connect and every switch |
 | `free.freeipapi.com`, `ipwho.is`, `get.geojs.io`, `api.ipbase.com` | to place the "you are here" ring before any tunnel exists, tried in that order | once, while idle — if none answer, nothing is drawn |
 | `aka.ms` | the Visual C++ redistributable, **only** if the bundled copy is missing from the installer | install time only |
@@ -641,6 +743,52 @@ default browser, through the handler that refuses anything that is not `https`.
 > build does not use; `www.googleapis.com` appears only in code that *removes* a
 > certificate an earlier build left behind; the last two are XML namespaces.
 
+### The relay list is kept on disk, and that is a privacy feature
+
+Picking a country needs the list of exit relays, and that list has to be fetched
+before there is any tunnel to fetch it through — so the request goes out **in the
+clear, from your own address**. Nothing in the body matters: the destination
+alone tells your ISP, and anything reading SNI on the way, that a Tor client is
+about to start on this machine. Worse, the two *keep trying this country* loops
+used to re-ask every 20 seconds, for as long as you were willing to wait.
+
+So the index is written to `C:\ProgramData\freeproxy-vpn\relay-index.json` and a
+usable copy **suppresses that request entirely**. A cold start now connects from
+the file, and the list is refreshed *through Tor* seconds after the tunnel comes
+up. A successful fetch is also followed by a five-minute floor — Onionoo rebuilds
+from the hourly consensus, so asking three times a minute cannot return anything
+new.
+
+Two ages, because the file can support one kind of statement and not the other:
+
+| | Age | What it is allowed to do |
+|---|---|---|
+| **Fresh** | 15 minutes | say a country has **no** usable exit — the app opens a dialog on that, and only a list from minutes ago can carry it |
+| **Usable** | 24 hours | hand over relays to **try**. Each one is pinned by fingerprint and verified against the geolocation databases before the connect counts, so a relay that has gone away costs one failed circuit and is retried — not trusted |
+
+**The two limits, stated plainly.**
+
+1. **It removes that cleartext request only when there is something to use
+   instead.** A first run has no file. Neither does one older than 24 hours, one
+   written by a different Onionoo query, or one whose timestamp is unreadable or
+   in the future — all three are thrown away rather than half-trusted. And if you
+   ask the app to keep watching for a country *while disconnected*, it asks in the
+   clear on purpose, because there is no other way to find out whether an exit has
+   appeared there. Every one of those cases is a `warn` line in the log that names
+   which one it was; none of them is silent.
+2. **A cached list is never evidence of absence.** Past 15 minutes it can still
+   be connected from, but it stops being allowed to say a country is empty. That
+   split is deliberate: a stale relay wastes one circuit, while a stale *absence*
+   would be a dialog telling you to pick somewhere else while an exit was sitting
+   right there. That is precisely the failure
+   [*When it cannot do what you asked*](#when-it-cannot-do-what-you-asked) is
+   written to avoid, so the cache is not allowed to reintroduce it.
+
+The file holds the public relay index and nothing about you, and it goes with the
+rest of the state directory on uninstall. `.build/probe-relay-cache.js` checks the
+round trip field by field, and that the freshness boundary is enforced where the
+claim is made rather than assumed.
+
 <img src="docs/media/divider.svg" width="100%" alt="">
 
 ## Build it yourself
@@ -655,16 +803,16 @@ npm install
 |---|---|
 | `npm start` | runs from source. Use an **elevated** terminal, or the system-level steps will fail honestly instead of silently |
 | `npm run pack` | an unpacked build in `release/win-unpacked`, no installer |
-| `npm run dist` | `release/FreeProxy-VPN-Setup-2.0.0.exe` — NSIS, per-machine, `requireAdministrator` |
+| `npm run dist` | `release/FreeProxy-VPN-Setup-2.0.5.exe` — NSIS, per-machine, `requireAdministrator` |
 
 Runtime dependencies are one package: `ws`. Everything else is Electron,
 electron-builder and what is already vendored in the repository — `tor.exe`,
-`lyrebird.exe`, the globe libraries, the flag set and the Visual C++
-redistributable.
+`lyrebird.exe`, `Tun\wintun.dll` and `Tun\tun2socks.exe`, the globe libraries,
+the flag set and the Visual C++ redistributable.
 
 ### The probe suite
 
-`.build/` holds **111** scripts named `test-*` or `probe-*`. They are not unit
+`.build/` holds **125** scripts named `test-*` or `probe-*`. They are not unit
 tests and there is no framework. Each one drives the real thing — the real
 registry, a real browser profile, the real `tor.exe`, the real uninstall sweep —
 and then reads the result back out of the machine, because that is the only kind
@@ -676,6 +824,7 @@ of check that can tell you whether an extension actually landed.
 | `probe-readme-shots.js`, `probe-readme-popup.js` | the 19 screenshots above, driven through the real `index.html`, `Extension/popup.html` and `Extension/welcome.html` |
 | `probe-readme-links.js` | every local link, every in-page anchor and every `file#Lnnn` reference in every markdown document here — a heading reworded three sections away kills a link silently |
 | `probe-md-html.js` | the raw HTML in those documents. GitHub renders broken markup rather than refusing it, and one unclosed `<td>` swallows the rest of the page into a table cell |
+| `probe-tunnel.js`, `probe-containment-recovery.js` | the whole-machine layers — the routes that would be installed, the relay filter, the refusal to report a tunnel that does not exist, and the recovery script that has to work with this app uninstalled |
 | `test-geo-e2e.js` | the geolocation path from the app to a page's `navigator.geolocation` |
 | `test-installer-sweep.js` | the uninstaller's registry sweep, redirected onto a throwaway key so it can be run at all |
 | `make-badges.js` | the 12 badges at the top, every value read out of the project rather than typed |
@@ -695,23 +844,23 @@ why.
 
 | Channel | Does |
 |---|---|
-| `connect-vpn` | [`main.js:4123`](main.js#L4123) — connect to a country, with the split-tunnel list |
-| `switch-vpn` | [`main.js:4247`](main.js#L4247) — change country **without** dropping the tunnel |
-| `disconnect-vpn` | [`main.js:4138`](main.js#L4138) — tear down, or hold the block if the kill switch is armed |
-| `toggle-killswitch` | [`main.js:4197`](main.js#L4197) — arm or release the lock |
-| `update-live-bypass` | [`main.js:4214`](main.js#L4214) — rewrite `ProxyOverride` only, live |
-| `get-realtime-status` | [`main.js:4068`](main.js#L4068) — the country table, exit counts and bandwidth |
-| `get-geo-coords` | [`main.js:1948`](main.js#L1948) — the coordinate table the spoof reads from |
-| `get-home-location` | [`main.js:1966`](main.js#L1966) — where the idle globe centres |
-| `report-killswitch` | [`main.js:1986`](main.js#L1986) — the renderer telling the main process what it shows |
-| `get-pending-ask` / `ask-user-answer` | [`1593`](main.js#L1593) / [`1584`](main.js#L1584) — the question, and your answer to it |
-| `get-log-lines` | [`main.js:1883`](main.js#L1883) — the tail behind the log viewer, with the level filter |
-| `open-log-folder` | [`main.js:1886`](main.js#L1886) — Explorer, at the log directory |
-| `open-geo-ext-folder` | [`main.js:1890`](main.js#L1890) — the staged extension and `HOW-TO-ENABLE.txt` |
-| `get-pending-restart` | [`main.js:1904`](main.js#L1904) — the marker the installer may have left, read once |
-| `dismiss-pending-restart` | [`main.js:1912`](main.js#L1912) — *Later*, and it stays later |
-| `restart-windows` | [`main.js:1917`](main.js#L1917) — *Restart now*, and only ever from that click |
-| `get-fastest-server` | [`main.js:1896`](main.js#L1896) — **a stub.** It returns a fixed answer and measures nothing; see [Known limitations](#known-limitations-and-open-defects) |
+| `connect-vpn` | [`main.js:5973`](main.js#L5973) — connect to a country, with the split-tunnel list |
+| `switch-vpn` | [`main.js:6222`](main.js#L6222) — change country **without** dropping the tunnel |
+| `disconnect-vpn` | [`main.js:5997`](main.js#L5997) — tear down, or hold the block if the kill switch is armed |
+| `toggle-killswitch` | [`main.js:6089`](main.js#L6089) — arm or release the lock |
+| `update-live-bypass` | [`main.js:6209`](main.js#L6209) — rewrite `ProxyOverride` only, live |
+| `get-realtime-status` | [`main.js:5908`](main.js#L5908) — the country table, exit counts and bandwidth |
+| `get-geo-coords` | [`main.js:3399`](main.js#L3399) — the coordinate table the spoof reads from |
+| `get-home-location` | [`main.js:3417`](main.js#L3417) — where the idle globe centres |
+| `report-killswitch` | [`main.js:3437`](main.js#L3437) — the renderer telling the main process what it shows |
+| `get-pending-ask` / `ask-user-answer` | [`2512`](main.js#L2512) / [`2503`](main.js#L2503) — the question, and your answer to it |
+| `get-log-lines` | [`main.js:3295`](main.js#L3295) — the tail behind the log viewer, with the level filter |
+| `open-log-folder` | [`main.js:3298`](main.js#L3298) — Explorer, at the log directory |
+| `open-geo-ext-folder` | [`main.js:3302`](main.js#L3302) — the staged extension and `HOW-TO-ENABLE.txt` |
+| `get-pending-restart` | [`main.js:3355`](main.js#L3355) — the marker the installer may have left, read once |
+| `dismiss-pending-restart` | [`main.js:3363`](main.js#L3363) — *Later*, and it stays later |
+| `restart-windows` | [`main.js:3368`](main.js#L3368) — *Restart now*, and only ever from that click |
+| `get-fastest-server` | [`main.js:3332`](main.js#L3332) — ranks the exit-capacity table by advertised exit bandwidth. Not a speed test, and it says so: `measured: false`, plus `best: null` when no relay list has arrived |
 
 </details>
 
@@ -786,14 +935,14 @@ Extension/                the bundled MV3 extension
 Extension-Store/          the same extension, packaged for store submission
 Tor/                      tor.exe 0.4.9.6 and lyrebird.exe, as shipped
 docs/media/               every image on this page, and the script that made it
-.build/                   111 probes, the screenshot harnesses, the art gate
+.build/                   125 probes, the screenshot harnesses, the art gate
 ```
 
 </details>
 
 <img src="docs/media/divider.svg" width="100%" alt="">
 
-## Known limitations and open defects
+## Known limitations
 
 These are here because a page that only lists what works is not documentation.
 
@@ -816,20 +965,54 @@ These are here because a page that only lists what works is not documentation.
   video are slower than a commercial VPN. That is the cost of having nobody to
   trust.
 * **Your previous proxy setting is not restored**, because no version of this app
-  ever recorded it. It removes what it wrote.
+  ever recorded it. It removes what it wrote from the per-user store and returns
+  the machine-wide one to `direct access`.
+* **UDP does not go through the tunnel.** Tor's SOCKS5 has no `UDP ASSOCIATE`, so
+  QUIC, WebRTC, most games and VoIP have nothing to ride. With the Kill Switch
+  armed they are blocked rather than sent in the clear; with it off they use your
+  real connection, and the app says so. `"fullTunnel": false` in `settings.json`
+  gives UDP back at the cost of whole-device coverage
+  ([how](#the-whole-machine-not-just-the-browser)).
+* **`ping` and `tracert` go quiet while the full-device tunnel is up.** ICMP is
+  not carried through a SOCKS5 proxy either, so the tools people reach for to
+  check whether the network is working are the two that stop working first.
+* **The tunnel's live path has not been verified on this machine.** Creating the
+  adapter, reading its address and routes back, and tearing it down all need
+  administrator; `.build/probe-tunnel.js` prints `NOT VERIFIED (needs admin)` for
+  exactly those four steps on an unelevated run, and this README will not claim
+  more than the probe measured.
+* **Proxy settings stay per-user.** The machine-wide WinHTTP store is set, and
+  the Chromium policies and the tunnel are machine-wide, but the WinINET
+  `ProxySettingsPerUser` policy is deliberately left alone — turning it on would
+  mean that losing the restore journal leaves *every* account on the PC with a
+  dead proxy and no working Settings page to clear it. The reasoning is written
+  out in `main.js`, above the leak-protection section.
+* **A Gecko browser's prefs land at its next start, and a running one is
+  skipped.** `user.js` is read once at startup, so a profile written while
+  Firefox is open is unchanged until it is closed and reopened — and a profile
+  whose browser is *running* when you connect is not written at all, because
+  writing under a live Gecko process is how a profile gets corrupted. It is named
+  in the log and picked up on the next connect.
+* **WebRTC is switched off in Gecko browsers while connected**
+  (`media.peerconnection.enabled=false`), for the same reason UDP does not ride
+  the tunnel: a WebRTC call would either fail or find its own way around it. Video
+  calls in Firefox and its forks do not work until you disconnect, which removes
+  the pref again.
 * **Windows 10 / 11, x64 only.** There is no macOS or Linux build and this
   README will not pretend one is coming.
 
-**Three open defects, reported instead of quietly patched**
+**Three defects this README reported, and what closed them in v2.0.5**
 
 Two of them are visible in the screenshots above. They were left in frame on
-purpose: airbrushing a README is how a project starts lying about itself.
+purpose: airbrushing a README is how a project starts lying about itself. The
+screenshots have not been retaken, so the table below is what the pictures show
+and what the code now does.
 
-| Where | What is wrong | The fix |
+| Where | What was wrong | What ships in 2.0.5 |
 |---|---|---|
-| [`main.js:1896`](main.js#L1896) | `get-fastest-server` returns `{ best: 'sg', others: ['hk','jp'] }` unconditionally, and [`renderer.js:824`](renderer.js#L824) paints a `BEST` badge from it. **Nothing is timed.** Worse, Tor exit throughput is not rankable from a sample — measured: within-relay spread matches between-relay spread, so onionoo's own order is already as good as this can get. | Drop the badge, or replace it with something that is actually measured. It is not described as a feature anywhere on this page. |
-| [`main.js:3014`](main.js#L3014) | the "your country is available again" ask passes no `foot`, so [`renderer.js:664`](renderer.js#L664) falls back to the idle line — the footer reads *"Nothing is connected right now…"* directly under a body that says *"You are currently connected through India."* Visible in `09-comes-back.png`. | one `foot:` on that object |
-| [`Extension/welcome.html:150`](Extension/welcome.html#L150) | `ol.steps li b { display: block; }` also matches the inline `<b>FreeProxy VPN Extension</b>` on line 257, so a full stop ends up alone on its own line. Visible in `30-welcome.png`. | `ol.steps li > b:first-child` |
+| [`main.js:3332`](main.js#L3332) | `get-fastest-server` returned `{ best: 'sg', others: ['hk','jp'] }` unconditionally, and the dropdown painted a `BEST` badge from it. **Nothing was timed.** Nothing can be, either: Tor exit throughput is not rankable from a sample — measured, within-relay spread matches between-relay spread, so onionoo's own order is already as good as this can get. | It ranks the same exit-capacity table the dropdown is sorted by — total advertised exit bandwidth, which relay operators publish and the consensus weighs — returns `best: null` before any relay list has arrived, so an unknown answer paints no badge instead of a wrong one, and carries `measured: false`. The badge's tooltip says "not a speed test" in as many words. |
+| [`main.js:4638`](main.js#L4638) | the "your country is available again" ask passed no `foot`, so [`renderer.js:749`](renderer.js#L749) fell back to the idle line — the footer read *"Nothing is connected right now…"* directly under a body that says *"You are currently connected through India."* Visible in `09-comes-back.png`. | That ask is the only question this app raises **while the tunnel is carrying traffic**, so it is the one that must not take the default footer. It now sends its own: *"You stay connected through … while this question is up, and nothing changes until you answer it."* The other two choice cards keep the default, which is true of them — both are up because a connect failed. |
+| [`Extension/welcome.html:157`](Extension/welcome.html#L157) | `ol.steps li b { display: block; }` also matched the inline `<b>FreeProxy VPN Extension</b>` on line 257, so a full stop ended up alone on its own line. Visible in `30-welcome.png`. | `ol.steps li > b:first-child`. The child combinator also keeps the rule off any nested markup added later, and a leading text node does not count for `:first-child`, so each step's bold lead line still gets its own row. |
 
 <p align="center"><img src="docs/media/divider.svg" alt="" width="100%"></p>
 
@@ -926,7 +1109,7 @@ because you told it, not because it looked.
 <br>
 
 74 is the number of entries in `GEO_COORDS` at
-[`main.js:125`](main.js#L125) — the table of coordinates the app hands to the
+[`main.js:160`](main.js#L160) — the table of coordinates the app hands to the
 extension when it spoofs a position. A country is listed only if it has a
 coordinate to hand over, so that the browser is never told a location the app
 made up. Tor itself has exits in more places; the badge counts what can be
@@ -955,8 +1138,8 @@ without disconnecting. See
 
 Everything it changed is written to a journal *before* it changes it, so the next
 start knows exactly what to put back rather than guessing at defaults.
-`startupCleanup()` at [`main.js:745`](main.js#L745), called from
-[`main.js:1837`](main.js#L1837), kills any stale `tor.exe`, restores the recorded
+`startupCleanup()` at [`main.js:1132`](main.js#L1132), called from
+[`main.js:3210`](main.js#L3210), kills any stale `tor.exe`, restores the recorded
 location setting, removes the proxy, clears the DNS pins, drops the IPv6 and DNS
 firewall rules and restarts `dnscache`. If it finds no journal it still reverts
 all of that — it simply will not touch your location setting, because forcing
@@ -1052,7 +1235,7 @@ by someone else, and none of it asked to be involved:
 
 <div align="center">
 
-**FreeProxy VPN** 2.0.0 · MIT · Windows 10 and 11 · no account, no telemetry, no
+**FreeProxy VPN** 2.0.5 · MIT · Windows 10 and 11 · no account, no telemetry, no
 server of this project
 
 Built by [Zero-Asif](https://github.com/Zero-Asif) ·

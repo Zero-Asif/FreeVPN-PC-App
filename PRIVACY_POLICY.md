@@ -1,7 +1,7 @@
 # Privacy Policy — FreeProxy VPN
 
 **Effective date:** 3 September 2026 · **Applies to:** the FreeProxy VPN desktop
-application for Windows (v2.0.0) and the FreeProxy VPN browser extension (v1.1.0)
+application for Windows (v2.0.5) and the FreeProxy VPN browser extension (v1.2.0)
 
 This document is written to be checkable rather than reassuring. Every statement
 below can be verified against the source in this repository, and where something
