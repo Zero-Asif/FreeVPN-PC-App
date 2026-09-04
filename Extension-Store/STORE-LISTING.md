@@ -102,15 +102,16 @@ WHAT IT CHANGES IN YOUR BROWSER, AND HOW TO UNDO IT
   connected country's coordinates. Your real position is never read, stored or
   sent anywhere -- it is simply not passed on.
 - Clearing on a country change: when you switch to a DIFFERENT country, the
-  extension clears this browser's cache, cookies and history, and the stored
-  site data of the sites that had been given the country you are leaving.
-  Because cookies are cleared, you are signed out of sites you were signed in
-  to. This is deliberate and it is the point: sites remember a location
-  outside the geolocation API too -- Google keeps it in a cookie -- so without
-  this step a site keeps reporting the country you just left. It happens only
-  on a country change; never on an ordinary disconnect, never on a schedule,
-  never in the background. If you would rather it did not happen, stay on one
-  country or switch the extension off.
+  extension clears the cache, cookies and history of MAP SITES ONLY, plus the
+  stored site data of the sites that had been given the country you are leaving.
+  Nothing else is touched: you stay signed in, and the rest of your history stays
+  where it is. Maps are the reason this step exists -- a map remembers a location
+  outside the geolocation API, in its own URL, in a cookie and in the cache, so
+  without this it keeps showing the country you just left. Cookies go only for
+  domains that are nothing but a map; on Google the single cookie that carries a
+  position is deleted by name instead, so your Google sign-in survives. It happens
+  only on a country change; never on an ordinary disconnect, never on a schedule,
+  never in the background.
 
 PRIVACY
 No account, no login, no subscription, no ads, no analytics, no telemetry, no
@@ -186,18 +187,27 @@ is changed. Its first-run welcome page states the same thing, names Windows
 10/11 as the requirement, and links to the download. This is the intended
 behaviour of a controller whose engine is absent, not a fault.
 
-5. WARNING: SWITCHING COUNTRY CLEARS THIS BROWSER'S DATA
-Please do this on a test profile. When the connected country CHANGES, the
-extension clears this browser's cache, cookies and browsing history, plus the
-local storage, IndexedDB, cache storage and service workers of the sites that
-had been given the previous country. Clearing cookies signs the profile out of
-any site it was signed in to. It is disclosed in the store description, on the
-first-run welcome page, in the popup itself and in the privacy policy.
-It is necessary: sites store a location outside the geolocation API as well --
-Google keeps one in a cookie -- so without this a site keeps reporting the
-country the user just left, which is the exact leak this extension exists to
-close. It runs ONLY on a country change: never on an ordinary disconnect,
-never on a schedule, never in the background.
+5. WHAT SWITCHING COUNTRY CLEARS, AND WHAT IT DOES NOT
+When the connected country CHANGES, the extension clears the cache, cookies and
+browsing history OF MAP SITES ONLY, plus the local storage, IndexedDB, cache
+storage and service workers of the sites that had been given the previous
+country. Nothing else is touched, and the profile stays signed in: the cookie
+clear is filtered to domains that are nothing but a map (openstreetmap.org,
+mapquest.com, waze.com, mapy.cz), and on Google, Bing, Apple and
+Yandex the single cookie MEASURED to carry a position is deleted by name instead
+-- because an origin-filtered cookie clear takes the whole registrable domain,
+so naming maps.google.com would sign the profile out of Gmail. wego.here.com is
+left out of the cookie step for the same reason: here.com is also HERE's account
+sign-in. Map history
+entries are deleted one URL at a time through chrome.history, since browsingData
+cannot filter history by origin and its history flag is the whole profile.
+It is necessary: a map stores a location outside the geolocation API as well --
+in its own URL, in a cookie and in the cache -- so without this a map keeps
+reporting the country the user just left, which is the exact leak this extension
+exists to close. It runs ONLY on a country change: never on an ordinary
+disconnect, never on a schedule, never in the background. It is disclosed in the
+store description, on the first-run welcome page, in the popup itself and in the
+privacy policy.
 
 6. WHY EACH PERMISSION IS REQUESTED (minimum set -- policy 1.6)
   proxy         Set this browser's proxy to the app's local Tor listener while
@@ -217,7 +227,12 @@ never on a schedule, never in the background.
                 (Google's UULE) so the previous country stops being sent in
                 request headers. Cookies are removed, never read for content
                 and never exported.
-  browsingData  The country-change clear described in section 5.
+  browsingData  The country-change clear described in section 5, origin-filtered
+                to map sites. No browser-wide call is made.
+  history       Delete the map URLs a country change found, one URL at a time,
+                because browsingData cannot filter history by origin. Only URLs
+                that match a map pattern are ever passed to deleteUrl; history
+                is never read for anything else and never exported.
   alarms        A 30-second watchdog that re-asserts the proxy setting while
                 connected, and releases it if the app has gone. MV3 service
                 workers are torn down when idle; without an alarm the browser

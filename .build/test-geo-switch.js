@@ -18,14 +18,14 @@
 //      gets a map centred on it, and has the cookie re-set for its trouble --
 //      the original bug, reproduced by the fix. Here that is a fact about the
 //      order of the API calls, read off a log, not an inference from a picture.
-//    * HOW WIDE THE CLEAR IS. On a switch it is the whole browser: cache,
-//      cookies and history over all of recorded time, which is what the user
-//      asked for twice, and which signs them out of every site. The narrow
-//      version could not fix the reported symptom -- the browser kept showing
-//      the FIRST country connected to -- because a per-origin clear only
-//      reaches sites that had already asked for a position, and a page reading
-//      the country from a cached response or from a cookie set before the
-//      extension ever saw it is untouched by it.
+//    * HOW WIDE THE CLEAR IS. Map sites, and nothing else: their cache, their
+//      site storage and their own history entries, found from the open tabs and
+//      from chrome.history rather than from the origin list, because the
+//      measured case never asked for a position at all. NOT the whole browser:
+//      a profile-wide cache+cookies+history clear takes every session cookie
+//      and every history entry the user has, none of which encodes a location.
+//      The checks below assert both halves -- that a map's traces go, and that
+//      Google's session cookies and a non-map site's history stay.
 //    * WHAT IS STILL NOT TOUCHED. Site storage and open tabs of sites that
 //      never asked where they were, a map the user pinned themselves, and --
 //      on a DISCONNECT -- everything: quitting the app must not sign the user
@@ -119,6 +119,24 @@ const at = re => phase().findIndex(s => re.test(s));
 const lastAt = re => { const a = phase(); for (let i = a.length - 1; i >= 0; i--) if (re.test(a[i])) return i; return -1; };
 const shown = () => phase().join('\n         ');
 
+//  Both sides must EXIST. `at()` returns -1 for a line that is not there, and
+//  -1 < anything, so a bare `at(a) < at(b)` goes green the moment the call it
+//  was written to order disappears -- the failure mode that made six checks in
+//  this file pass vacuously when the clear was rescoped.
+const firstBefore = (a, b) => { const i = at(a), j = at(b); return i >= 0 && j >= 0 && i < j; };
+const lastBefore  = (a, b) => { const i = lastAt(a), j = at(b); return i >= 0 && j >= 0 && i < j; };
+
+//  The browsingData calls a switch makes, told apart by their type list -- there
+//  is no longer an unfiltered one to identify by its empty origin array, and two
+//  of them carry the same four storage types. `since` is what separates those
+//  two: the map clear asks for all of recorded time, the geolocation-origin
+//  clear passes no window at all.
+const BD_MAP      = /^browsingData\.remove:\["[^|]*\|cache\+cacheStorage\+indexedDB\+localStorage\+serviceWorkers:since=0$/;
+const BD_MAP_NC   = /^browsingData\.remove:\["[^|]*\|cacheStorage\+indexedDB\+localStorage\+serviceWorkers:since=0$/;
+const BD_MAP_CK   = /^browsingData\.remove:\["[^|]*\|cookies:since=0$/;
+const BD_GEO      = /^browsingData\.remove:\["[^|]*\|cacheStorage\+indexedDB\+localStorage\+serviceWorkers:since=undefined$/;
+const BD_ANY_WIDE = /^browsingData\.remove:\[\]\|/;
+
 // ── chrome.storage.local ────────────────────────────────────────────
 //  Asynchronous, because the real one is, and every ordering claim in this file
 //  depends on that being true.
@@ -208,19 +226,34 @@ let BD_ERR = null;                 // what the browser refuses the next clear wi
 //  state -- the work is not modelled as done either, because the browser has not
 //  said it is.
 let BD_HANG = false;
+//  Two labels short of the hostname: browsingData's origin filter clears cookies
+//  for the whole registrable domain, and this is close enough to it for the
+//  domains in the fixtures (google.com, openstreetmap.org, example.org).
+const site = h => String(h).replace(/^\./, '').split('.').slice(-2).join('.');
 const browsingData = {
     remove(filter, types, cb) {
         BD.push({ filter, types });
+        //  `since` is logged whether or not the call is origin-filtered: the map
+        //  clear and the geolocation-origin clear ask for the same four storage
+        //  types, and it is the only thing in the call that tells them apart.
         lg('browsingData.remove:' + JSON.stringify(filter.origins || []) + '|' +
            Object.keys(types).filter(k => types[k]).sort().join('+') +
-           (filter.origins ? '' : ':since=' + filter.since));
+           ':since=' + filter.since);
         if (BD_HANG) return;
-        //  Modelled, not merely recorded: a browser-wide `cookies: true` empties
-        //  the jar. A stub that logged the call without taking the cookies would
-        //  let the jar checks below go on passing while the shipped extension
-        //  signed the user out -- which is the one consequence of this change
-        //  that has to be visible in the test rather than described in a comment.
-        if (!BD_ERR && !filter.origins && types.cookies) JAR = [];
+        //  Modelled, not merely recorded: `cookies: true` takes the jar, and an
+        //  origin filter narrows that to the registrable domains named -- so a
+        //  clear aimed at maps.google.com signs the user out of Gmail. That is
+        //  the one consequence of getting the scope wrong that a log cannot
+        //  show, and the jar checks below are the only place it becomes visible.
+        if (!BD_ERR && types.cookies) {
+            if (!filter.origins) JAR = [];
+            else {
+                const doomed = new Set(filter.origins.map(o => {
+                    try { return site(new URL(o).hostname); } catch (e) { return ''; }
+                }));
+                JAR = JAR.filter(c => !doomed.has(site(c.domain)));
+            }
+        }
         soon(() => {
             //  chrome sets lastError for the duration of the callback and clears
             //  it again afterwards. A stub that left it set would make every
@@ -241,6 +274,33 @@ const tabs = {
     update(id, props) { lg(`tabs.update:${id}:${props.url}`); },
     create(props) { lg('tabs.create:' + props.url); },
 };
+
+// ── chrome.history ──────────────────────────────────────────────────
+//  browsingData cannot filter history by origin at all -- its `history: true` is
+//  the whole profile -- so the map history goes through chrome.history instead,
+//  and this stub is what makes that testable. search() is a free-text query over
+//  the URL and the title, exactly as the real one is, which is the point: the
+//  keywords FIND candidates and isMapUrl() DECIDES. HIST therefore holds entries
+//  a keyword matches and a map pattern does not, and they have to survive.
+let HIST = [];
+const history = {
+    search({ text, startTime, maxResults }, cb) {
+        lg(`history.search:${text}:start=${startTime}`);
+        const q = String(text || '').toLowerCase();
+        soon(() => cb(HIST.filter(h => (h.url + ' ' + (h.title || '')).toLowerCase().includes(q))
+                          .slice(0, maxResults || 100).map(h => ({ ...h }))));
+    },
+    deleteUrl({ url }, cb) {
+        const before = HIST.length;
+        HIST = HIST.filter(h => h.url !== url);
+        //  `absent` rather than the cookie stub's NOTFOUND, because it is not a
+        //  fault here: a URL taken from an open tab need never have been recorded
+        //  as a visit, and deleting it anyway costs nothing.
+        lg(`history.deleteUrl:${url}` + (HIST.length === before ? ':absent' : ''));
+        if (cb) soon(() => cb());
+    },
+};
+const histUrls = () => HIST.map(h => h.url);
 
 // ── chrome.windows ──────────────────────────────────────────────────
 //  The release that fixes "Brave has no internet" hangs off onRemoved, and the
@@ -361,7 +421,7 @@ class FakeSocket {
 }
 FakeSocket.CONNECTING = 0; FakeSocket.OPEN = 1; FakeSocket.CLOSING = 2; FakeSocket.CLOSED = 3;
 
-const chromeStub = { runtime, storage, cookies, browsingData, tabs, windows, proxy,
+const chromeStub = { runtime, storage, cookies, browsingData, tabs, history, windows, proxy,
                      action, notifications, alarms };
 const sandbox = {
     chrome: chromeStub,
@@ -496,6 +556,8 @@ JAR = [
     { name: 'SID',            domain: '.google.com',       path: '/',  secure: true  },
     { name: '__Secure-1PSID', domain: '.google.com',       path: '/',  secure: true  },
     { name: 'HSID',           domain: '.google.com',       path: '/',  secure: true  },
+    //  A domain that is nothing but a map, so its cookies CAN go wholesale.
+    { name: 'osm_session',    domain: '.openstreetmap.org', path: '/', secure: true  },
 ];
 TABS = [
     { id: 1, url: 'https://www.google.com/maps/@49.6116,6.1319,12z' },        // pinned to LU: ours
@@ -506,6 +568,21 @@ TABS = [
     { id: 6, url: 'chrome://settings/' },                                    // not a site
     { id: 7, url: 'https://old.example.com/deep/page?q=1' },
     { id: 8, url: 'https://www.google.com/maps/place/Foo/@49.61,6.13,17z/data=!3m1' },
+    { id: 9, url: 'https://www.openstreetmap.org/#map=12/49.61/6.13' },      // a map, never asked
+];
+//  Two entries no keyword finds, two a keyword finds and no map pattern claims,
+//  and the rest real map history. The pair in the middle is the load-bearing
+//  part: `maps` matches maps.example.org and a news article about maps, and
+//  neither may be deleted.
+HIST = [
+    { url: 'https://www.google.com/maps/@49.6116,6.1319,12z',   title: 'Google Maps' },
+    { url: 'https://www.google.com/maps/place/Foo/@49.61,6.13,17z/data=!3m1', title: 'Foo' },
+    { url: 'https://www.bing.com/maps?cp=49.61~6.13',            title: 'Bing Maps' },
+    { url: 'https://www.openstreetmap.org/#map=12/49.61/6.13',   title: 'OpenStreetMap' },
+    { url: 'https://maps.example.org/x',                         title: 'Maps Example' },
+    { url: 'https://news.example.net/2026/maps-of-the-world',    title: 'Maps of the world' },
+    { url: 'https://mail.google.com/mail/u/0/#inbox',            title: 'Gmail' },
+    { url: 'https://old.example.com/deep/page?q=1',              title: 'Deep page' },
 ];
 mark();
 await sync(JP, 'jp');
@@ -528,66 +605,123 @@ ok(seen(/^cookies\.getAll:/).length === 1 && seen(/^cookies\.getAll:UULE$/).leng
        rm.includes('cookies.remove:UULE@http://maps.example.org/x'),
        'both UULE records go, each with a URL rebuilt from its own record -- a domain cookie ' +
        'and a host-only one do not take the same one', JSON.stringify(rm));
-    ok(!seen(/NOTFOUND/).length,
+    ok(!seen(/^cookies\.removed:.*NOTFOUND/).length,
        'and each rebuilt URL really identifies its record: a wrong one removes nothing at all',
        shown());
 }
 ok(!JAR.some(c => c.name === 'UULE'), 'no UULE is left anywhere in the jar',
    JSON.stringify(JAR.map(c => c.name)));
-//  The inversion of what this file used to assert, and it is the user's call, made
-//  twice: "every single time a country is switched, clear the browser's history,
-//  cache and cookies". Their symptom was the browser going on showing the FIRST
-//  country it ever connected to, and the narrow purge could not reach it -- a page
-//  that reads the country from a cached response, from its own history entry or
-//  from a cookie set before the extension existed is untouched by a per-origin
-//  clear. So the jar goes wholesale, sign-out and all.
-ok(JAR.length === 0,
-   "Google's session cookies go too -- a switch signs the user out of every site, " +
-   'which is the price of clearing a jar that cannot be filtered by "does this ' +
-   'cookie encode a location"', JSON.stringify(JAR.map(c => c.name)));
+//  The user's correction, and the whole point of this rewrite: "sudhu matro map
+//  related website er cookie, cache, history clear korte". A profile-wide
+//  cache+cookies+history clear reaches the symptom, but it also signs the user
+//  out of everything and deletes a history they never asked to lose. Nothing in
+//  a session cookie encodes a location, so nothing here may take one.
+ok(JAR.filter(c => c.domain === '.google.com').map(c => c.name).sort().join(',') ===
+   'HSID,SID,__Secure-1PSID',
+   "Google's session cookies all survive: a switch must not sign the user out, and no " +
+   'session cookie carries a location for it to be worth the trade',
+   JSON.stringify(JAR.map(c => c.name)));
+ok(!JAR.some(c => c.name === 'osm_session'),
+   'but a domain that is nothing BUT a map does lose its cookies wholesale -- there is no ' +
+   'account behind openstreetmap.org to sign out of', JSON.stringify(JAR.map(c => c.name)));
 
-ok(BD.length === 2, 'two clears per switch: one browser-wide, one per origin',
-   String(BD.length));
+//  Three clears: the map cache and storage, the map-only cookies, and the site
+//  storage of the origins that were handed a position. No unfiltered call at all.
+ok(BD.length === 3 && BD.every(b => Array.isArray(b.filter.origins) && b.filter.origins.length),
+   'every clear is origin-filtered: there is no browser-wide call left to take a bystander ' +
+   "site's data with it", JSON.stringify(BD.map(b => b.filter.origins)));
 {
-    const wide = BD.find(b => !b.filter.origins) || { filter: {}, types: {} };
-    const per  = BD.find(b => b.filter.origins) || { filter: {}, types: {} };
-    ok(wide.types.cache && wide.types.cookies && wide.types.history,
-       'the browser-wide one is cache + cookies + history, the three the user named',
-       JSON.stringify(wide.types));
-    ok(wide.filter.since === 0,
+    const maps = BD.find(b => b.types.cache) || { filter: {}, types: {} };
+    const ck   = BD.find(b => b.types.cookies) || { filter: {}, types: {} };
+    const per  = BD.find(b => !b.types.cache && !b.types.cookies) || { filter: {}, types: {} };
+    ok(JSON.stringify(maps.filter.origins) === JSON.stringify([
+           'https://www.google.com', 'https://www.openstreetmap.org', 'https://www.bing.com']),
+       'the map clear names the map origins found in the open tabs and in history -- google and ' +
+       'openstreetmap from the tabs, bing from a history entry with no tab open',
+       JSON.stringify(maps.filter.origins));
+    ok(!maps.filter.origins.includes('https://maps.example.org') &&
+       !maps.filter.origins.includes('https://news.example.net'),
+       'and NOT a site that merely matched the search keyword: `maps` finds maps.example.org and ' +
+       'a news article about maps, and a map pattern claims neither',
+       JSON.stringify(maps.filter.origins));
+    ok(maps.types.cache && maps.types.cacheStorage && maps.types.indexedDB &&
+       maps.types.localStorage && maps.types.serviceWorkers && !maps.types.cookies,
+       'it takes their cache and their site storage -- the cache because a tile or a JSON ' +
+       'response is where the old centre comes back from -- and not their cookies',
+       JSON.stringify(maps.types));
+    ok(maps.filter.since === 0,
        'over all of recorded time -- a window starting at the switch would leave every ' +
-       'page cached before it', JSON.stringify(wide.filter));
-    ok(Object.keys(wide.types).every(k => ['cache', 'cookies', 'history'].includes(k)),
-       'and nothing else: passwords, downloads and form data are not location traces',
-       JSON.stringify(wide.types));
+       'page cached before it', JSON.stringify(maps.filter));
+    ok(JSON.stringify(ck.filter.origins) === JSON.stringify(['https://www.openstreetmap.org']) &&
+       Object.keys(ck.types).length === 1,
+       'cookies are asked for ONLY for the map-only domains, and by themselves: an origin ' +
+       "filter clears cookies for the whole registrable domain, so naming google's would " +
+       'take google.com with it', JSON.stringify({ o: ck.filter.origins, t: ck.types }));
     ok(JSON.stringify(per.filter.origins) === JSON.stringify([
            'https://www.google.com', 'https://maps.example.org', 'https://old.example.com']),
        'the per-origin one is for exactly the origins that were handed a position',
        JSON.stringify(per.filter.origins));
     ok(per.types.cacheStorage && per.types.indexedDB && per.types.localStorage &&
        per.types.serviceWorkers,
-       'covering the four places a page can keep its own copy of a position -- none of ' +
-       'which the browser-wide call reaches', JSON.stringify(per.types));
+       'covering the four places a page can keep its own copy of a position -- including ' +
+       'maps.example.org, which is on the list because it asked, not because it is a map',
+       JSON.stringify(per.types));
     ok(!per.types.cookies && !per.types.cookiesAndSiteData,
        'and it is a separate call rather than a wider one, so a Service Worker is only ' +
        'ever unregistered for a site that asked where it was', JSON.stringify(per.types));
-    ok(at(/^browsingData\.remove:\[\]\|/) < at(/^browsingData\.remove:\["https/),
-       'browser-wide first, per-origin second', shown());
+    ok(firstBefore(BD_MAP, BD_GEO),
+       'map clear first, geolocation origins second', shown());
+}
+
+//  The map history: found by keyword, decided by pattern, deleted one URL at a
+//  time. browsingData cannot filter history by origin at all, so this is the only
+//  route to it that does not take the user's whole history with it.
+{
+    const del = seen(/^history\.deleteUrl:/).map(s => s.replace(/^history\.deleteUrl:/, ''));
+    ok(seen(/^history\.search:/).length === 6 &&
+       seen(/^history\.search:maps:start=0$/).length === 1,
+       'history is searched once per keyword, from the beginning of recorded time', shown());
+    ok(del.includes('https://www.google.com/maps/@49.6116,6.1319,12z') &&
+       del.includes('https://www.bing.com/maps?cp=49.61~6.13') &&
+       del.includes('https://www.openstreetmap.org/#map=12/49.61/6.13'),
+       'every map entry found is deleted, including one for a site with no tab open',
+       JSON.stringify(del));
+    ok(!histUrls().some(u => /google\.com\/maps|bing\.com\/maps|openstreetmap/.test(u)),
+       'and they really are gone from history, not merely asked about', JSON.stringify(histUrls()));
+    ok(histUrls().includes('https://maps.example.org/x') &&
+       histUrls().includes('https://news.example.net/2026/maps-of-the-world') &&
+       histUrls().includes('https://mail.google.com/mail/u/0/#inbox') &&
+       histUrls().includes('https://old.example.com/deep/page?q=1'),
+       'and nothing else is: the two entries a keyword matched but no map pattern claimed are ' +
+       "still there, and so is the user's mail and the page that asked for a position",
+       JSON.stringify(histUrls()));
+    ok(!del.some(u => /maps\.example\.org|news\.example\.net|mail\.google/.test(u)),
+       'they were never even asked to be deleted -- isMapUrl() decides, the keyword only finds',
+       JSON.stringify(del));
+    ok(del.length === 6 && seen(/^history\.deleteUrl:.*:absent$/).length === 2,
+       'six URLs in all -- the five open map tabs and the one bing entry with no tab -- of which ' +
+       'the two tab URLs that were never visited report absent, which is not a fault',
+       JSON.stringify(del));
 }
 
 //  The correctness fix this file exists for.
-ok(lastAt(/^cookies\.removed:/) >= 0 && lastAt(/^cookies\.removed:/) < at(/^browsingData\.remove:/),
+ok(lastBefore(/^cookies\.removed:/, /^browsingData\.remove:/),
    'UULE goes by name before anything else is cleared, so the one cookie measured to ' +
    'carry a position is gone even in a browser that refuses the wide clear', shown());
-ok(lastAt(/^cookies\.removed:/) < at(/^tabs\.(reload|update):/),
+ok(lastBefore(/^cookies\.removed:/, /^history\.deleteUrl:/),
+   'and before any history entry is deleted, so the sweep cannot be left half-done with the ' +
+   'one measured carrier still in place', shown());
+ok(lastBefore(/^cookies\.removed:/, /^tabs\.(reload|update):/),
    'and before ANY tab is reloaded: a reload still carrying the old UULE sends the previous ' +
    'country back to Google, gets a map centred on it, and has the cookie re-set for its trouble',
    shown());
-ok(lastAt(/^browsingData\.remove:/) < at(/^tabs\.(reload|update):/),
-   'both clears finish before any reload as well -- reload first and the cache refills with ' +
-   'the very pages being cleared', shown());
-ok(at(/^storage\.set:geoOrigins=\[\]$/) >= 0 &&
-   at(/^storage\.set:geoOrigins=\[\]$/) < at(/^browsingData\.remove:\["https/),
+ok(lastBefore(/^browsingData\.remove:/, /^tabs\.(reload|update):/),
+   'all three clears finish before any reload as well -- reload first and the cache refills ' +
+   'with the very pages being cleared', shown());
+ok(lastBefore(/^history\.deleteUrl:/, /^tabs\.(reload|update):/),
+   'and so does the history deletion: a reload of a URL still in history is where the old ' +
+   'centre comes back from', shown());
+ok(firstBefore(/^storage\.set:geoOrigins=\[\]$/, BD_GEO),
    'the origin list is emptied before the reloads that will re-fill it with the new country',
    shown());
 
@@ -620,10 +754,13 @@ ok(at(/^storage\.set:geoOrigins=\[\]$/) >= 0 &&
     ok(seen(/^tabs\.reload:4:bypassCache$/).length === 1 &&
        seen(/^tabs\.reload:7:bypassCache$/).length === 1,
        'the other sites that had been given the old country are reloaded too', JSON.stringify(t));
+    ok(seen(/^tabs\.reload:9:bypassCache$/).length === 1,
+       'and so is a map with no pin this code can rewrite -- OpenStreetMap keeps its centre in ' +
+       'the fragment, so clearing its cache only shows up on the next load', JSON.stringify(t));
     ok(!seen(/^tabs\.(reload|update):5/).length,
        'a site that never asked where it was is left alone', JSON.stringify(t));
     ok(!seen(/^tabs\.(reload|update):6/).length, 'and so is chrome://settings', JSON.stringify(t));
-    ok(t.length === 6, 'six tabs in all, and no others', JSON.stringify(t));
+    ok(t.length === 7, 'seven tabs in all, and no others', JSON.stringify(t));
 }
 ok(INFO.filter(s => /country changed LU -> JP/.test(s)).length === 1,
    'the reason is written to the console once, so a user reading it can tell why their tab moved',
@@ -641,18 +778,33 @@ console.log('\n── a second switch, with no site having asked in between ─�
 ok(seen(/^cookies\.getAll:UULE$/).length === 1,
    'the cookie is swept anyway -- it is the one thing measured to carry the country, and it ' +
    'is not scoped to any origin we happen to know about', shown());
-ok(!JAR.some(c => c.name === 'UULE') && !JAR.length, 'and it is gone',
-   JSON.stringify(JAR.map(c => c.name)));
-//  This block is the reported bug in miniature. The old narrow purge did NOTHING
-//  here: with no origin on the list there was nothing to clear per-origin, so a
-//  switch between two countries the user had not yet opened a geolocating page in
-//  left the cache, the history and the jar exactly as they were -- and the pages
-//  that read a country out of them went on showing the first one.
-ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length === 1,
-   'history, cache and cookies are cleared even though no site is known to be holding ' +
-   'the old country -- the switch is what triggers it, not the origin list', shown());
-ok(!seen(/^browsingData\.remove:\["https/).length,
-   'and the per-origin clear is skipped, because there is no origin to scope it to', shown());
+ok(!JAR.some(c => c.name === 'UULE') && JAR.length === 1 && JAR[0].name === 'SID',
+   'and it is gone, while the session cookie beside it is not', JSON.stringify(JAR.map(c => c.name)));
+//  This block is the reported bug in miniature. A purge gated on the origin list
+//  did NOTHING here: with no origin on the list there was nothing to clear
+//  per-origin, so a switch between two countries the user had not yet opened a
+//  geolocating page in left the map cache exactly as it was -- and the pages that
+//  read a country out of it went on showing the first one. The map clear is
+//  reached from the open tabs instead, so an empty list changes nothing about it.
+ok(seen(BD_MAP).length === 1 &&
+   seen(/^browsingData\.remove:\["https:\/\/www\.google\.com","https:\/\/www\.openstreetmap\.org"\]\|cache\+/).length === 1,
+   'the map cache and map site storage are cleared even though no site is known to be holding ' +
+   'the old country -- the open tabs are what triggers it, not the origin list', shown());
+ok(seen(BD_MAP_CK).length === 1 && seen(BD_GEO).length === 0 && !seen(BD_ANY_WIDE).length,
+   'the map-only cookies go with them, the per-origin clear is skipped because there is no ' +
+   'origin to scope it to, and there is still no browser-wide call', shown());
+ok(seen(/^history\.search:/).length === 6 &&
+   seen(/^history\.deleteUrl:.*:absent$/).length === 5 &&
+   seen(/^history\.deleteUrl:/).length === 5,
+   'history is searched again and the open map tabs are deleted from it by URL -- all five ' +
+   'report absent, because the first switch already took them and a tab need never have been ' +
+   'recorded as a visit', shown());
+ok(histUrls().length === 4 &&
+   histUrls().includes('https://news.example.net/2026/maps-of-the-world') &&
+   histUrls().includes('https://mail.google.com/mail/u/0/#inbox'),
+   'and the four entries no map pattern claims are still there after a second pass -- a sweep ' +
+   'that widened on repetition would empty the history over a day of switching',
+   JSON.stringify(histUrls()));
 //  The tabs ARE queried, and they ARE touched even though the origin list is
 //  empty. Tab 2 is pinned to /@35.6895,139.6917, which was "somewhere else"
 //  during the LU -> JP switch above and is now the country being LEFT. That page
@@ -661,7 +813,7 @@ ok(!seen(/^browsingData\.remove:\["https/).length,
 //  from the UULE cookie and from its own URL without calling the geolocation
 //  API). An empty list is exactly when such a page is the only thing left to put
 //  right, so the sweep cannot be gated on the list.
-ok(seen(/^tabs\.query$/).length === 1 &&
+ok(seen(/^tabs\.query$/).length === 2 &&
    seen(/^tabs\.update:2:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1,
    'the tab still pinned to the country being left is repinned to the new one, with no origin ' +
    'on the list at all -- a page can display a country without ever having asked for it',
@@ -671,15 +823,20 @@ ok(seen(/^tabs\.query$/).length === 1 &&
 //  rule they were "the user's own view" and were left alone. They are moved now,
 //  because the ask is that EVERY reload show the connected country, and a map
 //  left on a third country is the thing being complained about. What is still
-//  not touched is anything that is not a pinned map.
+//  not touched is anything that is not a map.
 ok(seen(/^tabs\.update:1:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1 &&
    seen(/^tabs\.update:3:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z\?hl=en$/).length === 1 &&
    seen(/^tabs\.update:8:https:\/\/www\.google\.com\/maps\/place\/Foo\/@52\.3676,4\.9041,17z\/data=!3m1$/).length === 1,
    'every other Maps pin is moved with it, including ones pointing at a country nobody is ' +
    'leaving -- the deliberate cost of "every reload shows the connected country"', shown());
+ok(seen(/^tabs\.reload:9:bypassCache$/).length === 1,
+   'and the OpenStreetMap tab is reloaded rather than rewritten: its URL carries no pin this ' +
+   'code can move, so a reload against the cleared cache is the only thing that updates it',
+   shown());
 ok(!seen(/^tabs\.(reload|update):(4|5|6|7)\b/).length,
-   'and nothing that is not a pinned map is disturbed: not the sites that never asked, not a ' +
-   'chrome:// page', shown());
+   'nothing that is not a map is disturbed: not the sites that never asked, not a chrome:// ' +
+   'page -- and tab 4 is the one that proves the difference, because maps.example.org matches ' +
+   'the history keyword and is still not a map', shown());
 
 // ════════════════════════════════════════════════════════════════════
 mark();
@@ -744,8 +901,12 @@ console.log('\n── quit in Amsterdam, start the app again in Tokyo ──');
 ok(INFO.filter(s => /country changed NL -> JP/.test(s)).length === 1,
    'that is a country change even though the app was shut in between', JSON.stringify(INFO.slice(-2)));
 ok(seen(/^cookies\.getAll:UULE$/).length === 1 && !JAR.length, 'so the cookie is swept', shown());
-ok(seen(/^browsingData\.remove:\["https:\/\/www\.google\.com"\]\|/).length === 1,
+ok(seen(BD_GEO).length === 1 &&
+   seen(/^browsingData\.remove:\["https:\/\/www\.google\.com"\]\|cacheStorage\+/).length === 1,
    'the one site that had asked has its storage cleared', shown());
+ok(seen(BD_MAP).length === 1 && !seen(BD_MAP_CK).length,
+   'and its open map is cleared as a map as well -- google.com is not a map-only domain, so ' +
+   'that half asks for no cookies', shown());
 ok(seen(/^tabs\.update:11:https:\/\/www\.google\.com\/maps\/@35\.6895,139\.6917,12z$/).length === 1,
    'and its Amsterdam pin is moved to Tokyo', shown());
 
@@ -827,10 +988,11 @@ ok(INFO.some(s => /no previous country on record but 1 site\(s\) were given one/
 ok(seen(/^cookies\.getAll:UULE$/).length === 1 && !JAR.some(c => c.name === 'UULE'),
    'the location cookie is swept -- the measured carrier of the stale country',
    JSON.stringify(JAR.map(c => c.name)));
-ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length === 1,
-   'history, cache and cookies are cleared, which is what the user asked for on every switch',
-   shown());
-ok(seen(/^browsingData\.remove:\["https:\/\/www\.google\.com"\]\|/).length === 1,
+ok(seen(BD_MAP).length === 1 && seen(/^history\.search:/).length === 6 && !seen(BD_ANY_WIDE).length,
+   'the map cache, map site storage and map history are cleared, which is what the user asked ' +
+   'for on every switch', shown());
+ok(seen(BD_GEO).length === 1 &&
+   seen(/^browsingData\.remove:\["https:\/\/www\.google\.com"\]\|cacheStorage\+/).length === 1,
    'and the site that had been handed a position has its storage cleared', shown());
 ok(seen(/^tabs\.update:31:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1 &&
    !seen(/^tabs\.reload:31/).length,
@@ -898,10 +1060,13 @@ mark();
 await sync(JP, 'jp');
 
 console.log('\n── a browser build without chrome.browsingData ──');
-ok(WARN.some(s => /history, cache and cookies cannot be cleared/.test(s)) &&
+ok(WARN.some(s => /the map cache and map site storage keep the previous country/.test(s)) &&
    WARN.some(s => /site storage keeps whatever/.test(s)),
-   'same rule, and once for each clear it cannot do: the wide one and the per-origin one ' +
+   'same rule, and once for each clear it cannot do: the map one and the per-origin one ' +
    'are named separately rather than one warning standing in for both', JSON.stringify(WARN));
+ok(seen(/^history\.deleteUrl:/).length >= 1,
+   'and the map history still goes -- chrome.history is a different API, so losing one does ' +
+   'not lose the other', shown());
 ok(seen(/^cookies\.getAll:UULE$/).length === 1 && !JAR.length,
    'and the cookie -- the part that actually moves Maps -- is still removed', shown());
 ok(seen(/^tabs\.reload:/).length >= 1,
@@ -921,12 +1086,18 @@ mark();
 await sync(NL, 'nl');
 
 console.log('\n── the browser refuses to clear ──');
-ok(WARN.some(s => /could not clear history\/cache\/cookies -- Clearing failed/.test(s)),
+ok(WARN.some(s => /could not clear the map cache and storage -- Clearing failed/.test(s)) &&
+   WARN.some(s => /could not clear site storage -- Clearing failed/.test(s)),
    'it is reported in the browser\'s own words, not swallowed', JSON.stringify(WARN));
+ok(seen(BD_MAP_NC).length === 1 &&
+   WARN.some(s => /could not clear map site storage either/.test(s)),
+   'the map clear is retried once without `cache`, because a build that refuses an ' +
+   'origin-filtered cache clear can still take the four storage types -- and the second ' +
+   'refusal is reported too rather than passed off as the first', shown());
 ok(JAR.some(c => c.name === 'SID'),
    'and the jar really was not cleared, so this is the failure path and not a stub that ' +
    'reports one while doing the work', JSON.stringify(JAR.map(c => c.name)));
-ok(seen(/^browsingData\.remove:\["https/).length === 1 && seen(/^tabs\.reload:22/).length === 1,
+ok(seen(BD_GEO).length === 1 && seen(/^tabs\.reload:22/).length === 1,
    'the switch is not abandoned half-done either: the per-origin clear and the reload still ' +
    'run, so the pages that were told the old country still ask again', shown());
 BD_ERR = null;
@@ -961,11 +1132,10 @@ ok(seen(/^cookies\.getAll:UULE:NEVER-ANSWERS$/).length === 1 &&
    'nothing follows it on its own: the chain really is stalled at the first stage', shown());
 ok(fireTimers('t') > 0, 'a deadline was armed when the stage started');
 await drain();
-ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length === 1,
-   'the deadline carries the switch past the stalled stage: history, cache and cookies ' +
+ok(seen(BD_MAP).length === 1,
+   'the deadline carries the switch past the stalled stage: the map cache and storage ' +
    'are cleared anyway', shown());
-ok(seen(/^browsingData\.remove:\["https:\/\/www\.google\.com"\]\|/).length === 1 &&
-   seen(/^tabs\.reload:51/).length === 1,
+ok(seen(BD_GEO).length === 1 && seen(/^tabs\.reload:51/).length === 1,
    'and the site storage goes and the stale tab asks again -- which is the whole visible ' +
    'point of a switch purge', shown());
 ok(seen(/^cookies\.remove/).length === 0,
@@ -986,12 +1156,11 @@ BD_HANG = true;
 mark();
 await sync(NL, 'nl');
 
-console.log('\n── the browser-wide wipe never calls back ──');
+console.log('\n── the map clear never calls back ──');
 ok(seen(/^cookies\.getAll:UULE$/).length === 1 && !JAR.length,
    'the cookie sweep finished normally', shown());
-ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length === 1 &&
-   !seen(/^tabs\./).length,
-   'the wipe was asked for and has not answered, so nothing has been reloaded yet', shown());
+ok(seen(BD_MAP).length === 1 && !seen(/^tabs\.(reload|update):/).length,
+   'the clear was asked for and has not answered, so nothing has been reloaded yet', shown());
 let fired = 0;
 for (let i = 0; i < 4; i++) { fired += fireTimers('t'); await drain(); }
 ok(fired >= 2, 'two deadlines fire, in turn: one per unanswered stage', String(fired));
@@ -999,8 +1168,8 @@ ok(seen(/^storage\.set:geoOrigins=\[\]$/).length === 1 &&
    seen(/^tabs\.reload:52/).length === 1,
    'and the switch finishes: the origin list is emptied and the stale tab asks again, ' +
    'rather than the purge sitting for ever behind one unanswered call', shown());
-ok(at(/^browsingData\.remove:\[\]\|/) < at(/^tabs\.reload:52/),
-   'and the order the whole file turns on is still kept -- the wipe was asked for before ' +
+ok(firstBefore(BD_MAP, /^tabs\.reload:52/),
+   'and the order the whole file turns on is still kept -- the clear was asked for before ' +
    'any tab was reloaded, even when the browser never said it had finished', shown());
 BD_HANG = false;
 for (let i = 0; i < 4; i++) { fireTimers('t'); await drain(); }   // no leftovers into the next block
@@ -1017,8 +1186,7 @@ const beforeTimers = shown();
 for (let i = 0; i < 4; i++) { fireTimers('t'); await drain(); }
 
 console.log('\n── a healthy switch, with the deadlines firing afterwards ──');
-ok(seen(/^browsingData\.remove:\[\]\|/).length === 1 &&
-   seen(/^browsingData\.remove:\["https/).length === 1 &&
+ok(seen(BD_MAP).length === 1 && seen(BD_GEO).length === 1 &&
    seen(/^tabs\.reload:53/).length === 1,
    'each stage ran exactly once even though every deadline fired after it', shown());
 ok(shown() === beforeTimers,
@@ -1060,9 +1228,9 @@ ok(luAt >= 0 && sweepAt > luAt,
    'being left was on record before the purge for it started', shown());
 ok(INFO.slice(iRace).some(s => /country changed LU -> JP/.test(s)),
    'so the switch is SEEN as a switch, with the country it came from named', INFO.slice(iRace).join('\n         '));
-ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length === 1,
-   'and history, cache and cookies are cleared -- exactly once, not zero times as measured ' +
-   'and not twice', shown());
+ok(seen(BD_MAP).length === 1,
+   'and the map cache, storage and history are cleared -- exactly once, not zero times as ' +
+   'measured and not twice', shown());
 ok(seen(/^cookies\.removed:UULE$/).length === 1 && !JAR.length,
    'the cookie that carries the old country to Google is gone', shown());
 ok(seen(/^tabs\.update:61:https:\/\/www\.google\.com\/maps\/@35\.6895,139\.6917,12z$/).length === 1,
@@ -1098,7 +1266,7 @@ ok(fireTimers('t') > 0, 'a deadline was armed on the release, not just on the pu
 await drain();
 mark();
 await sync(NL, 'nl');
-ok(seen(/^browsingData\.remove:\[\]\|cache\+cookies\+history:since=0$/).length === 1 &&
+ok(seen(BD_MAP).length === 1 && seen(BD_GEO).length === 1 &&
    seen(/^storage\.set:geoOrigins=\[\]$/).length === 1 &&
    seen(/^tabs\.reload:62/).length === 1,
    'and the NEXT switch purges normally: one lost callback does not wedge the queue for ' +

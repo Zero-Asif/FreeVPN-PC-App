@@ -9,7 +9,7 @@
      they do NOT yet know is the part a store page cannot make obvious: this
      extension is inert on its own, it needs the FreeProxy VPN desktop app
      running on the same Windows PC, it takes over this browser's proxy
-     setting while connected, and it deletes this browser's browsing data
+     setting while connected, and it clears map sites' data in this browser
      when the country changes. Every one of those is stated below, on the
      first run, before the user has connected anything.
 
@@ -24,9 +24,10 @@
      Wording only, and only where that build's wording would be untrue or
      unreviewable here: the app's installer did not put this copy in the
      browser, uninstalling the app does not take this copy away with it, the
-     browser is named as Microsoft Edge throughout, and the data deletion has
-     a card of its own. No script, no style, no layout -- both builds of this
-     page are public in the repository linked at the foot of it.
+     browser is named as Microsoft Edge throughout, and the data clearing has
+     a card of its own. No script and no layout change; the only style added
+     is the colour of the two links this build needs. Both builds of this page
+     are public in the repository linked at the foot of it.
      ══════════════════════════════════════════════════════════════════ -->
 <html lang="en">
 <head>
@@ -157,7 +158,10 @@
         background: linear-gradient(145deg, var(--violet), var(--purple));
         box-shadow: 0 2px 8px rgba(124,58,237,.35);
     }
-    ol.steps li b { display: block; margin-bottom: 1px; }
+    /*  `> b:first-child`, not `b`: step 2 also bolds the extension's name mid
+        sentence, and a bare `li b` made that a block too, which stranded the
+        full stop after it on a line of its own.  */
+    ol.steps li > b:first-child { display: block; margin-bottom: 1px; }
 
     /* ── the "where is the icon" pointer ────────────────────────── */
     .toolbar-hint {
@@ -256,15 +260,15 @@
           for your position, instead of your real one. Microsoft Edge normally
           works your location out from the Wi-Fi networks around you, which a
           proxy cannot change -- so this part has to be done in the browser.</li>
-      <li><b>Clears this browser's cache, cookies and history when you switch
+      <li><b>Clears the cache, cookies and history of map sites when you switch
           to a different country</b>, along with the stored site data of the
           sites that were given the country you are leaving. Without it those
-          sites keep reporting the old country -- Google, for example, keeps
-          the location in a cookie. <b>Because the cookies go too, you are
-          signed out of sites you were signed in to</b>: that is the price of
-          being certain nothing is still holding the country you left. It
-          happens only when you change country, never on an ordinary
-          disconnect and never on its own.</li>
+          sites keep reporting the old country -- Google, for example, keeps the
+          location in a cookie, and a map reloads its old centre out of the
+          cache. <b>Nothing outside that is touched: you stay signed in, and the
+          rest of your history stays where it is.</b> It happens only when you
+          change country, never on an ordinary disconnect and never on its
+          own.</li>
       <li>Gives you the whole app in the toolbar: every country, connect,
           disconnect, the kill switch and the split-tunnel list, in sync with
           the app window in both directions.</li>

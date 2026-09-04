@@ -147,13 +147,9 @@
         background: linear-gradient(145deg, var(--violet), var(--purple));
         box-shadow: 0 2px 8px rgba(124,58,237,.35);
     }
-    /*  `> b:first-child`, not `b`. Each step opens with a bold lead line that
-        wants its own row, but step 2 also bolds the extension's NAME mid
-        sentence -- "use the pin next to <b>FreeProxy VPN Extension</b>." --
-        and a bare `li b` turned that into a block too, which left the full
-        stop after it stranded alone on the next line. The child combinator
-        keeps the rule off any future nested markup as well; a leading text
-        node does not count for :first-child, so the lead <b> still matches. */
+    /*  `> b:first-child`, not `b`: step 2 also bolds the extension's name mid
+        sentence, and a bare `li b` made that a block too, which stranded the
+        full stop after it on a line of its own.  */
     ol.steps li > b:first-child { display: block; margin-bottom: 1px; }
 
     /* ── the "where is the icon" pointer ────────────────────────── */

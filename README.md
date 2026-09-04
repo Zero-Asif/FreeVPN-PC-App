@@ -16,7 +16,7 @@
   <img src="docs/media/badges/telemetry.svg" alt="telemetry none">
   <img src="docs/media/badges/accounts.svg" alt="sign-up not required">
   <img src="docs/media/badges/admin.svg" alt="runs as administrator">
-  <img src="docs/media/badges/probes.svg" alt="probe suite 125 scripts">
+  <img src="docs/media/badges/probes.svg" alt="probe suite 126 scripts">
 </p>
 
 <h3 align="center">Pick a country. Everything on this PC comes out there — including where the web thinks you are standing.</h3>
@@ -32,7 +32,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/walkthrough.svg" width="100%" alt="Six panels. One: run the installer once, a per-machine NSIS setup marked requireAdministrator, with the Visual C++ redistributable inside it, asking for one restart. Two: pick where to come out, 74 countries on a globe or in the popup, pinned in the torrc with StrictNodes 1. Three: press Connect, seven stages in the app's own words, the exit read back through the circuit rather than assumed. Four: the whole machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 853 shut elsewhere, IPv6 blocked both ways, 14 browsers and 9 firewall rules. Five: switch country or split it, and the wipe is browser-wide. Six: check every claim yourself, with no account, no telemetry and no update check.">
+  <img src="docs/media/walkthrough.svg" width="100%" alt="Six panels. One: run the installer once, a per-machine NSIS setup marked requireAdministrator, with the Visual C++ redistributable inside it, asking for one restart. Two: pick where to come out, 74 countries on a globe or in the popup, pinned in the torrc with StrictNodes 1. Three: press Connect, seven stages in the app's own words, the exit read back through the circuit rather than assumed. Four: the whole machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 853 shut elsewhere, IPv6 blocked both ways, 14 browsers and 9 firewall rules. Five: switch country or split it, and only map sites are cleared. Six: check every claim yourself, with no account, no telemetry and no update check.">
 </p>
 
 <p align="center">
@@ -102,14 +102,13 @@ Switching country while connected does **not** drop the tunnel: the app rewrites
 exit through the circuit, and re-broadcasts the new coordinates to every open
 browser.
 
-> [!WARNING]
-> **A country switch clears each browser's history, cache and cookies — all of
-> it, so you are signed out of every site.** That is deliberate and it is the
-> price of the switch actually taking effect; a site that cached the old country,
-> or holds it in a cookie set before the extension ever saw it, will keep showing
-> the old country otherwise. The whole story is in
-> [what a switch wipes, and why](#what-a-switch-wipes-and-why). A **disconnect**
-> does not do this.
+> [!NOTE]
+> **A country switch clears the cache, cookies and history of map sites — and
+> nothing else.** A map holds the old country in its own URL, in a cookie and in
+> the cache, so without that it keeps showing the country you left. You stay
+> signed in everywhere, and the rest of your history stays where it is. The whole
+> story is in [what a switch wipes, and why](#what-a-switch-wipes-and-why). A
+> **disconnect** does not do this.
 
 <img src="docs/media/divider.svg" width="100%" alt="">
 
@@ -419,7 +418,7 @@ than showing a stale country.
 
 ### Every permission it asks for, and what each one is actually for
 
-`Extension/manifest.json` asks for seven permissions and `<all_urls>`. That is a
+`Extension/manifest.json` asks for eight permissions and `<all_urls>`. That is a
 lot, so here is each one and the single thing it does:
 
 | Permission | Used for | Not used for |
@@ -428,7 +427,8 @@ lot, so here is each one and the single thing it does:
 | `proxy` | pointing this browser's own proxy at `127.0.0.1:9050`, so it is covered even before the system proxy applies | anything else |
 | `storage` | the connected country, its coordinates, an accuracy, and which origins were told a position — so the next switch knows what to clean up | any browsing history |
 | `cookies` | deleting the `UULE` cookie by name. Google writes it; it carries a position, and it survives a tab close | writing any cookie. The extension sets none |
-| `browsingData` | the country-switch wipe below | anything on a disconnect |
+| `browsingData` | the switch-time clear below, **origin-filtered to map sites** — their cache and site storage, and cookies only on domains that are nothing but a map — plus the site storage of origins that were handed the old country | anything browser-wide, anything on a disconnect |
+| `history` | deleting the **map URLs** a switch found, one URL at a time, because `browsingData` cannot filter history by origin and its `history: true` is the whole profile | reading your history for anything else. Only URLs a map pattern matches are ever passed to `deleteUrl` |
 | `tabs` | reloading tabs after a switch so they ask for the position again, and rewriting a pinned `/maps/@lat,lng` URL | reading what you have open beyond that |
 | `notifications` | exactly one notification, once, when the extension is first installed, saying which browser it just became active in | anything after that. There is no second `notifications.create` call in the extension |
 | `alarms` | one periodic watchdog. If this browser is pointed at the Tor port and the app has stopped answering, the alarm releases the proxy so the browser is not left with no internet — and picks the socket back up, because a torn-down MV3 worker loses its `setTimeout` chain | keeping itself awake for its own sake |
@@ -442,28 +442,36 @@ before it reloads anything:
    2026-09-01: Google Maps centres from that cookie, not from
    `navigator.geolocation` — so a stale country survives a tab close and a
    browser restart unless the cookie goes.
-2. **`chrome.browsingData.remove({ since: 0 }, { cache: true, cookies: true,
-   history: true })`** — cache, cookies and history, browser-wide, over all of
-   recorded time.
+2. **Clear map sites, and only map sites.** The open tabs and the history entries
+   that match a map pattern are collected, then:
+   * their history entries go one URL at a time through `chrome.history.deleteUrl`,
+   * their cache and site storage go through
+     `chrome.browsingData.remove({ origins, since: 0 }, …)`,
+   * their **cookies** go only for domains that are *nothing but* a map —
+     `openstreetmap.org`, `mapquest.com`, `waze.com`, `mapy.cz`.
 3. **Clear the site storage of every origin that was handed the old country**,
-   then reload those tabs so they ask again.
+   then reload those tabs, every open map, and any map pin rewritten to the new
+   country, so they ask again.
 
-Step 2 signs you out of everything, and that cost is stated rather than designed
-around. A narrower version was tried and does not work: clearing per-origin only
-reaches sites that had already asked for a position, and a page holding the old
-country in a cached response, a history entry or a cookie set before the
-extension existed is untouched by it — which was the original reported bug, where
-a browser kept showing the *first* country it had ever connected to.
+Nothing outside that is touched. `google.com`, `bing.com`, `apple.com`, `yandex`
+and `here.com` keep their cookies — an origin-filtered cookie clear takes the whole
+registrable domain, so naming `maps.google.com` would sign you out of Gmail, and
+naming `wego.here.com` would sign you out of HERE — and on the first four the one
+cookie *measured* to carry a position goes by name in step 1 instead. That name
+sweep is the only part that also runs on a **disconnect**.
 
-A cookie jar cannot be filtered by "does this cookie encode a location", because
-nothing in a cookie says so. `UULE` is the one that was *measured* to carry a
-position, and it is removed by name on a **disconnect** as well — where a full
-wipe would not be proportionate, and so does not happen.
+Two limits, stated rather than designed around. History search is free text, so
+the six keywords (`maps`, `openstreetmap`, `mapquest`, `waze`, `here.com`,
+`mapy.cz`) *find* candidates and the map patterns *decide* — a non-map URL a
+keyword happens to match is never deleted, and a map entry no keyword matches is
+never found. And a site that cached the old country without being a map and
+without ever calling the geolocation API is reached by neither step 2 nor step 3;
+a reload is what fixes that, and the switch does not force one on it.
 
-If `chrome.browsingData` is missing in a particular browser, the extension writes
-to its own console that history, cache and cookies could not be cleared for that
-switch, and carries on with the steps it *can* do. It does not report a wipe it
-did not perform.
+If `chrome.browsingData` or `chrome.history` is missing in a particular browser,
+the extension writes to its own console that the map cache, map site storage or
+map history entries could not be cleared for that switch, and carries on with the
+steps it *can* do. It does not report a clear it did not perform.
 
 
 <img src="docs/media/divider.svg" width="100%" alt="">
@@ -812,7 +820,7 @@ the flag set and the Visual C++ redistributable.
 
 ### The probe suite
 
-`.build/` holds **125** scripts named `test-*` or `probe-*`. They are not unit
+`.build/` holds **126** scripts named `test-*` or `probe-*`. They are not unit
 tests and there is no framework. Each one drives the real thing — the real
 registry, a real browser profile, the real `tor.exe`, the real uninstall sweep —
 and then reads the result back out of the machine, because that is the only kind
@@ -935,7 +943,7 @@ Extension/                the bundled MV3 extension
 Extension-Store/          the same extension, packaged for store submission
 Tor/                      tor.exe 0.4.9.6 and lyrebird.exe, as shipped
 docs/media/               every image on this page, and the script that made it
-.build/                   125 probes, the screenshot harnesses, the art gate
+.build/                   126 probes, the screenshot harnesses, the art gate
 ```
 
 </details>

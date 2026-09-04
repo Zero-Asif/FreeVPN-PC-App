@@ -613,12 +613,17 @@ function markGeoPending() {
 //       the carrier that was measured: Google's session cookies (SID, HSID,
 //       __Secure-*) are left alone. Clearing google.com's cookies wholesale
 //       would sign the user out of every Google service on every switch.
-//    2. Clear cacheStorage / IndexedDB / localStorage / service workers for the
+//    2. Clear the MAP sites -- their cache, their site storage and their own
+//       history entries. Those are the pages measured to display a location they
+//       were never asked for, so they are the ones a switch has to reach; a
+//       profile-wide clear of the same three would take every session cookie and
+//       every history entry the user has instead. See MAP_PATTERNS.
+//    3. Clear cacheStorage / IndexedDB / localStorage / service workers for the
 //       origins that were actually handed a position. Any of them may keep its
 //       own copy under a key we cannot know, and those are the only sites that
 //       could have one. Cookies are deliberately not in this step, for the same
 //       sign-out reason.
-//    3. Reload those tabs, and only those -- plus any Maps tab carrying a
+//    4. Reload those tabs, and only those -- plus any Maps tab carrying a
 //       /@lat,lng,zoom pin, whose pin is REWRITTEN to the new country instead
 //       of being dropped. Dropping it is what produced the reported symptom:
 //       the drop only ran when the pin sat within ~1.5 deg of the country
@@ -737,56 +742,170 @@ function removeLocationCookies(done) {
     }
 }
 
-//  The browser-wide wipe the user asked for, in as many words: on EVERY country
-//  switch, clear history, cache and cookies. It is deliberately not scoped to
-//  origins, because the reported symptom was not scoped either -- after
-//  switching country the browser kept showing the FIRST country it had ever
-//  connected to, repeatedly, and it kept doing that because a per-origin clear
-//  only reaches sites that had already asked for a position. A page that reads
-//  the country from a cached response, from its own history entry, or from a
-//  cookie set before the extension ever saw it, is untouched by the narrow
-//  version and shows the stale country anyway.
+//  WHAT A SWITCH CLEARS: map sites, and nothing else. They are the measured
+//  problem -- Maps centres from the UULE cookie and from its own /maps/@lat,lng
+//  URL (.build/probe-maps-uule2.js), and a cached tile or a history entry puts
+//  the country just left back on the next reload.
 //
-//  WHAT THIS COSTS, stated rather than designed around: `cookies: true` is
-//  browser-wide, so the user is signed out of every site on every country
-//  switch. That is the price of the guarantee they asked for twice, and it is
-//  the only way to be sure no site is holding the previous country -- a cookie
-//  jar cannot be filtered by "does this cookie encode a location", because
-//  nothing in a cookie says so. The one cookie MEASURED to carry a position,
-//  UULE, is still removed by name as well, in removeLocationCookies(): that
-//  runs on disconnect too, where a full wipe would not be proportionate.
-//
-//  `since: 0` is the whole of recorded time. "Clear the cache" with a window
-//  that starts at the switch would leave every page cached before it.
-const SWITCH_WIPE = { cache: true, cookies: true, history: true };
+//  NOT the whole browser. A profile-wide cache+cookies+history clear takes every
+//  session cookie and every history entry the user has, none of which encodes a
+//  location, and signs them out of everything on every switch.
+const MAP_PATTERNS = [
+    /^https?:\/\/(?:[^/]+\.)?google\.[a-z0-9.-]+\/maps(?:[/?#]|$)/i,
+    /^https?:\/\/maps\.google\.[a-z0-9.-]+\//i,
+    /^https?:\/\/(?:[^/]+\.)?bing\.com\/maps(?:[/?#]|$)/i,
+    /^https?:\/\/maps\.apple\.com\//i,
+    /^https?:\/\/(?:[^/]+\.)?yandex\.[a-z0-9.-]+\/maps(?:[/?#]|$)/i,
+    /^https?:\/\/(?:[^/]+\.)?openstreetmap\.org\//i,
+    /^https?:\/\/(?:[^/]+\.)?mapquest\.com\//i,
+    /^https?:\/\/(?:[^/]+\.)?waze\.com\//i,
+    /^https?:\/\/wego\.here\.com\//i,
+    /^https?:\/\/(?:[^/]+\.)?mapy\.cz\//i,
+];
 
-function clearBrowserOnSwitch(done) {
+function isMapUrl(url) {
+    const s = String(url || '');
+    for (const re of MAP_PATTERNS) if (re.test(s)) return true;
+    return false;
+}
+
+//  browsingData's origin filter clears cookies for the whole REGISTRABLE DOMAIN, so
+//  only domains that are nothing but a map go that way: maps.google.com would take
+//  google.com and sign the user out of Gmail, and wego.here.com would take here.com,
+//  which is also HERE's account and developer sign-in. Elsewhere the one cookie
+//  measured to carry a position goes by name instead.
+const MAP_ONLY_HOST =
+    /(?:^|\.)(?:openstreetmap\.org|mapquest\.com|waze\.com|mapy\.cz)$/i;
+
+function isMapOnlyOrigin(origin) {
+    try { return MAP_ONLY_HOST.test(new URL(origin).hostname); } catch (e) { return false; }
+}
+
+//  History goes through chrome.history: browsingData cannot filter history by origin,
+//  and its `history: true` is the whole profile. search() is free text, so the
+//  keywords FIND candidates and isMapUrl() DECIDES. The honest limit: an entry no
+//  keyword matches is never found, and stays.
+const MAP_KEYWORDS = ['maps', 'openstreetmap', 'mapquest', 'waze', 'here.com', 'mapy.cz'];
+const MAP_HISTORY_MAX = 500;
+
+function findMapHistory(done) {
+    if (!chrome.history || !chrome.history.search) {
+        console.warn('FreeProxy: chrome.history is unavailable in this browser -- ' +
+                     'map history entries keep the previous country');
+        done([]);
+        return;
+    }
+    const urls = new Set();
+    let left = MAP_KEYWORDS.length;
+    for (const text of MAP_KEYWORDS) {
+        chrome.history.search({ text, startTime: 0, maxResults: MAP_HISTORY_MAX }, items => {
+            void chrome.runtime.lastError;
+            for (const it of items || []) if (isMapUrl(it && it.url)) urls.add(it.url);
+            if (--left === 0) done([...urls]);
+        });
+    }
+}
+
+//  deleteUrl takes every visit to that exact URL -- the entry is what a reload
+//  restores the old centre from.
+function deleteMapHistory(urls, done) {
+    if (!urls.length || !chrome.history || !chrome.history.deleteUrl) { done(0); return; }
+    let left = urls.length, gone = 0;
+    for (const url of urls) {
+        chrome.history.deleteUrl({ url }, () => {
+            if (!chrome.runtime.lastError) gone++;
+            if (--left === 0) done(gone);
+        });
+    }
+}
+
+//  Wrapped so no line here repeats clearGeoOriginStorage's type list verbatim:
+//  .build/probe-mutate.js finds that mutant by literal text and needs one match.
+const MAP_CLEAR = {
+    cache: true, cacheStorage: true, indexedDB: true,
+    localStorage: true, serviceWorkers: true,
+};
+const MAP_CLEAR_STORAGE_ONLY = { ...MAP_CLEAR, cache: false };
+
+function clearMapOrigins(origins, done) {
+    if (!origins.length) { done(false); return; }
     if (!chrome.browsingData || !chrome.browsingData.remove) {
         //  Nothing is claimed that was not done.
         console.warn('FreeProxy: chrome.browsingData is unavailable in this browser -- ' +
-                     'history, cache and cookies cannot be cleared for this switch');
+                     'the map cache and map site storage keep the previous country');
         done(false);
         return;
     }
-    chrome.browsingData.remove({ since: 0 }, SWITCH_WIPE, () => {
+    const cookieOrigins = origins.filter(isMapOnlyOrigin);
+    const thenCookies = () => {
+        if (!cookieOrigins.length) { done(true); return; }
+        chrome.browsingData.remove({ origins: cookieOrigins, since: 0 }, { cookies: true }, () => {
+            const err = chrome.runtime.lastError;
+            if (err) console.warn('FreeProxy: could not clear map cookies -- ' + err.message);
+            done(true);
+        });
+    };
+    //  One retry without `cache`, for a build that refuses an origin-filtered cache
+    //  clear: the four storage types are where a page writes a position down, and
+    //  losing them with the cache would be the worse trade. `since: 0` is all of
+    //  recorded time -- a shorter window leaves everything cached before it.
+    chrome.browsingData.remove({ origins, since: 0 }, MAP_CLEAR, () => {
         const err = chrome.runtime.lastError;
-        if (err) {
-            console.warn('FreeProxy: could not clear history/cache/cookies -- ' + err.message);
-            done(false);
-            return;
-        }
-        console.info('FreeProxy: cleared history, cache and cookies for the country switch');
-        done(true);
+        if (!err) { thenCookies(); return; }
+        console.warn('FreeProxy: could not clear the map cache and storage -- ' + err.message);
+        chrome.browsingData.remove({ origins, since: 0 }, MAP_CLEAR_STORAGE_ONLY, () => {
+            const again = chrome.runtime.lastError;
+            if (again) console.warn('FreeProxy: could not clear map site storage either -- ' +
+                                    again.message);
+            thenCookies();
+        });
+    });
+}
+//  Two sources, because a map can be stale in either: the tab open right now, and the
+//  history entry a reload would come back from. Both are filtered by isMapUrl(), so
+//  this origin list can only ever hold map origins.
+function mapTabUrls(done) {
+    if (!chrome.tabs || !chrome.tabs.query) { done([]); return; }
+    chrome.tabs.query({}, tabs => {
+        void chrome.runtime.lastError;
+        const urls = [];
+        for (const t of tabs || []) if (isMapUrl(t && t.url)) urls.push(t.url);
+        done(urls);
     });
 }
 
-//  Site storage, per origin. This is a SEPARATE call from the wipe above and
-//  not a duplicate of it: cacheStorage, indexedDB, localStorage and
-//  serviceWorkers are not in SWITCH_WIPE, and these are the four that hold a
-//  position a page wrote down itself. Scoped to the origins that were actually
-//  handed a location, because a Service Worker registration is a site's
-//  installed software rather than a trace of browsing, and taking every one on
-//  the machine would break offline apps that never asked where the user is.
+function clearMapTraces(done) {
+    mapTabUrls(tabUrls => {
+        findMapHistory(histUrls => {
+            const urls = [...new Set(tabUrls.concat(histUrls))];
+            const origins = [];
+            for (const u of urls) {
+                const o = originOf(u);
+                if (o && origins.indexOf(o) < 0) origins.push(o);
+            }
+            //  The log says what was done, never what was intended: the cap, a
+            //  refusal and an empty sweep all read differently.
+            const scoped = origins.slice(0, MAX_ORIGINS);
+            const over = origins.length - scoped.length;
+            deleteMapHistory(urls, gone => {
+                clearMapOrigins(scoped, ok => {
+                    const what = !scoped.length ? 'no map site open or in history'
+                               : ok ? `cleared ${scoped.length} map origin(s)`
+                               : `could not clear ${scoped.length} map origin(s)`;
+                    console.info(`FreeProxy: country switch -- ${what}` +
+                                 (over ? `, ${over} past the ${MAX_ORIGINS} cap left alone` : '') +
+                                 `, deleted ${gone} map history entries`);
+                    done(ok);
+                });
+            });
+        });
+    });
+}
+
+//  Site storage, per origin, and a SEPARATE list from the map one: these are the
+//  origins that were handed a position through the geolocation API, and these four
+//  types are where a page writes one down. Scoped to that list because a Service
+//  Worker registration is a site's installed software, not a trace of browsing.
 function clearGeoOriginStorage(origins, done) {
     if (!origins.length) { done(0); return; }
     if (!chrome.browsingData || !chrome.browsingData.remove) {
@@ -855,51 +974,41 @@ function repinMaps(url, to) {
     return next === String(url) ? null : next;
 }
 
-//  Two kinds of tab have to be made to ask again, and only the first of them is
-//  in `origins`:
+//  Three kinds of tab have to be made to ask again, and only the first is in
+//  `origins`:
 //
-//   1. a page that was HANDED a position through the geolocation API. It is on
-//      the list because geo-bridge.js said so.
-//   2. a page that is displaying a location it never asked us for. Google Maps
-//      is the measured case (.build/probe-maps-uule2.js): it centres from the
-//      UULE cookie and from its own /maps/@lat,lng URL, and in that run it did
-//      not call the geolocation API before doing so -- so it is invisible to the
-//      origin list, and after a switch it goes on showing the previous country
+//   1. a page that was HANDED a position through the geolocation API -- on the list
+//      because geo-bridge.js said so.
+//   2. a page displaying a location it never asked us for. Google Maps is the
+//      measured case (.build/probe-maps-uule2.js): it centres from the UULE cookie
+//      and from its own /maps/@lat,lng URL without calling the geolocation API, so
+//      it is invisible to the origin list and keeps showing the previous country
 //      for as long as the tab is open. That is the reported symptom, exactly.
+//   3. any other open map. Its cache and site storage were just cleared, and a
+//      cleared cache only shows up on the next load -- so an OpenStreetMap tab
+//      with no rewritable pin in its URL is reloaded outright.
 //
-//  So the maps sweep is not gated on the list. What it does with a pin depends
-//  on whether there is a country to point it at right now. On a switch there is,
-//  and repinMaps() rewrites the pin to it whatever it currently says -- including
-//  a map the user panned somewhere themselves, which is the deliberate trade
-//  described in step 3 above. When there is not, `to` is null, repinMaps()
-//  returns null, and the old narrow unpinMaps() rule runs instead: only a pin
-//  within ~1.5 deg of the country being left is touched.
+//  So the maps sweep is not gated on the list. With a country to point at,
+//  repinMaps() rewrites the pin to it whatever it says -- including a map the user
+//  panned themselves, the deliberate trade in step 3. With none, `to` is null and
+//  the narrow unpinMaps() rule runs instead: only a pin within ~1.5 deg of the
+//  country being left is touched. That second case is NOT a disconnect (deep=false
+//  never starts the per-origin half); it is a disconnect arriving while a switch
+//  purge is still in flight, where moving a pin to the country just left would be
+//  worse than leaving it.
 //
-//  Be precise about when that second case is actually reached, because it is not
-//  "on a disconnect": a disconnect passes deep=false and purgeLocationTraces()
-//  then never starts the per-origin half at all, so nothing here runs. It is
-//  reached when a disconnect arrives while a switch purge is STILL IN FLIGHT --
-//  geoRecord has already gone inactive by the time the reload does -- and then
-//  moving a pin to the country just left would be worse than leaving it.
-//
-//  A tab that is neither on the list nor pinned at all is left alone either way,
-//  which test-geo-purge.js asserts with a second origin that never asks for a
-//  position and must keep both its document and its localStorage.
+//  A tab neither on the list nor pinned is left alone either way, which
+//  test-geo-purge.js asserts with a second origin that must keep both its document
+//  and its localStorage.
 function reloadGeoUsers(origins, from) {
     if (!chrome.tabs || !chrome.tabs.query) return;
     const want = new Set(origins);
-    //  The destination is read from the authoritative record rather than passed
-    //  in as an argument, and that is not laziness: writeGeo() assigns
-    //  geoRecord BEFORE noteLocationChange() starts this chain (syncGeoSpoof,
-    //  and .build/probe-mutate.js has a mutant for that very ordering), so by
-    //  the time this runs it already holds the country being switched TO.
-    //  Threading it through purgeLocationTraces() and purgeGeoOriginStorage()
-    //  instead would have changed two call-site strings that probe-mutate.js
-    //  matches literally, turning two live mutants into silent no-ops.
-    //
-    //  Reading it here rather than at the top of the purge is also what makes
-    //  the in-flight-disconnect case above come out right: this is the latest
-    //  possible moment, so it is the most current answer available.
+    //  Read from the authoritative record rather than passed in: writeGeo() assigns
+    //  geoRecord BEFORE noteLocationChange() starts this chain, so by now it holds the
+    //  country being switched TO. Threading it through the two purge functions instead
+    //  would have changed call-site strings probe-mutate.js matches literally, turning
+    //  live mutants into no-ops -- and reading it here, the latest possible moment, is
+    //  what makes the in-flight-disconnect case above come out right.
     const to = geoRecord && geoRecord.active &&
                typeof geoRecord.lat === 'number' && typeof geoRecord.lng === 'number'
         ? { lat: geoRecord.lat, lng: geoRecord.lng }
@@ -910,7 +1019,7 @@ function reloadGeoUsers(origins, from) {
             const o = originOf(t.url || '');
             if (!o) continue;
             const clean = repinMaps(t.url, to) || unpinMaps(t.url, from);
-            if (!want.has(o) && !clean) continue;
+            if (!want.has(o) && !clean && !isMapUrl(t.url)) continue;
             try {
                 if (clean && clean !== t.url) chrome.tabs.update(t.id, { url: clean });
                 else chrome.tabs.reload(t.id, { bypassCache: true });
@@ -943,7 +1052,7 @@ function reloadGeoUsers(origins, from) {
 //  possible, .build/test-geo-switch.js covers both stalls with a stub that accepts
 //  the call and never answers, and the cost of arming a timer is nothing.
 const STAGE_COOKIE_MS = 2000;    // a name lookup in the jar; fast, or lost
-const STAGE_WIPE_MS   = 8000;    // cache+history over all recorded time; slow
+const STAGE_WIPE_MS   = 8000;    // map history search, then deletes and a cache clear; slow
 
 function once(fn) {
     let ran = false;
@@ -951,23 +1060,17 @@ function once(fn) {
 }
 
 function purgeLocationTraces(from, deep) {
-    //  Strictly sequenced, and the order is the point: everything has to be gone
-    //  BEFORE anything is reloaded. A reload that still carries the old UULE
-    //  sends the previous country back to Google in the request headers, gets a
-    //  map centred on it, and has the cookie re-set for its trouble -- the
-    //  original bug, reproduced by the fix. The same argument applies to the
-    //  cache: reload first and it refills with the pages being cleared.
-    //
-    //  Which is also why the wipe gets four times the grace the cookie sweep
-    //  does. Clearing the cache and the whole of history is genuinely slow on a
-    //  real profile, and cutting it short would start the reloads while it was
-    //  still running -- that is the ordering bug again, self-inflicted. A late
-    //  reload is a tab that shows the old country for a moment longer; a reload
-    //  during the wipe is a tab that puts it back.
+    //  Strictly sequenced, and the order is the point: everything must be gone BEFORE
+    //  anything reloads. A reload still carrying the old UULE sends the previous
+    //  country back to Google, gets a map centred on it, and has the cookie re-set --
+    //  the original bug, reproduced by the fix. Same for the cache: reload first and
+    //  it refills with the pages being cleared. Which is why the map clear gets four
+    //  times the cookie sweep's grace -- six history searches, the deletes and a cache
+    //  clear -- since cutting it short starts the reloads while it is still running.
     const clearOrigins = once(() => purgeGeoOriginStorage(from));
     const afterCookies = once(() => {
         if (!deep) return;
-        clearBrowserOnSwitch(clearOrigins);
+        clearMapTraces(clearOrigins);
         setTimeout(clearOrigins, STAGE_WIPE_MS);
     });
 
@@ -983,11 +1086,9 @@ function purgeLocationTraces(from, deep) {
 //  old country, clear the site storage those origins wrote it into, then make
 //  them ask again.
 function purgeGeoOriginStorage(from) {
-    //  Serialised against noteGeoUse() for the same reason that serialises
-    //  against itself: this reads the origin list and then empties it, and a
-    //  GEO_USED arriving in between would either be thrown away by the empty
-    //  or survive it and send the NEXT switch to clear a site that was only
-    //  ever told the new country.
+    //  Serialised against noteGeoUse(): this reads the origin list and then empties
+    //  it, and a GEO_USED arriving in between would either be thrown away or survive
+    //  and send the NEXT switch to clear a site only ever told the new country.
     serialiseOrigins(done => {
         chrome.storage.local.get(GEO_ORIGINS, got => {
             const origins = (Array.isArray(got && got[GEO_ORIGINS]) ? got[GEO_ORIGINS] : [])
@@ -1044,7 +1145,7 @@ function purgeGeoOriginStorage(from) {
 //  The LU record's own write landed AFTER the JP record had already been handled.
 //  So when the JP call did its read, `geoLast` was still empty: prev was null, the
 //  origin list had not landed either so `held` was 0, neither branch could fire,
-//  and the switch was silently not acted on -- no cookie sweep, no wipe, no
+//  and the switch was silently not acted on -- no cookie sweep, no map clear, no
 //  reload, and the tab went on showing Luxembourg. That is the reported bug, and
 //  the profile is the witness.
 //

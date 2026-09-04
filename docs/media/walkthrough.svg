@@ -8,8 +8,9 @@ fastest exit the live relay list offers. Three: press Connect, seven stages in t
 words with Tor's bootstrap forwarded verbatim, and the exit read back through the circuit. Four:
 the machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 853 shut
 elsewhere, IPv6 blocked both ways, 14 browsers told the same country. Five: switching country
-re-pins the exit and clears each browser's cache, cookies and history browser wide, and a list of
-domains can bypass the tunnel live. Six: check it yourself, from the plain text log and the 125
+re-pins the exit and clears the cache, cookies and history of map sites only, leaving you signed
+in everywhere, and a list of domains can bypass the tunnel live. Six: check it yourself, from the
+plain text log and the 126
 probe scripts.</desc>
 <!--
   docs/media/walkthrough.svg
@@ -17,7 +18,7 @@ probe scripts.</desc>
   than typed from memory: 74 countries is Object.keys(GEO_COORDS).length in
   main.js, 14 browsers is the table in lib/browsers.js (8 Chromium browsers,
   5 Gecko browsers, 1 for WinINET), 9 firewall rules is the set of rule names
-  main.js and lib/geo-spoof.js can add, 125 probe scripts is what .build/ holds,
+  main.js and lib/geo-spoof.js can add, 126 probe scripts is what .build/ holds,
   and the seven connect stages are the sendProgress calls flow-connect.svg
   spells out one by one.
 
@@ -284,12 +285,12 @@ probe scripts.</desc>
 </g>
 <g font-size="12.5" fill="#7d8aa5">
   <text x="434" y="490">A switch re-pins the exit, then clears</text>
-  <text x="434" y="509">each browser&#8217;s cache, cookies and history</text>
-  <text x="434" y="528">browser-wide, so you are signed out.</text>
+  <text x="434" y="509">the cache, cookies and history of map</text>
+  <text x="434" y="528">sites only &#8212; you stay signed in.</text>
   <text x="434" y="547">A domain list can bypass the tunnel live.</text>
 </g>
-<rect x="434" y="566" width="170" height="24" rx="7" fill="#2a1f10" stroke="#6b4a12"/>
-<text x="448" y="582" font-size="11.5" fill="#fcd34d">the wipe is browser-wide</text>
+<rect x="434" y="566" width="118" height="24" rx="7" fill="#2a1f10" stroke="#6b4a12"/>
+<text x="448" y="582" font-size="11.5" fill="#fcd34d">map sites only</text>
 <!--  6. check it yourself  -->
 <rect x="788" y="380" width="348" height="216" rx="14" fill="url(#wkpanel)" stroke="#2a2247"/>
 <rect x="806" y="398" width="26" height="22" rx="6" fill="#1b1730" stroke="#2f2650"/>
@@ -329,7 +330,7 @@ probe scripts.</desc>
 <g font-size="12.5" fill="#7d8aa5">
   <text x="806" y="490">A plain-text log in ProgramData records</text>
   <text x="806" y="509">what it wrote, and what a read-back then</text>
-  <text x="806" y="528">found. <tspan fill="#c4b5fd">125 probe scripts</tspan> drive the real</text>
+  <text x="806" y="528">found. <tspan fill="#c4b5fd">126 probe scripts</tspan> drive the real</text>
   <text x="806" y="547">registry, and the real browsers.</text>
 </g>
 <rect x="806" y="566" width="276" height="24" rx="7" fill="#0f2a1a" stroke="#1c6b3a"/>

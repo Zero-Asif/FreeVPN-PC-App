@@ -390,11 +390,12 @@ async function control(probe, name, exe) {
     if (!prepared) { console.log('ABORT: prepare() failed'); process.exit(3); }
     console.log(`   id ${prepared.id}  v${prepared.version}  ->  ${prepared.dir}`);
 
-    //  The purge needs both of these. Staged, not source, because the staged
-    //  copy is what the browser loads.
+    //  The purge needs all three. Staged, not source, because the staged copy is
+    //  what the browser loads.
     const mf = JSON.parse(fs.readFileSync(path.join(prepared.dir, 'manifest.json'), 'utf8'));
     ok((mf.permissions || []).includes('cookies'), 'the staged manifest asks for "cookies"');
     ok((mf.permissions || []).includes('browsingData'), 'the staged manifest asks for "browsingData"');
+    ok((mf.permissions || []).includes('history'), 'the staged manifest asks for "history"');
 
     const probe = new Probe(PROBE_PORT);
     probe.serve('/geo.html', page('geo', true, QUIET_URL), 'text/html; charset=utf-8');

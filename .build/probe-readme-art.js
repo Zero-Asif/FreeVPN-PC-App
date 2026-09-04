@@ -368,6 +368,16 @@ app.whenReady().then(async () => {
 
     const files = svgFiles(MEDIA);
     say(`── ${files.length} SVG files under docs/media, rendered on white and on GitHub dark ──`);
+    //  One throwaway capture first. MEASURED: the first capturePage() after the
+    //  window is created loses a race with Chromium's compositor and throws
+    //  UnknownVizError, so whichever file is alphabetically first -- architecture.svg
+    //  -- failed on a cold run and passed on the next. A gate that reports a bad
+    //  image when the image is fine is a gate people learn to skim.
+    try {
+        await win.loadURL('data:text/html,<body style="background:#3b3b3b">');
+        await sleep(200);
+        await win.webContents.capturePage({ x: 0, y: 0, width: 8, height: 8 });
+    } catch (e) { say(`  --   compositor warm-up: ${e && e.message || e}`); }
     for (const rel of files) {
         try { await one(rel); }
         catch (e) { fail++; say(`  FAIL ${rel} threw  -- ${e && e.message || e}`); }

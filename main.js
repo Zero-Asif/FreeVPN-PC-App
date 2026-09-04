@@ -6340,6 +6340,10 @@ function geoFile(name) { return path.join(app.getPath('userData'), name); }
 //  whole duration and delivering no protection at the end of it.
 function runPs1(content, name, timeoutMs = 20000) {
     const p = geoFile(name);
+    //  Unlinked first for the reason runBat() spells out: a hard link planted at
+    //  this name would make writeFileSync() write through to its target, and this
+    //  process is elevated.
+    try { fs.rmSync(p, { force: true }); } catch (e) {}
     try { fs.writeFileSync(p, content, 'utf8'); }
     catch (e) { return Promise.reject(e); }
 

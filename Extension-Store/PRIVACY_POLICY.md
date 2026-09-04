@@ -80,20 +80,28 @@ downloads, and it does not add, remove or interfere with any other extension.
 The extension clears data in this browser, so that the country you just left
 stops being reported:
 
-- this browser's **cache, cookies and browsing history**, for all recorded time;
+- the **cache, cookies and browsing history of map sites only** — the maps you
+  have open and the map URLs in your history, for all recorded time;
 - for the sites that had been given the previous country only: their local
   storage, IndexedDB, cache storage and service workers.
 
-**Clearing cookies is browser-wide, so this signs you out of the websites you
-were signed in to in Microsoft Edge.** That cost is stated here rather than
-hidden. Nothing in a cookie says whether it encodes a location, so the only way
-to be certain that no site is still holding the country you left is to clear
-them; they are deleted, never read or sent anywhere first.
+**You are not signed out of anything.** Cookies are cleared only on domains that
+are nothing but a map (`openstreetmap.org`, `mapquest.com`, `waze.com`,
+`mapy.cz`). On Google, Bing, Apple and Yandex the single cookie
+measured to carry a position — `UULE` — is deleted by name instead, because an
+origin-filtered cookie clear takes the whole registrable domain, and naming
+`maps.google.com` would sign you out of Gmail. `wego.here.com` is left out of the
+cookie step for the same reason: `here.com` is also HERE's account sign-in.
+Cookies are deleted, never read or sent anywhere first.
 
-The rest is necessary for the same reason. Websites remember a location outside
-the geolocation API as well — Google, for example, keeps it in a cookie — so
-without this step a site would keep reporting the country you switched away
-from, which is the exact leak the extension exists to prevent.
+Map history entries are deleted one URL at a time, and only URLs that match a map
+pattern are deleted. Your history is not read for anything else, and nothing in
+it is sent anywhere.
+
+Maps are why this step exists. A map remembers a location outside the geolocation
+API — in its own URL, in a cookie and in the cache — so without this step it
+would keep showing the country you switched away from, which is the exact leak
+the extension exists to prevent.
 
 "The connected country changes" also covers disconnecting and then connecting to
 a **different** country later: the pages and site data in this browser still

@@ -2,10 +2,10 @@
 // ════════════════════════════════════════════════════════════════════
 //  .build/probe-mutate.js  --  is .build/test-geo-switch.js able to fail?
 //
-//  61/61 on the first run is exactly as consistent with "the fix is right" as it
-//  is with "the checks never look at anything". So each mistake the purge could
-//  plausibly make is written back INTO a throwaway copy of background.js, the
-//  suite is run against the copy, and the check that catches it is named.
+//  A green run is exactly as consistent with "the fix is right" as it is with
+//  "the checks never look at anything". So each mistake the purge could plausibly
+//  make is written back INTO a throwaway copy of background.js, the suite is run
+//  against the copy, and the check that catches it is named.
 //
 //  A mutant that still passes is the finding: it means that mistake could be
 //  shipped and no test here would notice. Nothing in Extension/ is modified --
@@ -54,7 +54,7 @@ const MUTANTS = [
      'chrome.storage.local.set({ [GEO_ORIGINS]: origins }, () => {'],
 
     ['every tab is reloaded, not only the ones that were given a position',
-     'if (!want.has(o) && !clean) continue;',
+     'if (!want.has(o) && !clean && !isMapUrl(t.url)) continue;',
      'if (false) continue;'],
 
     ['the Maps pin is dropped wherever it points, not only at the country being left',
@@ -88,6 +88,35 @@ const MUTANTS = [
     ['a missing chrome.cookies is passed off as a success',
      "console.warn('FreeProxy: chrome.cookies is unavailable in this browser -- ' +",
      "console.info('FreeProxy: cookies cleared -- ' +"],
+
+    //  ── the clear widens back out to the whole browser ──────────────
+    //  These six are the mistakes the map-scoped clear could make, and the first
+    //  three are the reported bug itself: the user asked for map sites only, and
+    //  every one of these takes something they did not offer.
+    ['the map clear is not origin-filtered, so it takes the whole cache',
+     'chrome.browsingData.remove({ origins, since: 0 }, MAP_CLEAR, () => {',
+     'chrome.browsingData.remove({ since: 0 }, MAP_CLEAR, () => {'],
+
+    ['the cookie clear is not origin-filtered, so it signs the user out of everything',
+     'chrome.browsingData.remove({ origins: cookieOrigins, since: 0 }, { cookies: true }, () => {',
+     'chrome.browsingData.remove({ since: 0 }, { cookies: true }, () => {'],
+
+    ['cookies go for every map origin, not only the ones that are nothing but a map',
+     'const cookieOrigins = origins.filter(isMapOnlyOrigin);',
+     'const cookieOrigins = origins;'],
+
+    ['a history entry a keyword found is deleted without a map pattern claiming it',
+     'for (const it of items || []) if (isMapUrl(it && it.url)) urls.add(it.url);',
+     'for (const it of items || []) if (it && it.url) urls.add(it.url);'],
+
+    ['every open tab is treated as a map, so its origin is cleared',
+     'for (const t of tabs || []) if (isMapUrl(t && t.url)) urls.push(t.url);',
+     'for (const t of tabs || []) if (t && t.url) urls.push(t.url);'],
+
+    //  The other direction: the clear lands and the user still sees the old map.
+    ['a map with no rewritable pin is cleared but never reloaded',
+     'if (!want.has(o) && !clean && !isMapUrl(t.url)) continue;',
+     'if (!want.has(o) && !clean) continue;'],
 ];
 
 let caught = 0, escaped = 0, unapplied = 0;

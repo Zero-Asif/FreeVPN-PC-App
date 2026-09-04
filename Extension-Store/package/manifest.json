@@ -17,6 +17,7 @@
     "notifications",
     "cookies",
     "browsingData",
+    "history",
     "alarms"
   ],
   "host_permissions": [

@@ -56,21 +56,37 @@ read it first — it is yours, and it is legible on purpose.
 
 ### 3.2 State files
 
-Three JSON files under `%ProgramData%\freeproxy-vpn\`, and that is the whole set:
+Everything the app writes is under `%ProgramData%\freeproxy-vpn\`. The JSON files
+it keeps there, and what is in each:
 
 | File | Holds |
 |---|---|
+| `settings.json` | **your chosen country, the kill-switch state and your split-tunnel list**, plus the full-tunnel switch |
 | `geo-restore.json` | what each browser's and Windows' location settings were **before** the connection, so a disconnect — or a crash — puts back the real value instead of guessing at a default |
+| `ext-restore.json` | the same idea for the extension: what each browser had before the app touched it |
+| `exit-cache.json`, `relay-index.json` | Tor's relay list and an index over it — public data about relays, nothing about you |
 | `restart-pending.json` | whether the one post-install restart is still owed |
+| `boot-pending.json`, `boot-result.json` | whether the post-restart pass is still owed, and what it found in each browser |
 | `browser-intro-shown.json` | whether the first-run browser card has been shown |
+| `browser-setup\delivery.json` | which extension build was offered to browsers, and on which local port |
 
-Your chosen country, the kill-switch state and your split-tunnel list are **not
-written to disk at all**. They live in one in-memory object for the life of the
-process and are gone when the app closes. There is also an `exit-cache.json`
-alongside the app, which is Tor's relay list — public data about relays, nothing
-about you.
+**Your country, kill switch and split-tunnel list are kept between runs, on
+purpose.** An earlier version held them in memory only, and that was a fault: a
+split-tunnel list you had typed was gone at the next start while the
+`ProxyOverride` it produced was still on the machine — two halves that could not
+be reconciled because one was never written down — and a kill switch that
+silently reset itself to off is worse than one that persists. They are plain
+text.
 
-The uninstaller removes all of these by name.
+Two other things live in that directory and are not about you: `ext-key.pem`, the
+key this machine signs its own local copy of the extension with, and the app
+window's own Chromium profile (`Cache`, `Local Storage` and the rest) — the window
+is a local page, so there is nothing browsed in it to record.
+
+The directory is locked down to SYSTEM and administrators at every start, because
+it is also where the Tor binaries and the scripts the app runs elevated live; the
+app says in the log whether that read back clean. Uninstalling deletes the whole
+directory.
 
 ### 3.3 What the browser extension keeps
 
@@ -131,8 +147,8 @@ The Tor Project has its own privacy policy at
 ## 6. The browser extension's permissions
 
 The extension asks for `proxy`, `storage`, `tabs`, `notifications`, `cookies`,
-`browsingData`, `alarms` and `<all_urls>`. Because that is a broad set, each one
-is accounted for individually in the README under
+`browsingData`, `history`, `alarms` and `<all_urls>`. Because that is a broad
+set, each one is accounted for individually in the README under
 [Every permission it asks for](README.md#every-permission-it-asks-for-and-what-each-one-is-actually-for).
 
 The two that deserve stating here:
@@ -141,13 +157,17 @@ The two that deserve stating here:
   and frame at `document_start`. It reads no page content, and it issues **no**
   `fetch`, `XMLHttpRequest` or beacon of any kind — the only socket it opens is
   `ws://127.0.0.1:8080`, to the app on your own machine.
-* **`browsingData` + `cookies`.** When you switch country while connected, the
-  extension deletes every `UULE` cookie by name and then clears this browser's
-  **cache, cookies and history, browser-wide, over all recorded time**. That
-  signs you out of every site. It is the only way a switch reliably takes effect;
-  the reasoning and the narrower version that failed are in
+* **`browsingData` + `cookies` + `history`.** When you switch country while
+  connected, the extension deletes every `UULE` cookie by name and then clears
+  **map sites only**: their cache and site storage, their history entries one URL
+  at a time, and cookies only on domains that are nothing but a map. It also
+  clears the site storage of the origins that had been handed the country you are
+  leaving. Nothing browser-wide is touched — **you stay signed in**, and the rest
+  of your history stays where it is. Maps are why the step exists: a map
+  remembers a position in its own URL, in a cookie and in its cache, so without
+  this a switch would keep showing the country you left. The detail is in
   [What a switch wipes, and why](README.md#what-a-switch-wipes-and-why). A
-  **disconnect** does not do this.
+  **disconnect** removes the `UULE` cookie and nothing else.
 
 Nothing removed this way is copied, read or sent anywhere first. It is deleted.
 

@@ -70,9 +70,10 @@ store-only code path anywhere. What changed:
 - **`welcome.html`** — wording. The browser is named as *Microsoft Edge*
   instead of *Chromium* (policy 1.1.2 forbids naming other browsers); the
   false "the app's installer put this here / removing the app removes it"
-  claims are gone; the country-change data clearing has a card of its own,
-  including that it signs you out of sites; links to the app download and the
-  privacy policy. Plus the CSS for those links — the only style change.
+  claims are gone; the country-change clearing has a card of its own, saying
+  that it is the cache, cookies and history of **map sites only** and that you
+  stay signed in everywhere; links to the app download and the privacy policy.
+  Plus the CSS for those links — the only style change.
 - **`popup.html`** — three strings. The split-tunnel placeholder is
   `mybank.example; intranet.local` instead of two real brands (2.2); a stale
   code comment; and the footer now states what pressing the buttons changes
