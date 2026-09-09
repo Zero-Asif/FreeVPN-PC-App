@@ -1,17 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="158" height="22" role="img"
-     viewBox="0 0 158 22" aria-label="probe suite: 126 scripts">
-  <title>probe suite: 126 scripts</title>
+     viewBox="0 0 158 22" aria-label="probe suite: 159 scripts">
+  <title>probe suite: 159 scripts</title>
   <defs>
-    <linearGradient id="gnqp7yt" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="g4niosr" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#fff" stop-opacity=".16"/>
       <stop offset="1" stop-color="#000" stop-opacity=".16"/>
     </linearGradient>
-    <clipPath id="cgnqp7yt"><rect width="158" height="22" rx="4"/></clipPath>
+    <clipPath id="cg4niosr"><rect width="158" height="22" rx="4"/></clipPath>
   </defs>
-  <g clip-path="url(#cgnqp7yt)">
+  <g clip-path="url(#cg4niosr)">
     <rect width="79" height="22" fill="#161a27"/>
     <rect x="79" width="79" height="22" fill="#b45309"/>
-    <rect width="158" height="22" fill="url(#gnqp7yt)"/>
+    <rect width="158" height="22" fill="url(#g4niosr)"/>
     <rect x="79" width="79" height="22" fill="#fff" opacity="0">
       <animate attributeName="opacity" values="0;.28;0" dur="2.4s"
                begin="1.30s" repeatCount="1" fill="freeze"/>
@@ -23,8 +23,8 @@
     <text x="39.5" y="14" fill="#c7cede" text-anchor="middle"
           textLength="61" lengthAdjust="spacingAndGlyphs">probe suite</text>
     <text x="118.5" y="15" fill="#000" fill-opacity=".35" text-anchor="middle"
-          textLength="61" lengthAdjust="spacingAndGlyphs">126 scripts</text>
+          textLength="61" lengthAdjust="spacingAndGlyphs">159 scripts</text>
     <text x="118.5" y="14" fill="#fff" text-anchor="middle" font-weight="600"
-          textLength="61" lengthAdjust="spacingAndGlyphs">126 scripts</text>
+          textLength="61" lengthAdjust="spacingAndGlyphs">159 scripts</text>
   </g>
 </svg>

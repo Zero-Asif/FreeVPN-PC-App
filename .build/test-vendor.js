@@ -794,6 +794,32 @@ console.log('\n── and what it packages is the Tor bundle, not this machine\'
         ok(!naive.length,
            'and no suite strips JS comments by itself -- one stripper, the one that cannot eat ' +
            'code', naive.join(', '));
+
+        //  And the gate knows about every suite. run-offline.js is the one command
+        //  that runs them, so a test-*.js in neither its SUITES list nor its
+        //  EXCLUDED map is a file that gets written, goes green once by hand, and
+        //  is never run again -- which is how test-exit-ip sat broken by a
+        //  renderer change nobody could see, and how test-edge-store,
+        //  test-engine-ask, test-exit-persistence, test-force-exit-circuit and
+        //  test-geo-external were all outside the gate at once.
+        const { SUITES, EXCLUDED } = require('./run-offline.js');
+        const suiteFiles = buildFiles
+            .filter(f => /^\.build\/test-[^/]+\.js$/.test(f))
+            .map(f => f.replace(/^\.build\//, '').replace(/\.js$/, ''));
+        const ungated = suiteFiles.filter(s => !SUITES.includes(s) && !(s in EXCLUDED));
+        ok(!ungated.length,
+           'every committed suite is either in the offline gate or excluded from it with a ' +
+           'reason -- one command runs all of them, and nothing is quietly outside it',
+           ungated.join(', '));
+
+        const phantom = SUITES.concat(Object.keys(EXCLUDED))
+            .filter(s => !fs.existsSync(path.join(ROOT, '.build', s + '.js')));
+        ok(!phantom.length,
+           'and every suite either list names is a file that exists -- a renamed suite drops out ' +
+           'of the run silently otherwise', phantom.join(', '));
+
+        const both = SUITES.filter(s => s in EXCLUDED);
+        ok(!both.length, 'and none is in both lists', both.join(', '));
     } else {
         console.log('       (git unavailable here -- the .gitignore agreement checks are skipped, not passed)');
     }

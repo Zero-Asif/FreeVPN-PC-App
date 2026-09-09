@@ -12,9 +12,15 @@
 //
 //  Two sources, in this order of authority:
 //    1. a GET_GEO message to the service worker -- race-free, so it answers
-//       the page's first question
+//       the page's first question, and it starts the worker if Chromium has
+//       evicted it
 //    2. chrome.storage.onChanged -- carries live changes to pages that are
 //       already open
+//
+//  geo-spoof.js can also demand a re-ask (the ASK event) when the decision it
+//  is holding is too old to act on. That is the only wake-up available once a
+//  worker has been evicted with the app down, and without it a tab keeps acting
+//  on a "the app is off" that stopped being true minutes ago.
 //
 //  One thing travels the other way: a GEO_USED notification when the page has
 //  actually been handed a spoofed position. That is what lets a later country
@@ -26,13 +32,14 @@
 
     var CHANNEL = '__freeproxy_geo__';
     var USED = '__freeproxy_geo_used__';
+    var ASK = '__freeproxy_geo_ask__';
     var pushed = false;
 
     function push(cfg) {
         pushed = true;
         try {
             document.dispatchEvent(new CustomEvent(CHANNEL, {
-                detail: JSON.stringify(cfg || { active: false }),
+                detail: JSON.stringify(cfg || { active: false, pending: true }),
             }));
         } catch (e) { /* page navigated away */ }
     }
@@ -40,14 +47,30 @@
     //  Only if a live update has not already overtaken us.
     function first(cfg) { if (!pushed) push(cfg); }
 
+    function stampOf(rec) {
+        //  0 rather than "now": a record with no stamp is one this side cannot
+        //  vouch for the age of, and geo-spoof.js must re-ask before acting on
+        //  it rather than treat it as just-written.
+        return typeof rec.stamp === 'number' ? rec.stamp : 0;
+    }
+
     function normalise(rec) {
-        //  `pending` has to survive the trip. It is the difference between
-        //  "the app says it is not connected" -- use the real provider -- and
-        //  "we do not know yet" -- wait. Collapsing both to {active:false} is
-        //  what let the device's real position through on the first
-        //  geolocation call after a browser start.
-        if (!rec || !rec.active) return { active: false, pending: !!(rec && rec.pending) };
-        if (typeof rec.lat !== 'number' || typeof rec.lng !== 'number') return { active: false };
+        //  Two shapes are authoritative and nothing else is: active with real
+        //  coordinates, and inactive that explicitly says the app is off.
+        //  Every other value -- pending, a bare {active:false}, an active
+        //  record with no coordinates, no record at all -- travels as pending,
+        //  so geo-spoof.js holds the call. A missing flag must not be able to
+        //  authorise Chromium's real provider, which is what put the device's
+        //  own position on screen while the VPN was connected.
+        if (!rec || typeof rec !== 'object') return { active: false, pending: true };
+        if (!rec.active) {
+            return rec.appOff === true
+                ? { active: false, appOff: true, stamp: stampOf(rec) }
+                : { active: false, pending: true };
+        }
+        if (typeof rec.lat !== 'number' || typeof rec.lng !== 'number') {
+            return { active: false, pending: true };
+        }
         return {
             active: true,
             lat: rec.lat,
@@ -55,16 +78,23 @@
             accuracy: typeof rec.accuracy === 'number' ? rec.accuracy : 18,
             cc: rec.cc || '',
             city: rec.city || '',
+            stamp: stampOf(rec),
         };
     }
 
-    //  Storage, used only if the worker cannot be reached at all.
+    //  Storage, used only if the worker cannot be reached at all. An ACTIVE
+    //  record here is still worth having -- it can only over-spoof -- but the
+    //  worker being unreachable is itself the news, because it is the one state
+    //  in which geo-spoof.js is allowed to fall back to the real provider.
     function fromStorage() {
+        var unreachable = { active: false, unreachable: true };
         try {
             chrome.storage.local.get('geoSpoof', function (r) {
-                first(normalise(r && r.geoSpoof));
+                if (chrome.runtime.lastError) { push(unreachable); return; }
+                push(normalise(r && r.geoSpoof));
+                push(unreachable);
             });
-        } catch (e) { first({ active: false }); }
+        } catch (e) { push(unreachable); }
     }
 
     //  First delivery: ASK the service worker rather than reading storage.
@@ -80,23 +110,41 @@
     //  extension is asking during the moment the worker is being torn down and
     //  restarted -- "Receiving end does not exist" -- and falling back to
     //  storage there would reintroduce exactly the stale record this avoids.
-    function ask(retriesLeft) {
+    function ask(retriesLeft, force) {
+        var deliver = force ? push : first;
         try {
-            chrome.runtime.sendMessage({ type: 'GET_GEO' }, function (resp) {
-                if (pushed) return;
+            chrome.runtime.sendMessage({ type: 'GET_GEO', fresh: !!force }, function (resp) {
+                if (!force && pushed) return;
                 if (chrome.runtime.lastError || !resp) {
-                    if (retriesLeft > 0) setTimeout(function () { ask(retriesLeft - 1); }, 250);
-                    else fromStorage();
+                    if (retriesLeft > 0) {
+                        setTimeout(function () { ask(retriesLeft - 1, force); }, 250);
+                    } else fromStorage();
                     return;
                 }
-                first(normalise(resp.geoSpoof));
+                deliver(normalise(resp.geoSpoof));
             });
         } catch (e) {
-            if (retriesLeft > 0) setTimeout(function () { ask(retriesLeft - 1); }, 250);
+            if (retriesLeft > 0) setTimeout(function () { ask(retriesLeft - 1, force); }, 250);
             else fromStorage();
         }
     }
-    ask(1);
+    ask(1, false);
+
+    //  A re-ask, requested by geo-spoof.js when the decision it holds is older
+    //  than it is willing to act on. This is the only thing that can wake a
+    //  service worker Chromium has evicted while the app was down: the worker's
+    //  own reconnect chain is an in-memory timer that died with it, so without
+    //  this a tab that was told "the app is off" keeps believing it after the
+    //  app has connected again -- which is how Google Maps came to show the
+    //  device's real position with the VPN up. Rate-limited so a page cannot
+    //  use it to churn the worker.
+    var lastAsk = 0;
+    document.addEventListener(ASK, function () {
+        var now = Date.now();
+        if (now - lastAsk < 400) return;
+        lastAsk = now;
+        ask(1, true);
+    }, true);
 
     //  Later deliveries: connect, disconnect, or a country switch while the
     //  page is open. Pages that call getCurrentPosition again get the new

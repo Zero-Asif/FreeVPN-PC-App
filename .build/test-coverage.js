@@ -30,8 +30,21 @@ const log = { debug: () => {}, info: () => {}, warn: () => {} };
 
 (async () => {
     const idx = new RelayIndex(log);
-    await idx.refresh(u => directGet(u, { timeoutMs: 45000, maxBytes: 12 * 1024 * 1024 }));
+    //  Exit 3, not 1, when the fetch cannot happen. Every check below compares
+    //  against LIVE Onionoo, so with no data every country reads as dead and the
+    //  suite would report a catastrophe that is really a dropped connection. 3 is
+    //  run-offline.js's "not applicable": not a pass, not a failure of the code.
+    try {
+        await idx.refresh(u => directGet(u, { timeoutMs: 45000, maxBytes: 12 * 1024 * 1024 }));
+    } catch (e) {
+        console.log('  n/a  Onionoo unreachable: ' + e.message);
+        process.exit(3);
+    }
     const live = idx.countryStats();
+    if (!Object.keys(live).length) {
+        console.log('  n/a  Onionoo answered with no exit countries at all');
+        process.exit(3);
+    }
 
     const G = new Set(Object.keys(geo));
     const B = new Set(Object.keys(fallback));

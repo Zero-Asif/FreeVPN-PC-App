@@ -265,6 +265,7 @@ const browsingData = {
 };
 
 let TABS = [];
+const tabUpdated = [];
 const tabs = {
     query(q, cb) { lg('tabs.query'); soon(() => cb(TABS.map(t => ({ ...t })))); },
     reload(id, opts, cb) {
@@ -273,6 +274,14 @@ const tabs = {
     },
     update(id, props) { lg(`tabs.update:${id}:${props.url}`); },
     create(props) { lg('tabs.create:' + props.url); },
+    //  A navigation, which is a different event from the switch-time sweep above:
+    //  it is how a Maps URL opened from a bookmark or the omnibox gets seen at all.
+    onUpdated: { addListener(fn) { tabUpdated.push(fn); } },
+};
+const navigate = async (id, url) => {
+    lg(`nav:${id}:${url}`);
+    for (const fn of tabUpdated) fn(id, { url }, { id, url });
+    await drain();
 };
 
 // ── chrome.history ──────────────────────────────────────────────────
@@ -457,6 +466,20 @@ const sock = () => WS[WS.length - 1];
 const geo = () => STORE.geoSpoof;
 const origins = () => STORE.geoOrigins || [];
 const prevLoc = () => STORE.geoLast || null;
+
+//  "The previous country is not on record" -- in BOTH places it lives.
+//
+//  background.js keeps `lastNoted`, an in-memory mirror of geoLast, so that a
+//  compare released by its 2 s deadline still leaves the next switch a correct
+//  answer. A worker teardown discards that mirror along with the unflushed write,
+//  and a fresh profile never had one -- so deleting STORE.geoLast alone no longer
+//  simulates either case: it leaves the mirror holding the very country the
+//  section says was lost. vm shares a context's top-level `let` bindings between
+//  scripts, so this assignment reaches the binding the worker's own functions read.
+const loseGeoLast = () => {
+    delete STORE.geoLast;
+    vm.runInContext('lastNoted = null;', sandbox);
+};
 const answers = [];
 const sync = async (c, code) => {
     sock().deliver({ type: 'STATE_SYNC', state: stateFor(c, code) });
@@ -489,8 +512,13 @@ ok(!seen(/^proxy\.clear$/).length,
    'and it does so by WRITING mode:direct, never by clearing -- a clear hands the pref ' +
    'back to a record that cannot be released', shown() || '(clear never called)');
 
-ok(JSON.stringify(geo()) === JSON.stringify({ active: false, pending: true }),
-   'the location is parked as "not known yet", which is not the same as "not connected"',
+//  Shape, not an exact JSON pin: every record now also carries the `stamp`
+//  geo-spoof.js measures freshness against, and pinning the whole object made
+//  this go red for adding a field it was written to require.
+ok(geo() && geo().active === false && geo().pending === true &&
+   geo().appOff === undefined && typeof geo().stamp === 'number',
+   'the location is parked as "not known yet", which is not the same as "not connected" -- ' +
+   'and it is stamped, so a page can tell how old the answer is',
    JSON.stringify(geo()));
 ok(seen(/^ws\.new:ws:\/\/127\.0\.0\.1:8080$/).length === 1, 'and it dials the desktop app');
 ok(!seen(/cookies\.getAll/).length,
@@ -850,8 +878,10 @@ await drain();
 console.log('\n── the app quits ──');
 ok(seen(/^proxy\.off:direct$/).length === 1,
    'the browser stops routing through a Tor listener that may no longer be there');
-ok(geo() && geo().active === false && !geo().pending,
-   'and pages are told there is no verified country, rather than being left with a stale one',
+ok(geo() && geo().active === false && !geo().pending && geo().appOff === true &&
+   typeof geo().stamp === 'number',
+   'and pages are told there is no verified country, rather than being left with a stale one -- ' +
+   'said with appOff, not by leaving the flag out, because absence is what geo-spoof.js holds on',
    JSON.stringify(geo()));
 ok(seen(/^cookies\.getAll:UULE$/).length === 1 && !JAR.some(c => c.name === 'UULE'),
    'the location cookie goes: it would otherwise keep naming a country the user has left',
@@ -976,7 +1006,7 @@ TABS = [{ id: 31, url: 'https://www.google.com/maps/@35.6895,139.6917,12z' },
         { id: 32, url: 'https://quiet.example/page' }];
 JAR = [{ name: 'UULE', domain: '.google.com', path: '/', secure: true },
        { name: 'SID',  domain: '.google.com', path: '/', secure: true }];
-delete STORE.geoLast;
+loseGeoLast();
 INFO.length = 0;
 mark();
 await sync(NL, 'nl');
@@ -1018,7 +1048,7 @@ STORE.geoOrigins = [];
 TABS = [{ id: 41, url: 'https://www.google.com/maps' }];
 JAR = [{ name: 'UULE', domain: '.google.com', path: '/', secure: true },
        { name: 'SID',  domain: '.google.com', path: '/', secure: true }];
-delete STORE.geoLast;
+loseGeoLast();
 INFO.length = 0;
 mark();
 await sync(JP, 'jp');
@@ -1209,7 +1239,7 @@ ok(shown() === beforeTimers,
 //
 //  Note there is no drain() between the two deliveries. That is the entire test:
 //  with one, every callback has already landed and the race cannot happen.
-delete STORE.geoLast;                       // a browser with no country on record
+loseGeoLast();                              // a browser with no country on record
 STORE.geoOrigins = [];                      // ...and none recorded yet either, as measured
 TABS = [{ id: 61, url: 'https://www.google.com/maps/@49.6116,6.1319,12z' }];
 JAR = [{ name: 'UULE', domain: '.google.com', path: '/', secure: true }];
@@ -1271,6 +1301,101 @@ ok(seen(BD_MAP).length === 1 && seen(BD_GEO).length === 1 &&
    seen(/^tabs\.reload:62/).length === 1,
    'and the NEXT switch purges normally: one lost callback does not wedge the queue for ' +
    'the rest of the session', shown());
+
+// ════════════════════════════════════════════════════════════════════
+//  THE REPORT, verbatim: "brave browser er jekhane prothom 2 bar switching er
+//  poro prottekbar connected country onusare map e show korchilo ... kintu 3rd
+//  bare jokhon switch korlam tokhon ar new connected country onusare show
+//  korchena ager country er ta show korche."
+//
+//  The section above proves a lost CALLBACK does not wedge the queue. This is
+//  the harder case and the reported one: the write itself has not landed yet
+//  when the deadline releases the section, so the next note's read returns the
+//  country before last. Two switches inside the 2 s budget are right; the third,
+//  overlapping the second's purge, compares against the wrong country and clears
+//  it -- leaving the actual previous country's UULE cookie and map pins in place.
+//
+//  Held rather than dropped, so the whole sequence is a real one: the write does
+//  land, just after the next switch has already read.
+console.log('\n── three switches, the second still writing when the third arrives ──');
+INFO.length = 0;
+STORE.geoOrigins = ['https://www.google.com'];
+JAR = [{ name: 'UULE', domain: '.google.com', path: '/', secure: true }];
+TABS = [{ id: 71, url: 'https://www.google.com/maps/@49.6116,6.1319,12z' }];
+mark();
+await sync(LU, 'lu');
+ok(prevLoc() && prevLoc().cc === 'LU', 'switch 1 of 3 recorded LU', JSON.stringify(prevLoc()));
+
+//  Switch 2: the record is parked in flight. Nothing about the call changes --
+//  the same object is stored, at the same point in the same queue -- only WHEN
+//  the queue gets to it.
+const parked = [];
+const realSet2 = chromeStub.storage.local.set;
+chromeStub.storage.local.set = (obj, cb) => {
+    if (obj && obj.geoLast) { parked.push(() => realSet2(obj, cb)); return; }
+    realSet2(obj, cb);
+};
+await sync(JP, 'jp');
+ok(parked.length === 1 && (!prevLoc() || prevLoc().cc === 'LU'),
+   'switch 2 of 3 is in flight: its record has not reached storage',
+   JSON.stringify(prevLoc()));
+ok(INFO.some(s => /country changed LU -> JP/.test(s)),
+   'and it compared against LU correctly -- switches 1 and 2 were never the problem',
+   JSON.stringify(INFO));
+
+//  The deadline releases the section with that write still outstanding. This is
+//  the step that makes the next read early rather than merely slow.
+ok(fireTimers('t') > 0, 'the 2 s deadline releases the section anyway');
+await drain();
+chromeStub.storage.local.set = realSet2;
+
+INFO.length = 0;
+mark();
+await sync(NL, 'nl');
+ok(INFO.some(s => /country changed JP -> NL/.test(s)),
+   'switch 3 compares against JP -- the country actually being left, read from memory ' +
+   'because storage is still one switch behind',
+   JSON.stringify(INFO));
+ok(!INFO.some(s => /country changed LU -> NL/.test(s)),
+   'and NOT against LU, which is the reported defect: a purge aimed at the wrong country ' +
+   'leaves the real previous one on screen', JSON.stringify(INFO));
+ok(seen(/^tabs\.update:71:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1,
+   'and the map pin lands on the new country rather than staying where it was', shown());
+
+//  The parked write is let go afterwards. In a real browser it could not land
+//  out of order -- LevelDB applies set() calls in the order they were made, and
+//  the NL set was made second -- so what is worth asserting is not the stored
+//  value here but that a late older write cannot make the NEXT switch compare
+//  against a country already left. The in-memory record is what prevents it.
+for (const f of parked) f();
+await drain();
+INFO.length = 0;
+mark();
+await sync(LU, 'lu');
+ok(INFO.some(s => /country changed NL -> LU/.test(s)),
+   'a 4th switch still compares against NL -- a write that landed late cannot rewind the ' +
+   'compare to a country already left', JSON.stringify(INFO));
+ok(prevLoc() && prevLoc().cc === 'LU', 'and the record ends where the app is',
+   JSON.stringify(prevLoc()));
+
+//  And the in-memory record is not a second source of truth that can drift: a
+//  restarted worker has none, and the stored value is what it falls back to.
+//  Read from `src`, so a mutation run through FP_BG tests the mutated file.
+{
+    ok(/const prev = lastNoted \|\| \(got && got\[GEO_LAST\]\) \|\| null;/.test(src),
+       'the compare prefers the in-memory record and falls back to storage, in that order');
+    ok(/if \(next && next\[GEO_LAST\]\) lastNoted = next\[GEO_LAST\];[\s\S]{0,80}storage\.local\.set/
+       .test(src),
+       'and it is updated BEFORE the set, not in its callback -- a callback that is late is ' +
+       'exactly the case this covers');
+    ok(/^let lastNoted = null;$/m.test(src),
+       'it starts empty, so a restarted worker falls straight through to storage');
+    const writes = (src.match(/\[GEO_LAST\]:/g) || []).length;
+    const kept   = (src.match(/lastNoted = next\[GEO_LAST\]/g) || []).length;
+    ok(writes === 4 && kept === 1,
+       'every geoLast write still goes through the one commit() that maintains it',
+       writes + ' write site(s), ' + kept + ' place keeping it');
+}
 
 // ════════════════════════════════════════════════════════════════════
 //  THE REPORT: "app e jokhon kono country te connected thakchena tokhon brave
@@ -1483,6 +1608,106 @@ ok(!seen(/^tabs\.reload/).length,
    'and four failed reconnects later, still nothing -- onclose fires every couple of ' +
    'seconds for as long as the app stays shut, and none of them may become a reload loop',
    shown());
+
+// ════════════════════════════════════════════════════════════════════
+//  THE REPORT, two photographs of the same gap:
+//
+//    Chrome  -- connect, then open Maps: it comes up at COUNTRY zoom
+//               (/@35.7560701,51.3624251,7z in the screenshot) and only lands on
+//               the city after a "Your Location" click.
+//    Brave   -- the first two switches moved the map, the third one did not: the
+//               app said Norway and the URL still read /@48.2091687,16.3729614,
+//               which is Vienna, two switches back.
+//
+//  Neither is a delivery failure. .build/probe-ext-storage.js read every
+//  browser's own copy of chrome.storage.local off disk: all three had EVERY
+//  switch, in order, stamps within ~40 ms of each other. What both photographs
+//  show is a Maps URL that was NOT OPEN at switch time -- typed, autocompleted,
+//  bookmarked or restored -- and the switch-time sweep above only ever reaches
+//  tabs that exist when it runs. With no pin Maps centres on the requesting IP
+//  and gives country zoom; with a stale pin it obeys the stale pin. Both are
+//  fixed at navigation time instead, by mapsNavFix().
+//
+//  The line this must not cross is the one the blocking build crossed: a pin the
+//  USER chose has to survive, or no other country on earth is browsable.
+fireTimers('t');
+await drain();
+mark();
+STORE.geoSeen = undefined;
+STORE.geoLast = undefined;
+STORE.geoOrigins = undefined;
+await sync(LU, 'lu');
+await sync(JP, 'jp');
+await sync(NL, 'nl');
+
+console.log('\n── the pin on a navigation, not just on a switch ──');
+ok(Array.isArray(STORE.geoSeen) && STORE.geoSeen.map(p => p.cc).join(',') === 'LU,JP,NL',
+   'every country this browser has been told is remembered, oldest first -- one previous ' +
+   'country is not enough, because a bookmark can be older than that',
+   JSON.stringify(STORE.geoSeen));
+
+mark();
+await navigate(81, 'https://www.google.com/maps/@49.6116,6.1319,13.76z');
+ok(seen(/^tabs\.update:81:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,13\.76z$/).length === 1,
+   "a Maps URL opened AFTER the switch, carrying a pin from a country this browser was on " +
+   'two switches ago, is corrected to the country the app is on now -- this is the Brave ' +
+   'photograph, and no switch would ever have come along to fix it', shown());
+ok(seen(/^tabs\.update:81/)[0].endsWith(',13.76z'),
+   "and it keeps the zoom it was opened with: only the centre was wrong", shown());
+
+mark();
+await navigate(82, 'https://www.google.com/maps');
+ok(seen(/^tabs\.update:82:https:\/\/www\.google\.com\/maps\/@52\.3676,4\.9041,12z$/).length === 1,
+   'a bare /maps with no pin at all is given one at city zoom -- with no pin Maps centres ' +
+   'on the requesting IP, which is the 7z country view in the Chrome photograph', shown());
+
+mark();
+await navigate(83, 'https://www.google.com/maps/@-33.8688,151.2093,12z');
+ok(!seen(/^tabs\.update:83/).length,
+   'a pin on a country this browser has NEVER been on is a place the user went to ' +
+   'themselves, and it is left exactly where it is -- dragging Sydney back to Amsterdam ' +
+   'would make every other country on earth unbrowsable', shown());
+
+mark();
+await navigate(84, 'https://www.google.com/maps/@52.3676,4.9041,12z');
+ok(!seen(/^tabs\.update:84/).length,
+   'a pin already at the connected country is left alone, so opening the URL this fix ' +
+   'just wrote does not rewrite it again -- that is the loop this could have become',
+   shown());
+
+mark();
+await navigate(85, 'https://www.google.com/maps/@52.3701,4.9019,12.5z');
+ok(!seen(/^tabs\.update:85/).length,
+   "and neither does Maps' own settle drift: it rewrites the URL by a thousandth of a " +
+   'degree once the map has rendered, and a tighter tolerance would fight it for ever',
+   shown());
+
+mark();
+await navigate(86, 'https://www.google.com/maps/place/Foo/@49.6116,6.1319,17z/data=!3m1');
+ok(seen(/^tabs\.update:86:https:\/\/www\.google\.com\/maps\/place\/Foo\/@52\.3676,4\.9041,17z\/data=!3m1$/).length === 1,
+   'a deeper /maps/place/.../@.../data=... URL is corrected too, place segment and data ' +
+   'segment intact -- it goes through the same repinMaps() the switch sweep uses', shown());
+
+mark();
+await navigate(87, 'https://www.google.com/maps/dir/A/B');
+ok(!seen(/^tabs\.update:87/).length,
+   'but a deeper shape with NO pin gets nothing added: only the bare entry point is safe ' +
+   'to build a pin into, and a URL Maps cannot parse would be a worse bug', shown());
+
+mark();
+await navigate(88, 'https://mail.google.com/mail/u/0/#inbox');
+await navigate(89, 'https://www.google.com/search?q=maps');
+ok(!seen(/^tabs\.update:8[89]/).length,
+   'nothing outside /maps is touched -- not the mail, not a search that merely says maps',
+   shown());
+
+mark();
+await sync(null, null);
+await navigate(90, 'https://www.google.com/maps/@49.6116,6.1319,12z');
+await navigate(91, 'https://www.google.com/maps');
+ok(!seen(/^tabs\.update:9[01]/).length,
+   'and with the app disconnected NOTHING is rewritten: there is no country to point at, ' +
+   'and inventing one would be the fake this project does not ship', shown());
 
 // ════════════════════════════════════════════════════════════════════
 console.log(`\n${pass}/${pass + fail} checks passed`);

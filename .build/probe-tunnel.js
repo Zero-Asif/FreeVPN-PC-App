@@ -10,7 +10,7 @@
 //  routes, so the machine's networking is never taken over by this probe.
 'use strict';
 const path = require('path');
-const { execFileSync, execFile } = require('child_process');
+const { execFileSync, execFile, spawnSync } = require('child_process');
 const { Tunnel, TUN_NAME, TUN_ADDR, TUN_ROUTES } = require('../lib/tunnel.js');
 
 const log = {
@@ -107,6 +107,62 @@ const check = (name, cond, extra) => {
           TUN_ROUTES.length === 2 && TUN_ROUTES.join(',') === '0.0.0.0/1,128.0.0.0/1',
           TUN_ROUTES.join(' '));
 
+    //  6b. every flag in that argv must be one this binary accepts. tun2socks
+    //  parses with spf13/pflag: a single dash is a shorthand CLUSTER, so
+    //  `-device` silently becomes `-d evice` and `-proxy` becomes `-p roxy` --
+    //  an adapter under the wrong name and a proxy address of "roxy". It ran
+    //  that way for a whole release. This reads the accepted names out of
+    //  --help instead of trusting a literal.
+    //  --help exits 0 but writes to stderr, so both streams are read.
+    const h = spawnSync(T.exePath, ['--help'],
+                        { encoding: 'utf8', windowsHide: true });
+    const help = String((h && h.stdout) || '') + String((h && h.stderr) || '');
+    const longs = new Set(), shorts = new Set();
+    for (const m of help.matchAll(/^\s*(?:-([a-zA-Z]), )?--([a-z-]+)/gm)) {
+        if (m[1]) shorts.add(m[1]);
+        longs.add(m[2]);
+    }
+    check('--help lists the flags this probe validates against',
+          longs.has('device') && longs.has('proxy') && longs.has('loglevel'),
+          longs.size + ' long flags');
+
+    const src = require('fs').readFileSync(
+        path.join(__dirname, '..', 'lib', 'tunnel.js'), 'utf8');
+    const block = /const args = \[([\s\S]*?)\];/.exec(src);
+    check('found the tun2socks argv in lib/tunnel.js', !!block);
+    const flags = block ? [...block[1].matchAll(/'(-{1,2}[a-z-]+)'/g)].map(m => m[1]) : [];
+    check('  ...and it passes at least the three flags that matter',
+          flags.length >= 3, flags.join(' '));
+    for (const f of flags) {
+        const ok = f.startsWith('--') ? longs.has(f.slice(2))
+                                      : (f.length === 2 && shorts.has(f[1]));
+        check('  ' + f + ' is a flag tun2socks accepts', ok);
+    }
+
+    //  The mechanism itself, in the binary we ship: one dash is not the long form.
+    let oneDash = true;
+    try { execFileSync(T.exePath, ['-version'], { stdio: 'ignore', windowsHide: true }); }
+    catch (e) { oneDash = false; }
+    check('this binary REJECTS -version and accepts --version', !oneDash,
+          oneDash ? 'single-dash long flags parse -- the cluster bug cannot be detected this way'
+                  : 'rejected, as pflag does');
+
+    //  And the exact shape of the bug, because "it fails" and "it succeeds at the
+    //  wrong thing" need different fixes and only one of them is silent.
+    //  `d` and `p` ARE shorthands here, so `-device` does not error -- it parses as
+    //  `-d evice` and the adapter is created under the name "evice", while
+    //  `-proxy` becomes a proxy address of "roxy". Measured: `-device tun://X` on
+    //  its own gets all the way to "empty proxy", which it could only reach by
+    //  having accepted a device name.
+    check('  -d and -p are real shorthands, which is WHY one dash is silent',
+          shorts.has('d') && shorts.has('p'), [...shorts].join(''));
+    const cluster = spawnSync(T.exePath, ['-device', `tun://${TUN_NAME}`],
+                              { encoding: 'utf8', windowsHide: true, timeout: 8000 });
+    const said = String(cluster.stdout || '') + String(cluster.stderr || '');
+    check('  -device is read as -d evice: it takes the name and fails later, on the proxy',
+          /empty proxy/.test(said) && !/unknown shorthand/.test(said),
+          said.replace(/\s+/g, ' ').slice(0, 90));
+
     // 7. refuse-to-pretend path: a build with no binaries must say so
     const T2 = new Tunnel({ Logger: log, binDir: path.join(__dirname, 'no-such-dir') });
     const a2 = T2.isAvailable();
@@ -134,7 +190,7 @@ const check = (name, cond, extra) => {
 async function liveAdapterOnly() {
     const { spawn } = require('child_process');
     const proc = spawn(T.exePath,
-        ['-device', 'tun://' + TUN_NAME, '-proxy', 'socks5://127.0.0.1:9050',
+        ['--device', 'tun://' + TUN_NAME, '--proxy', 'socks5://127.0.0.1:9050',
          '--loglevel', 'warn'],
         { cwd: binDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';

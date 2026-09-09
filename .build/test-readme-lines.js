@@ -1,6 +1,6 @@
 'use strict';
 // ════════════════════════════════════════════════════════════════════
-//  .build/probe-readme-lines.js
+//  .build/test-readme-lines.js
 //
 //  README points into the source BY LINE NUMBER, in three dozen places:
 //
@@ -33,7 +33,14 @@
 //  that decide whether an SVG parses at all, because a comment in a picture is
 //  where a dash gets typed and XML rejects the file for it.
 //
-//  Run:  node .build/probe-readme-lines.js
+//  WHY IT IS test-* AND NOT probe-*
+//  It was a probe, and a probe is not in run-offline.js's SUITES, so nothing ran
+//  it. MEASURED the first time it was run again: 24 stale references and three
+//  stale counts had accumulated silently. It reads only files in this repository,
+//  so it is deterministic and offline -- a suite. Under a test-* name test-vendor.js
+//  will not let it drop out of the gate again.
+//
+//  Run:  node .build/test-readme-lines.js
 // ════════════════════════════════════════════════════════════════════
 const fs   = require('fs');
 const path = require('path');
@@ -51,7 +58,7 @@ const MAIN   = src('main.js');
 const REND   = src('renderer.js');
 const at     = (lines, n) => (lines[n - 1] || '').trim();
 
-console.log('=== probe-readme-lines ===\n');
+console.log('=== test-readme-lines ===\n');
 
 // ── 1. the IPC table ────────────────────────────────────────────────
 console.log('-- 1. every channel row points at that channel\'s handler --');
@@ -123,9 +130,15 @@ console.log('\n-- 3. and the ones the prose names rather than tabulates --');
 const NAMED = [
     ['main.js',     /GEO_COORDS` at\s*\n?\[`main\.js:(\d+)`\]/,      MAIN, /^const GEO_COORDS = \{$/,
      'the GEO_COORDS declaration, which the 74-country badge is counted from'],
-    ['main.js',     /`startupCleanup\(\)` at \[`main\.js:(\d+)`\]/,  MAIN, /^function startupCleanup\(\) \{$/,
+    //  `async` and the indent are both legitimate here -- startupCleanup() awaits
+    //  a firewall read and lives inside runAdminApp() -- so the modifier is
+    //  optional in both patterns. Pinning the exact signature turned this line red
+    //  for a change it was never written to catch.
+    ['main.js',     /`startupCleanup\(\)` at \[`main\.js:(\d+)`\]/,  MAIN,
+     /^(?:async\s+)?function startupCleanup\(\)\s*\{$/,
      'the startupCleanup() declaration'],
-    ['main.js',     /called from\s*\n?\[`main\.js:(\d+)`\]/,         MAIN, /^startupCleanup\(\);$/,
+    ['main.js',     /called from\s*\n?\[`main\.js:(\d+)`\]/,         MAIN,
+     /^(?:await\s+)?startupCleanup\(\);$/,
      'the one place that calls it'],
     ['renderer.js', /\[`renderer\.js:(\d+)`\]/,                      REND, /Nothing is connected right now/,
      'the default footer this app had to stop using for one ask'],

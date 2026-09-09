@@ -16,7 +16,7 @@
   <img src="docs/media/badges/telemetry.svg" alt="telemetry none">
   <img src="docs/media/badges/accounts.svg" alt="sign-up not required">
   <img src="docs/media/badges/admin.svg" alt="runs as administrator">
-  <img src="docs/media/badges/probes.svg" alt="probe suite 126 scripts">
+  <img src="docs/media/badges/probes.svg" alt="probe suite 159 scripts">
 </p>
 
 <h3 align="center">Pick a country. Everything on this PC comes out there — including where the web thinks you are standing.</h3>
@@ -820,7 +820,7 @@ the flag set and the Visual C++ redistributable.
 
 ### The probe suite
 
-`.build/` holds **126** scripts named `test-*` or `probe-*`. They are not unit
+`.build/` holds **159** scripts named `test-*` or `probe-*`. They are not unit
 tests and there is no framework. Each one drives the real thing — the real
 registry, a real browser profile, the real `tor.exe`, the real uninstall sweep —
 and then reads the result back out of the machine, because that is the only kind
@@ -852,23 +852,23 @@ why.
 
 | Channel | Does |
 |---|---|
-| `connect-vpn` | [`main.js:5973`](main.js#L5973) — connect to a country, with the split-tunnel list |
-| `switch-vpn` | [`main.js:6222`](main.js#L6222) — change country **without** dropping the tunnel |
-| `disconnect-vpn` | [`main.js:5997`](main.js#L5997) — tear down, or hold the block if the kill switch is armed |
-| `toggle-killswitch` | [`main.js:6089`](main.js#L6089) — arm or release the lock |
-| `update-live-bypass` | [`main.js:6209`](main.js#L6209) — rewrite `ProxyOverride` only, live |
-| `get-realtime-status` | [`main.js:5908`](main.js#L5908) — the country table, exit counts and bandwidth |
-| `get-geo-coords` | [`main.js:3399`](main.js#L3399) — the coordinate table the spoof reads from |
-| `get-home-location` | [`main.js:3417`](main.js#L3417) — where the idle globe centres |
-| `report-killswitch` | [`main.js:3437`](main.js#L3437) — the renderer telling the main process what it shows |
-| `get-pending-ask` / `ask-user-answer` | [`2512`](main.js#L2512) / [`2503`](main.js#L2503) — the question, and your answer to it |
-| `get-log-lines` | [`main.js:3295`](main.js#L3295) — the tail behind the log viewer, with the level filter |
-| `open-log-folder` | [`main.js:3298`](main.js#L3298) — Explorer, at the log directory |
-| `open-geo-ext-folder` | [`main.js:3302`](main.js#L3302) — the staged extension and `HOW-TO-ENABLE.txt` |
-| `get-pending-restart` | [`main.js:3355`](main.js#L3355) — the marker the installer may have left, read once |
-| `dismiss-pending-restart` | [`main.js:3363`](main.js#L3363) — *Later*, and it stays later |
-| `restart-windows` | [`main.js:3368`](main.js#L3368) — *Restart now*, and only ever from that click |
-| `get-fastest-server` | [`main.js:3332`](main.js#L3332) — ranks the exit-capacity table by advertised exit bandwidth. Not a speed test, and it says so: `measured: false`, plus `best: null` when no relay list has arrived |
+| `connect-vpn` | [`main.js:6284`](main.js#L6284) — connect to a country, with the split-tunnel list |
+| `switch-vpn` | [`main.js:6533`](main.js#L6533) — change country **without** dropping the tunnel |
+| `disconnect-vpn` | [`main.js:6308`](main.js#L6308) — tear down, or hold the block if the kill switch is armed |
+| `toggle-killswitch` | [`main.js:6400`](main.js#L6400) — arm or release the lock |
+| `update-live-bypass` | [`main.js:6520`](main.js#L6520) — rewrite `ProxyOverride` only, live |
+| `get-realtime-status` | [`main.js:6213`](main.js#L6213) — the country table, exit counts and bandwidth |
+| `get-geo-coords` | [`main.js:3681`](main.js#L3681) — the coordinate table the spoof reads from |
+| `get-home-location` | [`main.js:3699`](main.js#L3699) — where the idle globe centres |
+| `report-killswitch` | [`main.js:3719`](main.js#L3719) — the renderer telling the main process what it shows |
+| `get-pending-ask` / `ask-user-answer` | [`2661`](main.js#L2661) / [`2652`](main.js#L2652) — the question, and your answer to it |
+| `get-log-lines` | [`main.js:3577`](main.js#L3577) — the tail behind the log viewer, with the level filter |
+| `open-log-folder` | [`main.js:3580`](main.js#L3580) — Explorer, at the log directory |
+| `open-geo-ext-folder` | [`main.js:3584`](main.js#L3584) — the staged extension and `HOW-TO-ENABLE.txt` |
+| `get-pending-restart` | [`main.js:3637`](main.js#L3637) — the marker the installer may have left, read once |
+| `dismiss-pending-restart` | [`main.js:3645`](main.js#L3645) — *Later*, and it stays later |
+| `restart-windows` | [`main.js:3650`](main.js#L3650) — *Restart now*, and only ever from that click |
+| `get-fastest-server` | [`main.js:3614`](main.js#L3614) — ranks the exit-capacity table by advertised exit bandwidth. Not a speed test, and it says so: `measured: false`, plus `best: null` when no relay list has arrived |
 
 </details>
 
@@ -927,6 +927,8 @@ index.html  style.css     the one window
 globe-controller.js       the globe, on three.js + globe.gl
 installer.nsh             NSIS hooks — and not one browser-specific registry path
 lib/
+  containment.js          default-deny: nothing but Tor's own path leaves the PC
+  tunnel.js               the Wintun full-tunnel, and pulling its routes back
   browsers.js             the 14 browsers, and how to find them on this PC
   geo-ext.js              the four extension routes, written and read back
   geo-spoof.js            the coverage table this README's diagram is drawn from
@@ -939,11 +941,12 @@ lib/
   socks-fetch.js          asking a question *through* the circuit
   home-location.js        the idle globe's "you are here"
   offthread.js            keeping the window responsive during a cold connect
+  state-dir.js            the ProgramData state directory, and the ACL on it
 Extension/                the bundled MV3 extension
 Extension-Store/          the same extension, packaged for store submission
 Tor/                      tor.exe 0.4.9.6 and lyrebird.exe, as shipped
 docs/media/               every image on this page, and the script that made it
-.build/                   126 probes, the screenshot harnesses, the art gate
+.build/                   159 probes, the screenshot harnesses, the art gate
 ```
 
 </details>
@@ -1018,8 +1021,8 @@ and what the code now does.
 
 | Where | What was wrong | What ships in 2.0.5 |
 |---|---|---|
-| [`main.js:3332`](main.js#L3332) | `get-fastest-server` returned `{ best: 'sg', others: ['hk','jp'] }` unconditionally, and the dropdown painted a `BEST` badge from it. **Nothing was timed.** Nothing can be, either: Tor exit throughput is not rankable from a sample — measured, within-relay spread matches between-relay spread, so onionoo's own order is already as good as this can get. | It ranks the same exit-capacity table the dropdown is sorted by — total advertised exit bandwidth, which relay operators publish and the consensus weighs — returns `best: null` before any relay list has arrived, so an unknown answer paints no badge instead of a wrong one, and carries `measured: false`. The badge's tooltip says "not a speed test" in as many words. |
-| [`main.js:4638`](main.js#L4638) | the "your country is available again" ask passed no `foot`, so [`renderer.js:749`](renderer.js#L749) fell back to the idle line — the footer read *"Nothing is connected right now…"* directly under a body that says *"You are currently connected through India."* Visible in `09-comes-back.png`. | That ask is the only question this app raises **while the tunnel is carrying traffic**, so it is the one that must not take the default footer. It now sends its own: *"You stay connected through … while this question is up, and nothing changes until you answer it."* The other two choice cards keep the default, which is true of them — both are up because a connect failed. |
+| [`main.js:3614`](main.js#L3614) | `get-fastest-server` returned `{ best: 'sg', others: ['hk','jp'] }` unconditionally, and the dropdown painted a `BEST` badge from it. **Nothing was timed.** Nothing can be, either: Tor exit throughput is not rankable from a sample — measured, within-relay spread matches between-relay spread, so onionoo's own order is already as good as this can get. | It ranks the same exit-capacity table the dropdown is sorted by — total advertised exit bandwidth, which relay operators publish and the consensus weighs — returns `best: null` before any relay list has arrived, so an unknown answer paints no badge instead of a wrong one, and carries `measured: false`. The badge's tooltip says "not a speed test" in as many words. |
+| [`main.js:4920`](main.js#L4920) | the "your country is available again" ask passed no `foot`, so [`renderer.js:794`](renderer.js#L794) fell back to the idle line — the footer read *"Nothing is connected right now…"* directly under a body that says *"You are currently connected through India."* Visible in `09-comes-back.png`. | That ask is the only question this app raises **while the tunnel is carrying traffic**, so it is the one that must not take the default footer. It now sends its own: *"You stay connected through … while this question is up, and nothing changes until you answer it."* The other two choice cards keep the default, which is true of them — both are up because a connect failed. |
 | [`Extension/welcome.html:157`](Extension/welcome.html#L157) | `ol.steps li b { display: block; }` also matched the inline `<b>FreeProxy VPN Extension</b>` on line 257, so a full stop ended up alone on its own line. Visible in `30-welcome.png`. | `ol.steps li > b:first-child`. The child combinator also keeps the rule off any nested markup added later, and a leading text node does not count for `:first-child`, so each step's bold lead line still gets its own row. |
 
 <p align="center"><img src="docs/media/divider.svg" alt="" width="100%"></p>
@@ -1146,8 +1149,8 @@ without disconnecting. See
 
 Everything it changed is written to a journal *before* it changes it, so the next
 start knows exactly what to put back rather than guessing at defaults.
-`startupCleanup()` at [`main.js:1132`](main.js#L1132), called from
-[`main.js:3210`](main.js#L3210), kills any stale `tor.exe`, restores the recorded
+`startupCleanup()` at [`main.js:1260`](main.js#L1260), called from
+[`main.js:3477`](main.js#L3477), kills any stale `tor.exe`, restores the recorded
 location setting, removes the proxy, clears the DNS pins, drops the IPv6 and DNS
 firewall rules and restarts `dnscache`. If it finds no journal it still reverts
 all of that — it simply will not touch your location setting, because forcing

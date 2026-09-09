@@ -94,29 +94,51 @@ function readFromArtifact(rel) {
     return { where: 'nowhere', missing: rel };
 }
 
-//  Every file this working tree has modified or added, per git status. If one of
-//  these is stale in the artifact, an end-to-end test of it is testing the old
-//  code and will be believed.
-const CHANGED = [
-    'main.js', 'renderer.js', 'index.html', 'globe-controller.js',
-    'lib/exit-selector.js', 'lib/geo-ext.js', 'lib/installer-tasks.js',
-    'lib/socks-fetch.js', 'lib/tor-control.js', 'lib/offthread.js',
-    'lib/ext-deliver.js',
-    'Extension/background.js', 'Extension/geo-bridge.js', 'Extension/geo-spoof.js',
-    'Extension/manifest.json',
-];
-//  installer.nsh is modified too and is deliberately NOT here: NSIS consumes it
-//  while building the installer, so it is never part of the payload. Listing it
-//  would report "nowhere" for ever and teach a reader to skip the failures.
+//  git decides what changed, not a list in here. The hand-written list this
+//  replaced still named the PREVIOUS round's files, so lib/tunnel.js -- the fix
+//  this round is about -- was never read back out of the artifact at all, and
+//  34/34 said otherwise.
+const NOT_PACKAGED = {
+    '.build/':          'suites and probes are not shipped',
+    'Extension-Store/': 'the Edge submission copy; build-zip.js packages that one',
+    'installer.nsh':    'NSIS consumes it while building, so it is never in the payload',
+    '.gitignore':       'repository metadata',
+    'package-lock.json': 'npm metadata',
+};
+//  package.json IS packaged but is rewritten by the packer, so it cannot be
+//  byte-compared. The field check below is its check.
+const REWRITTEN = ['package.json'];
+
+const CHANGED = require('child_process')
+    .execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' })
+    .split(/\r?\n/)
+    .filter(l => l.length > 3 && l[0] !== 'D' && l[1] !== 'D')
+    .map(l => l.slice(3).trim().replace(/^"|"$/g, ''))
+    .map(f => f.includes(' -> ') ? f.split(' -> ').pop() : f)
+    .filter(f => !f.endsWith('/'));
+const exempt  = f => Object.keys(NOT_PACKAGED).find(p => f.startsWith(p));
+const payload = CHANGED.filter(f => !exempt(f) && !REWRITTEN.includes(f));
+const skipped = CHANGED.filter(f => exempt(f));
 
 console.log('── every changed source file, read back out of the artifact ──');
-for (const rel of CHANGED) {
+ok(CHANGED.length > 0 && payload.length > 0,
+   `git names ${CHANGED.length} changed files, ${payload.length} of them payload`,
+   CHANGED.join(' '));
+for (const rel of payload) {
     const src = fs.readFileSync(path.join(ROOT, rel));
     const got = readFromArtifact(rel);
     if (!got.buf) { ok(false, `${rel} is in the artifact`, `not found (${got.where}) ${got.missing || ''}`); continue; }
     ok(src.equals(got.buf),
        `${rel} matches source byte for byte (${got.where}, ${got.buf.length} B)`,
        `source ${src.length} B vs artifact ${got.buf.length} B in the ${got.where}`);
+}
+
+//  An exemption nothing tests is a hole of its own, so each one is asserted
+//  absent rather than skipped in silence.
+for (const rel of skipped) {
+    const got = readFromArtifact(rel);
+    ok(!got.buf, `${rel} is correctly not in the payload -- ${NOT_PACKAGED[exempt(rel)]}`,
+       `found it in the ${got.where}`);
 }
 
 //  package.json is deliberately NOT byte-compared: electron-builder rewrites it,
@@ -191,6 +213,29 @@ const NAMED = [
     ['main.js', 'userDataFallback',
      'the loud userData fallback -- the silent one shipped a build that looked fine ' +
      'and could not find its own state'],
+
+    //  Photo 1 -- connected to NL and Maps still centred on the real position.
+    ['Extension/geo-spoof.js', 'appOff === true',
+     'the leak itself: "off" now has to be SAID, and only that record may hand a ' +
+     'page to Chromium\'s own provider. A bare {active:false} used to mean off by ' +
+     'absence, which is what put the device\'s real location on the map'],
+    ['Extension/geo-spoof.js', 'FRESH_MS',
+     'and an "off" older than the window is not trusted -- a stale one answers ' +
+     'POSITION_UNAVAILABLE instead of delegating'],
+    ['Extension/background.js', 'appOff: true',
+     'the only writer of that record, and it writes it after connected is cleared'],
+    ['Extension/background.js', 'stamp',
+     'every record carries the moment it was written, which is what makes staleness ' +
+     'a thing a page can measure'],
+
+    //  Photo 2 -- "the Wintun adapter never appeared" beside "Your real IP, DNS &
+    //  GPS are hidden".
+    ['renderer.js', 'function scopeNote',
+     'the toast now states its own scope, so a failed tunnel cannot be announced ' +
+     'as whole-device cover'],
+    ['lib/tunnel.js', "'--device'",
+     'two dashes. pflag read the old -device as -d evice and created the adapter ' +
+     'under that name; lib/tunnel.js waited for FreeProxyTun, which never came'],
 ];
 
 console.log('\n── and the fixes are in it by name, not just by size ──');
@@ -199,6 +244,18 @@ for (const [rel, needle, why] of NAMED) {
     const text = got.buf ? got.buf.toString('utf8') : '';
     const n = text.split(needle).length - 1;
     ok(n > 0, `${rel}: ${why}`, `"${needle}" appears ${n} times in the ${got.where} copy`);
+}
+
+//  The screenshot's sentence, which had to LEAVE. Comments stripped first: the
+//  fixed renderer quotes it while explaining why it is gone, and a plain grep
+//  reads that explanation as the bug.
+{
+    const { stripComments } = require('./srcstrip.js');
+    const got = readFromArtifact('renderer.js');
+    const code = stripComments(got.buf ? got.buf.toString('utf8') : '');
+    ok(got.buf && !/real IP, DNS &(amp;)? GPS are hidden/.test(code),
+       'renderer.js: the shipped sentence from photo 2 is in no branch of the artifact',
+       'still there -- the payload predates the fix');
 }
 
 fs.closeSync(fd);

@@ -89,7 +89,35 @@ function resolveExit(resp, fallbackCode) {
         //  they are talking to -- and main.js:3292 has been returning it all
         //  along with nothing on this side reading it. See announceExit().
         ip:        ipv4Only(resp && resp.exitIp),
+        //  What the whole-machine layers actually did on THIS connect. The toast
+        //  used to promise "your real IP, DNS & GPS are hidden" whatever these
+        //  said -- including on the connect that also reported the full-device
+        //  tunnel failing, in the same window, at the same time.
+        fullTunnel:   !!(resp && resp.fullTunnel),
+        tunnelOff:    !!(resp && resp.tunnelOff),
+        tunnelReason: (resp && typeof resp.tunnelReason === 'string') ? resp.tunnelReason : '',
+        contained:    !!(resp && resp.contained),
     };
+}
+
+//  One sentence about what this connect covers, built from what main.js
+//  reported rather than from what the app hopes. Browsers are covered either
+//  way -- the proxy pref and the policy are written before this runs -- so the
+//  difference is only ever about the rest of the machine.
+function scopeNote(x) {
+    if (x.fullTunnel) {
+        return ' Every program on this PC is going through Tor now' +
+               (x.contained ? ', and anything outside the tunnel is blocked' : '') +
+               '. Your real IP and DNS are not on the wire.';
+    }
+    if (x.tunnelOff) {
+        return ' Browsers and proxy-aware programs are on Tor. The full-device tunnel is ' +
+               'off in settings, so programs that ignore the system proxy still use your ' +
+               'real connection.';
+    }
+    return ' Browsers and proxy-aware programs are on Tor, but the full-device tunnel did ' +
+           'NOT start, so programs that ignore the system proxy still use your real ' +
+           'connection.';
 }
 
 //  One place that decides what the user is told after a successful
@@ -129,10 +157,15 @@ function announceExit(x, verb) {
     //  country than the IPv4 exit.
     const ipNote = x.ip ? ' Exit IPv4 <strong>' + x.ip + '</strong>.' : '';
 
+    //  Appended only when there IS a gap. A warning toast that leaves the
+    //  machine's scope out is the same over-claim as the success one making a
+    //  promise about it -- the user reads "connected" and assumes everything.
+    const gapNote = x.fullTunnel ? '' : '<br><small>' + scopeNote(x).trim() + '</small>';
+
     if (x.moved) {
         showToast('<strong>' + x.askedName + '</strong> had no confirmed exit right now, so you are ' +
                   verb + ' via <strong>' + x.name + '</strong> instead. That is the country your ' +
-                  'IP and location will show.' + ipNote + dnsNote, 'warning', 9000);
+                  'IP and location will show.' + ipNote + dnsNote + gapNote, 'warning', 9000);
     } else if (x.unverified) {
         //  Deliberately no longer "worth confirming at ipleak.net": that site's
         //  IPv4 row is the one measured above as unable to answer inside its own
@@ -140,16 +173,21 @@ function announceExit(x, verb) {
         showToast(Verb + ' via <strong>' + x.name + '</strong>, but the exit country could not be ' +
                   'double-checked -- no geolocation service answered through Tor. ' +
                   'Open <strong>ipinfo.io</strong> in your browser to see the exit address ' +
-                  'yourself.' + dnsNote, 'warning', 9000);
+                  'yourself.' + dnsNote + gapNote, 'warning', 9000);
     } else if (x.dnsLeaky) {
         showToast(Verb + ' via <strong>' + x.name + '</strong>.' + ipNote + ' DNS port 53 was already ' +
                   'in use, so only browser lookups go through Tor -- other applications will use ' +
-                  'the system resolver.', 'warning', 9000);
+                  'the system resolver.' + gapNote, 'warning', 9000);
     } else {
         //  "Your real IP", not "IP": the line above it now prints an address, and
         //  "Exit IPv4 1.2.3.4. IP hidden." reads as a contradiction of itself.
+        //  GPS is deliberately NOT claimed here. This toast fires the moment the
+        //  tunnel is up, before any browser has confirmed what its extension is
+        //  holding, and the app has no way to know at this instant. The location
+        //  toast that follows says what it is actually about, and the log line
+        //  "Location coverage --" counts the browsers that confirmed.
         showToast('<strong>' + Verb + '!</strong> Routed via ' + x.name + '.' + ipNote +
-                  ' Your real IP, DNS &amp; GPS are hidden.', 'success', 6000);
+                  scopeNote(x), 'success', 6000);
     }
 }
 
@@ -287,7 +325,14 @@ function restoreGeolocation() {
 // ════════════════════════════════════════════════════════════
 ipcRenderer.on('geo-spoof-on', (event, { lat, lng, accuracy, city, country }) => {
     spoofGeolocation(lat, lng, accuracy, city, country);
-    showToast(`📍 Location spoofed → <strong>${city}, ${country}</strong>`, 'success', 5000);
+    //  Names the surface it is actually about. This event spoofs THIS WINDOW's
+    //  navigator.geolocation and nothing else; the browsers are covered by the
+    //  extension, which reports separately and may not have picked the new
+    //  country up yet. Saying "Location spoofed" full stop was read as a
+    //  promise about every browser on the PC -- and one of them was handing out
+    //  the real position at the time.
+    showToast(`📍 This app window's location → <strong>${city}, ${country}</strong>`,
+              'success', 5000);
 });
 
 ipcRenderer.on('geo-spoof-off', () => {

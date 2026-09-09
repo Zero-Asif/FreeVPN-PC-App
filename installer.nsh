@@ -775,10 +775,49 @@
   ;  HOW-TO-ENABLE.txt and the revert journal. The exe cannot delete this from
   ;  --fp-teardown -- it is the tree it is logging into -- so it happens here,
   ;  after the process is gone.
+  ;
+  ;  ONE EXCEPTION, AND IT IS A BUG FIX, NOT A CONVENIENCE.
+  ;  ---------------------------------------------------------------
+  ;  The reported symptom: "duita freeproxy vpn extension install hocche
+  ;  prottekbar" -- two rows in chrome://extensions after every upgrade, one of
+  ;  which has to be enabled by hand.
+  ;
+  ;  The chain, measured with .build/probe-dup-extension.js and
+  ;  .build/probe-stale-ext-id.js: an extension's id IS the hash of its public
+  ;  key (lib/crx.js), electron-builder's upgrade path runs this uninstaller
+  ;  with /S (see section 8 below), and the RMDir underneath takes
+  ;  ext-key.pem with it. So the next install generates a NEW key, which is a
+  ;  NEW id, which every browser correctly treats as a DIFFERENT extension --
+  ;  it installs it alongside the one already there. Worse, ext-restore.json is
+  ;  the only record of what the previous id was, and it goes in the same
+  ;  RMDir, so retireSideload() in lib/geo-ext.js has nothing left to withdraw.
+  ;
+  ;  On an UPGRADE, therefore, those two files are carried across. That is the
+  ;  whole of the fix at this end: the id stops changing, so there is never a
+  ;  second one to install. On a user-initiated uninstall ${Silent} is false and
+  ;  nothing is preserved -- the private key still dies with the app, exactly as
+  ;  the paragraph above requires.
+  ${If} ${Silent}
+    DetailPrint "Upgrade: keeping the extension identity so the browsers do not see a second extension..."
+    CopyFiles /SILENT "C:\ProgramData\freeproxy-vpn\ext-key.pem" "$TEMP\fp-keep-ext-key.pem"
+    CopyFiles /SILENT "C:\ProgramData\freeproxy-vpn\ext-restore.json" "$TEMP\fp-keep-ext-restore.json"
+  ${EndIf}
+
   DetailPrint "Deleting application data..."
   RMDir /r "C:\ProgramData\freeproxy-vpn"
   RMDir /r "$LOCALAPPDATA\FreeProxy VPN"
   RMDir /r "$APPDATA\FreeProxy VPN"
+
+  ;  Put them back, then take them out of TEMP either way -- a private key left
+  ;  in a world-readable temp directory would be a worse defect than the one
+  ;  this fixes, including on the path where the copy back failed.
+  ${If} ${Silent}
+    CreateDirectory "C:\ProgramData\freeproxy-vpn"
+    CopyFiles /SILENT "$TEMP\fp-keep-ext-key.pem" "C:\ProgramData\freeproxy-vpn\ext-key.pem"
+    CopyFiles /SILENT "$TEMP\fp-keep-ext-restore.json" "C:\ProgramData\freeproxy-vpn\ext-restore.json"
+    Delete "$TEMP\fp-keep-ext-key.pem"
+    Delete "$TEMP\fp-keep-ext-restore.json"
+  ${EndIf}
 
   DetailPrint "FreeProxy VPN removed. Proxy, DNS, IPv6, firewall, browser"
   DetailPrint "policy, hosts file, Firefox prefs and location settings are back."

@@ -413,7 +413,61 @@ function geoExt() {
 //  off until the user accepts it. Those two are not spoofing anything yet, and
 //  a report that said they were would be the exact kind of claim this function
 //  exists to avoid.
-function reportGeoCoverage(coord) {
+// ── What the browsers themselves say ────────────────────────────────
+//  An installed, enabled extension is not a spoofing extension. Its service
+//  worker has to be RUNNING and holding an active record, and only the worker
+//  knows that -- so it says so, on the socket it already has, and this is where
+//  those reports are kept. Extension/background.js: reportGeoState().
+//
+//  Keyed by the socket, because that is the only identity available: every
+//  browser is running the same extension id, so a report cannot name its
+//  browser and nothing here pretends otherwise. What it can say honestly is how
+//  many live workers have confirmed the spoof, which is what the log and the
+//  connect toast now use in place of "installed, therefore spoofed".
+//
+//  Every connected extension socket gets an entry, so `size` is the number of
+//  browser profiles talking to the app and the armed ones are a subset of it.
+const geoLive = new Map();
+
+function noteGeoClient(ws) {
+    geoLive.set(ws, { armed: false, cc: '', at: Date.now() });
+}
+
+//  Every extension id that is legitimately ours, for the HELLO check. knownId()
+//  rather than the packaged id alone: a HELLO can arrive before prepare() has
+//  packaged anything, and the journal is what remembers the id across a restart.
+//  Returns empty when nothing is known, and an empty list stands nobody down.
+function ourExtensionIds() {
+    const out = [];
+    try {
+        const e = geoExt();
+        for (const v of [e.knownId(), e.edgeStoreId, e.webstoreId]) {
+            if (typeof v === 'string' && /^[a-p]{32}$/.test(v) && !out.includes(v)) out.push(v);
+        }
+    } catch (err) { /* nothing known yet: refuse nothing */ }
+    return out;
+}
+
+function noteGeoState(ws, d) {
+    geoLive.set(ws, {
+        armed: d.armed === true,
+        cc: typeof d.cc === 'string' ? d.cc.toUpperCase() : '',
+        at: Date.now(),
+    });
+}
+
+//  Confirmations for the country the app is connected to, and only that country:
+//  a worker still holding the previous one is not covering this connection.
+function geoConfirmed(cc) {
+    const want = String(cc || '').toUpperCase();
+    let n = 0;
+    for (const v of geoLive.values()) {
+        if (v.armed && (!want || v.cc === want)) n++;
+    }
+    return n;
+}
+
+function reportGeoCoverage(coord, cc) {
     const s     = geoEngine().status();
     const where = coord ? coord.city : 'the connected country';
 
@@ -451,9 +505,28 @@ function reportGeoCoverage(coord) {
             ? `${geckoHere.join('/')}: installed but NOT spoofed yet`
             : 'Gecko family: not installed';
 
+    //  INSTALLED is not SPOOFING, and conflating the two is what the user's
+    //  screenshot caught: Brave was enabled, counted as covered, and handing
+    //  Google Maps the device's real position because its service worker had
+    //  been evicted and never woken. So the two facts are printed separately --
+    //  what is on disk, from presence(), and what the browsers themselves have
+    //  confirmed over the socket, from geoConfirmed().
+    const live  = geoConfirmed(cc);
+    const talking = geoLive.size;
+    const confirmed = live
+        ? `${live} of ${talking} connected browser profile(s) CONFIRMED the spoof is ` +
+          `armed for ${String(cc || '').toUpperCase() || 'this country'}`
+        : (talking
+            ? `${talking} browser profile(s) are connected but NONE has confirmed the ` +
+              'spoof yet -- an enabled extension whose worker is not running is not ' +
+              'spoofing anything'
+            : 'no browser extension is connected right now, so nothing is confirmed ' +
+              'from the browser side');
+
     Logger.info('Location coverage -- ' +
         `app window: spoofed (${where}); ` +
-        `Chromium (${covered.join('/') || 'none'}): spoofed by the extension; ` +
+        `Chromium (${covered.join('/') || 'none'}): extension installed and enabled; ` +
+        `${confirmed}; ` +
         (pending.length
             ? `Chromium (${pending.join('/')}): extension delivered but switched OFF, ` +
               'so NOT spoofed there yet; ' : '') +
@@ -929,7 +1002,15 @@ function runAdminApp() {
     //      non-zero and is not a failure). The scripts with `for /f` blocks
     //      cannot be chained that way, so those verify by READING BACK the
     //      state they were supposed to produce. Nothing here claims more.
-    function runBat(filePath, content) {
+    //  BOUNDED, and this is the one unbounded wait that was left. Eight .bat
+    //  files run through here -- the WinINET writer, the kill-switch lock, the
+    //  disconnect, the exit -- and every caller awaits the result. cmd.exe
+    //  waiting forever on a `net stop dnscache` against a wedged service, or a
+    //  reg write against a locked hive, is a disconnect that never finishes and
+    //  a quit that never quits: the two "not responding" reports that were not
+    //  the message pump at all. Past the cap the tree is killed and the caller
+    //  gets an honest failure.
+    function runBat(filePath, content, { timeout = 120000 } = {}) {
         // ─────────────────────────────────────────────────────
         //  ROOT CAUSE FIX: exec() path-with-spaces bug
         //
@@ -969,6 +1050,26 @@ function runAdminApp() {
                 windowsHide: true,
                 stdio: 'pipe'
             });
+            let settled = false;
+            const done = r => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(r);
+            };
+            //  cmd.exe is not what hangs -- the netsh/reg/net it started is --
+            //  and proc.kill() reaches only cmd.exe. /T takes the tree.
+            const timer = setTimeout(() => {
+                Logger.error(`bat did not finish within ${Math.round(timeout / 1000)} s ` +
+                             `-- killing it so the app is not left waiting`,
+                             { filePath, out: out.trim().split(/\r?\n/).slice(-4) });
+                try {
+                    spawn('taskkill', ['/F', '/T', '/PID', String(proc.pid)],
+                          { windowsHide: true, stdio: 'ignore', detached: true }).unref();
+                } catch (e) {}
+                try { proc.kill(); } catch (e) {}
+                done({ ok: false, code: -1, out, error: `timed out after ${timeout} ms` });
+            }, timeout);
             proc.stdout?.on('data', d => { out += d.toString(); });
             proc.stderr?.on('data', d => { out += d.toString(); });
             proc.on('exit', (code) => {
@@ -978,23 +1079,23 @@ function runAdminApp() {
                     Logger.debug('bat OK', { filePath });
                     if (tail.length) Logger.debug('bat output', { filePath, out: tail });
                 }
-                resolve({ ok: code === 0, code, out });
+                done({ ok: code === 0, code, out });
             });
             proc.on('error', (err) => {
                 Logger.error(`bat spawn error`, { filePath, err: err.message });
-                resolve({ ok: false, code: -1, out, error: err.message });
+                done({ ok: false, code: -1, out, error: err.message });
             });
         });
     }
 
     //  All-or-nothing, and it names the command that failed. Use ONLY for lists
     //  where every single command is required to succeed.
-    function runBatLines(filePath, lines) {
+    function runBatLines(filePath, lines, opts) {
         const cmds = lines.filter(l => l && !/^@echo off$/i.test(String(l).trim()));
         const body = ['@echo off', 'setlocal'];
         cmds.forEach((c, i) => body.push(`${c} || (echo FP_FAIL_LINE=${i}&exit /b 1)`));
         body.push('echo FP_ALL_OK', 'exit /b 0');
-        return runBat(filePath, body.join('\r\n')).then(r => {
+        return runBat(filePath, body.join('\r\n'), opts).then(r => {
             if (r.ok) return r;
             const m = /FP_FAIL_LINE=(\d+)/.exec(r.out || '');
             const at = m ? Number(m[1]) : null;
@@ -1002,6 +1103,27 @@ function runAdminApp() {
                 command: at !== null ? cmds[at] : null });
             return { ...r, failedIndex: at,
                      failedCommand: at !== null ? cmds[at] : null };
+        });
+    }
+
+    //  ── One command, off the message pump ──
+    //  MEASURED on this machine (.build/probe-uiblock-startup.js, 2026-09-05):
+    //  reg 192 ms, sc 132 ms, schtasks 170 ms, taskkill 272 ms, icacls 149 ms,
+    //  netsh "show rule" 284 ms, netsh advfirewall 868 ms, powershell 629 ms.
+    //  The startup sequence runs 55 of them, so every execSync on that path is
+    //  a window that cannot paint for the length of a process start.
+    //
+    //  execFile with an ARGUMENT ARRAY, not a command string: nothing goes
+    //  through cmd.exe, so a path with a space needs no quoting and a value
+    //  from the UI cannot close a quote and start a second command.
+    function sh(exe, args, { timeout = 30000 } = {}) {
+        return new Promise(resolve => {
+            execFile(exe, args, { windowsHide: true, timeout, maxBuffer: 8 << 20 },
+                     (err, stdout, stderr) => resolve({
+                         ok: !err,
+                         out: String(stdout || '') + String(stderr || ''),
+                         code: err ? (typeof err.code === 'number' ? err.code : -1) : 0,
+                     }));
         });
     }
 
@@ -1129,22 +1251,33 @@ function runAdminApp() {
     }
 
     // ── Startup cleanup ───────────────────────────────────
-    function startupCleanup() {
+    //  ASYNC, and every spawn in it awaited rather than execSync'd. MEASURED
+    //  (.build/probe-uiblock-startup.js, 2026-09-05): this function alone was
+    //  ~20.3 s of blocked thread -- the .bat 14384 ms, the block-policy purge
+    //  5752 ms, taskkill 272 ms, sc 264 ms, the certificate scan 913 ms -- and
+    //  it ran before createWindow(), so the whole of it was time with no window
+    //  on screen to freeze or to paint.
+    async function startupCleanup() {
         Logger.info('Startup cleanup...');
-        try { execSync('taskkill /F /IM tor.exe', { stdio: 'ignore', windowsHide: true }); Logger.debug('Killed stale tor.exe'); } catch(e) {}
+        await sh('taskkill', ['/F', '/IM', 'tor.exe']).then(r => {
+            if (r.ok) Logger.debug('Killed stale tor.exe');
+        });
 
         //  If the app died while connected, everything it changed about
         //  the machine's location is still in place. The journal recorded
         //  what each setting was BEFORE the connection, so this puts them
         //  back exactly rather than guessing at defaults.
         //
-        //  Guarded, and deliberately NOT folded into the big try below,
-        //  because everything after this point -- removing the proxy,
-        //  dropping the IPv6 firewall rules, putting DNS back -- has to run
-        //  even if the journal is unreadable. Defaulting to false errs
-        //  toward handing the location back rather than leaving it off.
+        //  In a child process (30-62 reg calls), and paired there with the
+        //  legacy block-policy purge that used to run further down this
+        //  function -- restoreAll() already performs that purge as its own step
+        //  0, so the two together were the same 5752 ms burst twice on exactly
+        //  the start that had a journal to restore.
+        //
+        //  Defaulting to false errs toward handing the location back rather
+        //  than leaving it off.
         let hadGeoJournal = false;
-        try { hadGeoJournal = geoEngine().restoreLeftovers(); }
+        try { hadGeoJournal = await runGeoStartup(); }
         catch (e) { Logger.warn('Location restore at startup failed: ' + e.message); }
 
         const bat = getScriptPath('fp_startup_clean.bat');
@@ -1226,21 +1359,37 @@ function runAdminApp() {
         ].join('\r\n');
 
         try {
-            fs.writeFileSync(bat, content, 'utf8');
-            // Use cmd.exe with separate arg to handle spaces in path
-            execSync(`cmd.exe /c "${bat}"`, { windowsHide: true, timeout: 15000 });
+            //  runBat, not writeFileSync + execSync: it spawns instead of
+            //  blocking, and it unlinks the target first, so a hard link planted
+            //  at this .bat's name by a local user cannot be written through.
+            //  MEASURED: the 19 commands in it cost ~14384 ms, dominated by the
+            //  Get-NetAdapter/Enable-NetAdapterBinding loop (~4098 ms) and three
+            //  netsh advfirewall calls at ~868 ms each.
+            //
+            //  Raced against a 90 s guard so nothing downstream -- including the
+            //  first connect, which waits on this sequence -- can be held up
+            //  forever by one wedged netsh. cmd.exe is left to finish on its own
+            //  if that fires; the alternative is killing it halfway through the
+            //  lines that hand this machine's internet back.
+            const batRun = runBat(bat, content);
+            const late = await Promise.race([
+                batRun.then(() => null),
+                new Promise(r => setTimeout(() => r('slow'), 90000)),
+            ]);
+            if (late) {
+                Logger.warn('fp_startup_clean.bat is still running after 90 s -- ' +
+                            'carrying on without it. It will finish in the background.');
+            }
             //  Repair a start type an OLD build disabled. Trigger-start
             //  ("demand") is the Windows default, and leaving it disabled
             //  is what makes Settings > Privacy > Location unfixable, so
             //  this half runs unconditionally.
-            try { execSync('sc config lfsvc start= demand', { windowsHide: true, stdio: 'pipe' }); } catch(e) {}
+            await sh('sc', ['config', 'lfsvc', 'start=', 'demand']);
             //  STARTING it is only a legacy net. When a journal was found,
-            //  restoreLeftovers() above already put the service back the way
+            //  runGeoStartup() above already put the service back the way
             //  the user had it, and starting it here as well would switch
             //  Location ON for someone who deliberately keeps it off.
-            if (!hadGeoJournal) {
-                try { execSync('sc start lfsvc', { windowsHide: true, stdio: 'pipe' }); } catch(e) {}
-            }
+            if (!hadGeoJournal) await sh('sc', ['start', 'lfsvc']);
             // Remove stale hosts file entries from previous session
             const hostsPath = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
             try {
@@ -1280,32 +1429,28 @@ function runAdminApp() {
                     "($_.Subject -like '*CN=www.googleapis.com*' -and $_.Subject -eq $_.Issuer) } | " +
                     'Select-Object -ExpandProperty Thumbprint -Unique';
 
-                const listCerts = () => {
-                    try {
-                        return execSync(
-                            `powershell -NoProfile -NonInteractive -Command "${listPs}"`,
-                            { windowsHide: true, timeout: 25000, stdio: 'pipe' })
-                            .toString().split(/\r?\n/).map(x => x.trim())
-                            .filter(x => /^[0-9A-Fa-f]{40}$/.test(x));
-                    } catch (e) { return []; }
+                const listCerts = async () => {
+                    const r = await sh('powershell.exe',
+                        ['-NoProfile', '-NonInteractive', '-Command', listPs],
+                        { timeout: 25000 });
+                    return r.ok ? r.out.split(/\r?\n/).map(x => x.trim())
+                                       .filter(x => /^[0-9A-Fa-f]{40}$/.test(x))
+                                : [];
                 };
 
-                const before = listCerts();
+                const before = await listCerts();
                 for (const tp of before) {
                     for (const st of ['Root', 'My', 'CA']) {
                         //  Machine scope and user scope both, because a
                         //  thumbprint found through the merged view could live
                         //  in either physical store.
-                        for (const scope of [`-f -delstore ${st} ${tp}`,
-                                             `-user -f -delstore ${st} ${tp}`]) {
-                            try {
-                                execSync(`certutil ${scope}`,
-                                    { windowsHide: true, stdio: 'ignore', timeout: 20000 });
-                            } catch (e) { /* not in this store */ }
+                        for (const scope of [['-f', '-delstore', st, tp],
+                                             ['-user', '-f', '-delstore', st, tp]]) {
+                            await sh('certutil', scope, { timeout: 20000 });
                         }
                     }
                 }
-                const left = before.length ? listCerts() : [];
+                const left = before.length ? await listCerts() : [];
 
                 if (!before.length) {
                     Logger.debug('No stale geo-spoof certificates present');
@@ -1334,18 +1479,15 @@ function runAdminApp() {
                     if (fs.existsSync(p)) { fs.unlinkSync(p); Logger.debug('Deleted stale ' + f); }
                 } catch(e) {}
             }
-            //  Drop a geolocation BLOCK policy left behind by an older
-            //  build. BOTH values matter: DefaultGeolocationSetting=2 on
-            //  its own, or the GeolocationBlockedForUrls wildcard on its
-            //  own, is enough to keep every map and "near me" site on this
-            //  machine broken while the VPN is not even running -- and
-            //  because a policy rule outranks the user's own choice, their
-            //  Location control stays greyed out so they cannot fix it
-            //  themselves.
-            //
-            //  Nothing in this app writes those values any more. This is
-            //  pure cleanup, and a no-op once there is nothing to remove.
-            geoEngine().clearBlockingPolicy();
+            //  A geolocation BLOCK policy left behind by an older build is
+            //  dropped by runGeoStartup() at the top of this function now, not
+            //  here. BOTH values matter -- DefaultGeolocationSetting=2 on its
+            //  own, or the GeolocationBlockedForUrls wildcard on its own, keeps
+            //  every map and "near me" site on this machine broken while the VPN
+            //  is not even running, with the user's Location control greyed out
+            //  so they cannot fix it themselves -- but it is 30 reg calls,
+            //  ~5752 ms MEASURED, and it belongs in the child process with the
+            //  journal restore that duplicates it rather than on this thread.
             //  Same for our own force-install entry -- but ONLY when nothing is
             //  left to serve it.
             //
@@ -1388,7 +1530,11 @@ function runAdminApp() {
     }
 
     // ── First-run verification ────────────────────────────
-    function firstRunCheck() {
+    //  ASYNC for the same reason as startupCleanup: fwFix() reads a firewall
+    //  rule back for each of three binaries, and MEASURED that is 284 ms per
+    //  read and 868 ms per write on this machine -- 851 ms clean, 6056 ms when
+    //  all three need rebuilding.
+    async function firstRunCheck() {
         const torExePath = path.join(torDir, 'tor.exe');
         if (!fs.existsSync(torExePath)) {
             Logger.warn('First-run: tor.exe not found', { path: torExePath });
@@ -1415,18 +1561,17 @@ function runAdminApp() {
         //  in it. The path is matched case-insensitively as a plain substring
         //  rather than by parsing the "Program:" label, because that label is
         //  localised and this must work on a Windows that is not in English.
-        const fwFix = (ruleName, exePath, what) => {
+        const fwFix = async (ruleName, exePath, what) => {
             if (!exePath || !fs.existsSync(exePath)) {
                 Logger.debug('Firewall self-heal skipped, no such binary',
                              { rule: ruleName, path: exePath });
                 return;
             }
-            let out = '';
-            try {
-                out = execSync('netsh advfirewall firewall show rule ' +
-                               `name="${ruleName}" verbose`,
-                               { windowsHide: true, encoding: 'utf8' });
-            } catch (e) { out = ''; }          // netsh exits non-zero when absent
+            //  netsh exits non-zero when the rule is absent, and sh() reports
+            //  that without throwing -- the output is what matters either way.
+            const shown = await sh('netsh', ['advfirewall', 'firewall', 'show',
+                                             'rule', `name=${ruleName}`, 'verbose']);
+            const out = shown.ok ? shown.out : '';
             if (out.toLowerCase().includes(exePath.toLowerCase())) {
                 Logger.debug('Firewall rule present and pointing at the right ' +
                              'binary', { rule: ruleName });
@@ -1438,31 +1583,29 @@ function runAdminApp() {
                   'rebuilding it'
                 : 'Firewall rule missing -- adding automatically',
                 { rule: ruleName, shouldBe: exePath });
-            try {
-                //  Delete first: netsh happily keeps two rules under one name,
-                //  and leaving the stale one behind means the machine carries an
-                //  allow rule for a binary in Program Files that this app never
-                //  starts -- which is exactly the leftover being fixed here.
-                try {
-                    execSync(`netsh advfirewall firewall delete rule name="${ruleName}"`,
-                             { windowsHide: true, stdio: 'ignore' });
-                } catch (e) {}
-                execSync(`netsh advfirewall firewall add rule name="${ruleName}" ` +
-                         `dir=out action=allow program="${exePath}" enable=yes ` +
-                         `profile=any description="FreeProxy VPN -- ${what}"`,
-                         { windowsHide: true });
+            //  Delete first: netsh happily keeps two rules under one name,
+            //  and leaving the stale one behind means the machine carries an
+            //  allow rule for a binary in Program Files that this app never
+            //  starts -- which is exactly the leftover being fixed here.
+            await sh('netsh', ['advfirewall', 'firewall', 'delete', 'rule',
+                               `name=${ruleName}`]);
+            const added = await sh('netsh', ['advfirewall', 'firewall', 'add', 'rule',
+                `name=${ruleName}`, 'dir=out', 'action=allow',
+                `program=${exePath}`, 'enable=yes', 'profile=any',
+                `description=FreeProxy VPN -- ${what}`]);
+            if (added.ok) {
                 Logger.success('Firewall rule now names the running binary',
                                { rule: ruleName, program: exePath });
-            } catch (e2) {
+            } else {
                 Logger.warn('Could not repair the firewall rule (dev mode ok)',
-                            { rule: ruleName, err: e2.message });
+                            { rule: ruleName, err: added.out.trim().split(/\r?\n/)[0] });
             }
         };
-        fwFix('FreeProxy Tor Engine', torExePath, 'Tor engine');
-        fwFix('FreeProxy Bridge Transport',
-              path.join(torDir, 'pluggable_transports', 'lyrebird.exe'),
-              'obfs4 bridge transport');
-        fwFix('FreeProxy App', process.execPath, 'application');
+        await fwFix('FreeProxy Tor Engine', torExePath, 'Tor engine');
+        await fwFix('FreeProxy Bridge Transport',
+                    path.join(torDir, 'pluggable_transports', 'lyrebird.exe'),
+                    'obfs4 bridge transport');
+        await fwFix('FreeProxy App', process.execPath, 'application');
 
         //  Self-heal the boot pass, for the same reason and in the same spirit.
         //
@@ -2188,6 +2331,12 @@ function runAdminApp() {
         mainWindow = new BrowserWindow({
             width: 1000, height: 670, resizable: false, autoHideMenuBar: true,
             icon: path.join(__dirname, 'icon.png'),
+            //  The window is shown immediately rather than on ready-to-show, so
+            //  the double-click produces something at once. Without this the
+            //  something is Chromium's default WHITE, for as long as index.html
+            //  and the globe take to paint -- a flash that reads as a slow start
+            //  on a dark app. #0b0d17 is style.css's own body background.
+            backgroundColor: '#0b0d17',
             webPreferences: { nodeIntegration: true, contextIsolation: false }
         });
         mainWindow.loadFile('index.html');
@@ -2700,6 +2849,7 @@ function runAdminApp() {
 
     wss.on('connection', ws => {
         Logger.debug('Extension WS client connected');
+        noteGeoClient(ws);
         ws.send(JSON.stringify({ type: 'STATE_SYNC', state: stateForWire() }));
         ws.on('message', async raw => {
             //  ── Everything below this line came off a socket ──
@@ -2735,6 +2885,56 @@ function runAdminApp() {
             //  goes away, instead of up to 30 s later.
             if (d.command === 'PING') {
                 try { ws.send(JSON.stringify({ type: 'PONG' })); } catch (e) {}
+                return;
+            }
+            //  A copy of the extension saying which copy it is.
+            //
+            //  MEASURED, Chrome's Secure Preferences: three FreeProxy records in
+            //  one profile -- the packed one this app installed (location 6) and
+            //  two location 4 UNPACKED rows whose `path` values are this app's own
+            //  folders, left by builds that passed --load-extension. Chrome loads a
+            //  persisted unpacked row at every start, so each of them connects here
+            //  and acts on every STATE_SYNC: duplicate rows in chrome://extensions,
+            //  and more than one worker clearing browsing data in the same profile.
+            //
+            //  Only this side knows which id it installed, so only this side can
+            //  answer. The test is deliberately narrow -- 'development' AND an id
+            //  that is not one of ours AND a list that positively holds a real id --
+            //  because every other installType is a copy nobody may stand down: a
+            //  store copy is 'normal', a policy copy is 'admin', and an empty id
+            //  list means this app cannot tell yet and must refuse nothing.
+            if (d.command === 'HELLO') {
+                if (typeof d.id !== 'string' || !/^[a-p]{32}$/.test(d.id)) return;
+                if (d.installType !== 'development') return;
+                const ours = ourExtensionIds();
+                if (!ours.length || ours.includes(d.id)) return;
+                Logger.warn('A second copy of the extension is loaded unpacked in a browser ' +
+                            `-- id ${d.id}, not the ${ours.join(' / ')} this app installed. ` +
+                            'It is being told to stand down and remove itself; left running it ' +
+                            'is a duplicate row and a second worker clearing data in that profile.');
+                try { ws.send(JSON.stringify({ type: 'STAND_DOWN', reason: 'not the installed copy' })); }
+                catch (e) {}
+                geoLive.delete(ws);
+                setTimeout(() => { try { ws.close(); } catch (e) {} }, 1000);
+                return;
+            }
+            //  A browser saying what its own geolocation record IS. Validated
+            //  like anything else off a socket, and it grants nothing -- the only
+            //  thing it can do is let the app stop claiming coverage it has not
+            //  been told about. See noteGeoState() and reportGeoCoverage().
+            if (d.command === 'GEO_STATE') {
+                if (typeof d.armed !== 'boolean') return;
+                if (d.cc !== undefined &&
+                    (typeof d.cc !== 'string' || !/^[A-Za-z]{0,2}$/.test(d.cc))) return;
+                const before = geoConfirmed(appState.serverCode);
+                noteGeoState(ws, d);
+                const after = geoConfirmed(appState.serverCode);
+                if (after !== before) {
+                    Logger.info('A browser extension reported its own location state -- ' +
+                        `live confirmations for ${String(appState.serverCode || '').toUpperCase() ||
+                        'the connected country'}: ${after} of ${geoLive.size} ` +
+                        'connected browser profile(s)');
+                }
                 return;
             }
             //  Answered BEFORE the no-window guard below: a question can be put
@@ -2818,7 +3018,13 @@ function runAdminApp() {
                 }
             }
         });
-        ws.on('close', () => Logger.debug('Extension WS disconnected'));
+        ws.on('close', () => {
+            //  The report dies with the socket. A worker that is gone is not
+            //  spoofing anything, and a stale entry here would be the app
+            //  claiming coverage from a browser that has closed.
+            geoLive.delete(ws);
+            Logger.debug('Extension WS disconnected');
+        });
     });
 
     // ════════════════════════════════════════════════════════
@@ -3192,34 +3398,105 @@ function runAdminApp() {
     }
 
     // ── Startup sequence ──────────────────────────────────
-    //  FIRST, before anything reads or writes a single file in that directory.
-    //  C:\ProgramData\freeproxy-vpn inherits C:\ProgramData's permissions, and
-    //  those let any local user create files anywhere in the tree and own what
-    //  they create (measured -- see lib/state-dir.js). Everything below this
-    //  line executes out of that directory with an administrator token:
-    //  startupCleanup() writes and runs fp_startup_clean.bat, setupWritableTor()
-    //  puts tor.exe there, setupWholeMachineLayers() names those binaries in
-    //  firewall allow rules. So the permissions are fixed before the first of
-    //  them, not after.
+    //  MEASURED (.build/probe-uiblock-startup.js, 2026-09-05): the six calls
+    //  below cost 55 process starts and ~22.2 s of blocked thread on this
+    //  machine, and createWindow() used to be the LAST of them. A window that
+    //  does not exist yet cannot paint, cannot show a spinner and cannot even be
+    //  told the app is busy, so for those seconds the user's double-click had
+    //  produced nothing at all -- "app installation ses houyar por start/open
+    //  hoite onek time nicche".
+    //
+    //  secureStateDir() still goes first, and stays synchronous. It is 1-3
+    //  icacls at ~149 ms in the common case, and everything after it -- the .bat
+    //  written and run elevated, tor.exe copied in, the firewall rules that name
+    //  those binaries -- executes out of that directory with an administrator
+    //  token. C:\ProgramData\freeproxy-vpn inherits C:\ProgramData's
+    //  permissions, which let any local user create files there and own what
+    //  they create (measured -- see lib/state-dir.js). Half a second of ordering
+    //  is the price of that invariant; twenty-two seconds was not.
+    //
     //  app.getPath('userData'), not APPDATA_PATH: they are the same string on
     //  every machine where line 645 succeeded, and where it did NOT the app is
     //  running out of %APPDATA%\freeproxy-vpn instead -- so this hardens the
     //  directory getScriptPath() actually writes to rather than the one it was
     //  supposed to.
     const acl = secureStateDir(app.getPath('userData'), { log: Logger });
-    startupCleanup();
-    //  wasExposed is the one fact that cannot be recovered later: after the
-    //  hardening above there is no way to tell that the tree USED to be
-    //  writable. It is true on exactly the starts where a tor.exe already on
-    //  disk may not be ours, which is when the bundle is worth hashing.
-    setupWritableTor({ verify: acl.wasExposed });
-    //  After setupWritableTor(), because Containment's allow rules name the
-    //  ProgramData copies of tor.exe and lyrebird.exe and installAllowRules()
-    //  refuses to arm if tor.exe is not on disk at the path it was given.
-    setupWholeMachineLayers();
-    firstRunCheck();
-    setAppProxy('direct');
+    //  THEN the window, before any of the machine work.
     createWindow();
+    setAppProxy('direct');
+    //  ...and the machine work after it, awaited step by step in the order it
+    //  has always run in. Not awaited HERE: this function must return to
+    //  Electron so the rest of runAdminApp() -- every ipcMain.handle, the
+    //  WebSocket server -- is registered in this same tick, before the renderer
+    //  that createWindow() just started loading can call any of it.
+    const startupReady = startupSequence();
+    let _startupDone = false;
+    startupReady.then(() => { _startupDone = true; }, () => { _startupDone = true; });
+
+    //  Every entry point that can start or switch a tunnel waits here first.
+    //  A no-op on all but the first seconds of a session: the flag is set the
+    //  moment the sequence resolves, so nothing is logged and no progress is
+    //  sent on an ordinary connect.
+    //
+    //  Bounded on purpose. Every await inside startupSequence() is individually
+    //  timed out today -- sh() 30 s, the startup .bat raced at 90 s,
+    //  runOffThread() 120 s -- but this wrapper is the last thing between the
+    //  Connect button and the user, so past the cap the connect goes ahead: a
+    //  real failure beats a spinner that never resolves.
+    const STARTUP_WAIT_MS = 180000;
+    async function awaitStartup(wc, serverCode) {
+        if (_startupDone) return;
+        Logger.info('Connect requested before the startup sequence finished -- ' +
+                    'waiting for it rather than connecting without tor.exe, the ' +
+                    'firewall rules or the whole-machine layers');
+        progressToAll(wc, { percent: 2, message: 'Preparing the VPN engine...',
+                            status: 'connecting', serverCode: serverCode || null });
+        let timer = null;
+        const late = await Promise.race([
+            startupReady.then(() => null, () => null),
+            new Promise(r => { timer = setTimeout(() => r('slow'), STARTUP_WAIT_MS); }),
+        ]);
+        clearTimeout(timer);
+        if (late) {
+            Logger.warn('The startup sequence has not finished after ' +
+                        Math.round(STARTUP_WAIT_MS / 1000) + ' s -- going ahead with ' +
+                        'the connect rather than leaving the button unanswered. If ' +
+                        'this connect fails, close the app and start it again.');
+        }
+    }
+
+    //  What "ready to connect" means, as one promise the connect path can wait
+    //  on. Each step depends on the one before it: startupCleanup() kills the
+    //  stale tor.exe that setupWritableTor() would otherwise fail to overwrite,
+    //  setupWritableTor() puts the binaries where setupWholeMachineLayers()
+    //  names them in firewall allow rules, and firstRunCheck() reads those rules
+    //  back. Serial, therefore -- what changed is only that none of it blocks a
+    //  paint.
+    async function startupSequence() {
+        try {
+            await startupCleanup();
+            //  wasExposed is the one fact that cannot be recovered later: after
+            //  the hardening above there is no way to tell that the tree USED to
+            //  be writable. It is true on exactly the starts where a tor.exe
+            //  already on disk may not be ours, which is when the bundle is
+            //  worth hashing.
+            setupWritableTor({ verify: acl.wasExposed });
+            //  After setupWritableTor(), because Containment's allow rules name
+            //  the ProgramData copies of tor.exe and lyrebird.exe and
+            //  installAllowRules() refuses to arm if tor.exe is not on disk at
+            //  the path it was given.
+            setupWholeMachineLayers();
+            await firstRunCheck();
+            Logger.success('Startup sequence complete -- ready to connect');
+        } catch (e) {
+            //  Reported, not swallowed, and the promise still resolves: a
+            //  connect blocked forever on a failed startup step would be a
+            //  window that works and a button that does nothing.
+            Logger.error('Startup sequence failed -- the app is running but some ' +
+                         'of the machine setup did not complete', { err: e.message,
+                         stack: firstLines(e) });
+        }
+    }
 
     // ── App close ─────────────────────────────────────────
     app.on('window-all-closed', async () => {
@@ -3242,7 +3519,12 @@ function runAdminApp() {
         //  promise that removes the browser proxy/DNS/WebRTC policies. Not
         //  waiting for it here would let app.quit() kill the script and
         //  leave the whole machine pointed at a Tor that is gone.
-        try { if (mainWindow) await clearGeolocationSpoof(mainWindow); }
+        //
+        //  quitting: the location restore runs IN-PROCESS on this path only.
+        //  Everywhere else it goes to a child so the window keeps painting,
+        //  but this process is about to exit and a child killed mid-restore
+        //  would leave the Windows location platform half restored.
+        try { if (mainWindow) await clearGeolocationSpoof(mainWindow, { quitting: true }); }
         catch (e) { Logger.warn('Geo/policy restore on exit: ' + e.message); }
         try {
             killTor();
@@ -3250,7 +3532,7 @@ function runAdminApp() {
                 '@echo off',
                 `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f`,
                 `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "" /f`,
-            ].join('\r\n'));
+            ].join('\r\n'), { timeout: 20000 });
             await reverseLeakProtection();
         } catch(e) { Logger.error('Exit cleanup error', { err: e.message }); }
         // Restore hosts file on exit
@@ -4703,6 +4985,16 @@ function runAdminApp() {
             return { status: 'unavailable', serverCode: null, verified: false };
         }
         serverCode = String(serverCode).toLowerCase();
+        //  ── the one gate on the startup sequence ──
+        //  The window is created BEFORE the machine setup now (MEASURED: 55
+        //  process starts, ~22 s -- .build/probe-uiblock-startup.js), so a
+        //  connect can genuinely arrive while tor.exe is still being copied in
+        //  and containment/tunnel are still null. Here rather than in each
+        //  handler for the same reason as the country gate above: this is the
+        //  first line that needs the machine to be set up, and connect-vpn,
+        //  switch-vpn and the popup's own switch all pass through it.
+        //  Waited on, never refused -- and reported on the progress channel.
+        await awaitStartup(wc, serverCode);
         //  `extra` exists for exactly one fact that neither surface can work out
         //  for itself: whether a cancel left a working tunnel standing. Both
         //  surfaces show a rocket that has to blast in mid-air when a connect is
@@ -5777,8 +6069,8 @@ function runAdminApp() {
         sessionLive   = true;
         _tunRestarts  = 0;
         sendProgress(99, 'Routing the whole device through Tor...');
-        await armWholeMachine({ reason: 'connect',
-                                torPid: torProc ? torProc.pid : null });
+        const whole = await armWholeMachine({ reason: 'connect',
+                                             torPid: torProc ? torProc.pid : null });
 
         // ── 6. Report honestly ────────────────────────────────────────
         //  `finalCode` is the country the traffic DEMONSTRABLY comes out of,
@@ -5899,6 +6191,19 @@ function runAdminApp() {
             verified:   verdict.verified,
             exitIp:     verdict.ip || verdict.lastSeen?.ip || null,
             dnsViaTor,
+            //  What armWholeMachine() actually achieved, carried instead of
+            //  discarded. The toast used to say "your real IP, DNS & GPS are
+            //  hidden" on every successful connect -- including the connect in
+            //  the user's own screenshot, where the window was ALSO showing
+            //  "Full-device tunnel did not start". Two claims about the same
+            //  machine, one of them false, and the false one was the reassuring
+            //  one. renderer.js announceExit() now says only what these say.
+            fullTunnel:   !!(whole && whole.tunnel && whole.tunnel.ok),
+            tunnelReason: (whole && whole.tunnel && !whole.tunnel.ok)
+                ? String(whole.tunnel.reason || '') : '',
+            tunnelOff:    !!(whole && whole.tunnel && whole.tunnel.disabled),
+            contained:    !!(whole && whole.containment && whole.containment.ok),
+            killSwitch:   !!appState.killSwitch,
         };
     }
 
@@ -5940,6 +6245,13 @@ function runAdminApp() {
         //  never build a circuit, so offering it guarantees a failed
         //  connect. The old fallback listed Bangladesh and India, which
         //  have no meaningful exit capacity at all.
+        //
+        //  Estonia was dropped for the same reason on 2026-09-05, MEASURED by
+        //  .build/probe-fallback-capacity.js: it claimed 10 exits and live
+        //  Onionoo had 0. This list is only ever used when Onionoo is
+        //  unreachable, which is also when nearestExitCountries() has no stats
+        //  to rescue the connect with -- so a dead entry here is a failed
+        //  connect with nothing behind it.
         Logger.warn('Using built-in exit-country fallback list');
         const fallbackServers = spoofableOnly({
             "us":{"count":600,"bandwidth":9000000000},"de":{"count":450,"bandwidth":8000000000},
@@ -5955,7 +6267,6 @@ function runAdminApp() {
             "be":{"count":12,"bandwidth":250000000},
             "au":{"count":12,"bandwidth":250000000}, "ua":{"count":25,"bandwidth":500000000},
             "md":{"count":12,"bandwidth":250000000}, "bg":{"count":15,"bandwidth":300000000},
-            "ee":{"count":10,"bandwidth":200000000},
             "hk":{"count":8,"bandwidth":150000000}
         });
         //  Published, not just returned: the extension popup builds its country
@@ -6427,17 +6738,28 @@ function runPs1(content, name, timeoutMs = 20000) {
  * or closed. Used only so the log can say whether a live policy change had
  * an audience, which is the difference between "applied" and "applied and
  * picked up".
+ *
+ * MEASURED (.build/probe-runningbrowsers-cost.js, 2026-09-05): this used to be
+ * one SYNCHRONOUS `tasklist /FI` per browser -- 400 ms a spawn on this machine,
+ * 932-1690 ms of blocked message pump for three, on every connect AND every
+ * switch, to produce a log line. tasklist's cost is the enumeration, not the
+ * filter, so one spawn answers for every name at the same price, and async
+ * costs the pump nothing at all. Both shapes were confirmed to return the same
+ * answer before this replaced that one.
  */
 function runningBrowsers() {
     const EXES = browsers.processNames();
-    const isUp = exe => {
-        try {
-            return execSync(`tasklist /FI "IMAGENAME eq ${exe}" /NH`,
-                { windowsHide: true, encoding: 'utf8', stdio: 'pipe' })
-                .toLowerCase().includes(exe.toLowerCase());
-        } catch (e) { return false; }
-    };
-    return EXES.filter(isUp);
+    return new Promise(resolve => {
+        execFile('tasklist', ['/FO', 'CSV', '/NH'],
+            { windowsHide: true, encoding: 'utf8', maxBuffer: 8 << 20, timeout: 8000 },
+            (err, stdout) => {
+                if (!stdout) return resolve([]);
+                //  Quoted on both sides: the CSV field is "chrome.exe", so this
+                //  cannot match a name that merely contains another.
+                const low = String(stdout).toLowerCase();
+                resolve(EXES.filter(e => low.includes('"' + e.toLowerCase() + '"')));
+            });
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -7012,6 +7334,93 @@ const runGeckoApply = (coord, proxy) => {
     return next;
 };
 
+//  ── The disconnect burst, off the message pump ──────────────────────
+//  Counted for the first time by .build/probe-uiblock-restore.js: 32
+//  synchronous reg calls, ~7 s. Same chain as the apply jobs, because a restore
+//  and an apply both read and rewrite the one journal on disk -- a disconnect
+//  overlapping the switch it interrupted is exactly the race that chain exists
+//  to close.
+const runGeoRestore = () => {
+    const step = async () => {
+        const off = await runOffThread('geo-restore', { stateDir: APPDATA_PATH });
+        if (off.ok) return;
+        Logger.debug('Location restore: could not run off-thread (' +
+                     (off.error || 'no reason reported') + ') -- restoring in-process');
+        try { geoEngine().restoreAll(); }
+        catch (e) { Logger.warn('Device location restore failed: ' + e.message); }
+    };
+    const next = _geoApplyChain.then(step, step);
+    _geoApplyChain = next.then(() => {}, () => {});
+    return next;
+};
+
+//  ── The startup pair, off the message pump ──────────────────────────
+//  MEASURED (.build/probe-uiblock-startup.js): the purge of the older build's
+//  geolocation block policy is 30 synchronous reg calls, ~5752 ms, and it ran
+//  before createWindow() -- so those seconds were spent with no window on
+//  screen at all. Same chain as the other geo jobs: restoreLeftovers() reads
+//  and rewrites the same journal.
+//
+//  Returns whether a journal was found, because startupCleanup() builds its
+//  .bat differently in that case: with a journal the real location setting has
+//  just been put back, and forcing "Allow" as well would switch Location ON for
+//  a user who deliberately keeps it off.
+const runGeoStartup = () => {
+    const step = async () => {
+        const off = await runOffThread('geo-startup', { stateDir: APPDATA_PATH });
+        if (off.ok && off.result) return !!off.result.hadJournal;
+        Logger.debug('Startup location restore: could not run off-thread (' +
+                     (off.error || 'no reason reported') + ') -- running in-process');
+        try {
+            const geo = geoEngine();
+            const had = geo.restoreLeftovers();
+            if (!had) geo.clearBlockingPolicy();
+            return !!had;
+        } catch (e) {
+            Logger.warn('Location restore at startup failed: ' + e.message);
+            return false;
+        }
+    };
+    const next = _geoApplyChain.then(step, step);
+    _geoApplyChain = next.then(() => {}, () => {});
+    return next;
+};
+
+//  ── The extension's force-install routes, off the message pump ──────
+//  MEASURED (.build/probe-uiblock-ext.js): ext.install() alone is 43
+//  synchronous reg calls, ~10 s at this machine's 225 ms per spawn, and it ran
+//  on every connect and every switch. That is the largest of the three bursts
+//  behind "(Not Responding)" -- bigger than applyAll, which was moved first.
+//
+//  Its own chain, not the geo one: the two write different journals and
+//  different registry values, so serialising them against each other would add
+//  seconds to a switch for no benefit. Serialised against ITSELF, because two
+//  installs racing would both pick "the first free slot" in the same forcelist
+//  key and write our entry twice.
+let _extChain = Promise.resolve();
+const runExtInstall = (ext, prepared) => {
+    const step = async () => {
+        const off = await runOffThread('ext-install', {
+            stateDir: APPDATA_PATH, sourceDir: ext.sourceDir,
+            id: prepared.id, version: prepared.version, port: ext.host.port,
+        });
+        if (off.ok && off.result) {
+            //  The parent's own instance has to end up saying what the child
+            //  did, because needManualLoad() and the coverage report read
+            //  these next and they run here.
+            ext.attempted = off.result.attempted || [];
+            ext.external  = off.result.external || [];
+            return off.result.auto || [];
+        }
+        Logger.debug('Extension force-install: could not run off-thread (' +
+                     (off.error || 'no reason reported') + ') -- installing in-process');
+        return ext.install() || [];
+    };
+    const next = _extChain.then(step, step);
+    _extChain = next.then(() => {}, () => {});
+    return next;
+};
+
 // ── Wrap applyGeolocationSpoof ────────────────────────────────────
 //  The ORDER below is the fix for "Chrome and Brave still show the real
 //  location":
@@ -7071,7 +7480,7 @@ applyGeolocationSpoof = function (win, sc, opts) {
         let extReady = null, autoDone = [];
         try {
             extReady = await ext.prepare();
-            if (extReady) autoDone = ext.install() || [];
+            if (extReady) autoDone = await runExtInstall(ext, extReady);
         } catch (e) {
             Logger.warn('Browser location spoofer could not be installed: ' + e.message);
         }
@@ -7082,11 +7491,13 @@ applyGeolocationSpoof = function (win, sc, opts) {
         //    block above runningBrowsers(). All that is left to do is say so
         //    truthfully, naming what was actually running when the write
         //    landed.
-        const up = runningBrowsers();
-        Logger.info(
+        //    Not awaited: it is a log line, and one tasklist is ~1 s of wall
+        //    clock. The connect carries on; the line lands when it lands.
+        runningBrowsers().then(up => Logger.info(
             (proxyChanged ? 'Browser proxy policy changed' : 'Browser proxy policy unchanged') +
             ` -- applied live to ${up.length ? up.join(', ') : 'no running browser'}; ` +
-            'nothing was closed');
+            'nothing was closed'),
+            e => Logger.debug('Could not list running browsers: ' + e.message));
 
         // 4. Windows platform + the Gecko family.
         //
@@ -7137,7 +7548,7 @@ applyGeolocationSpoof = function (win, sc, opts) {
             }
         }
 
-        reportGeoCoverage(coord);
+        reportGeoCoverage(coord, sc);
     })().catch(e => Logger.warn('Device location spoof failed: ' + e.message));
 };
 
@@ -7147,13 +7558,27 @@ applyGeolocationSpoof = function (win, sc, opts) {
 //  process down while the restore script is still running, and the browser
 //  policies stay behind.
 const _origClearGeo = clearGeolocationSpoof;
-clearGeolocationSpoof = function (win) {
+clearGeolocationSpoof = function (win, opts) {
     _origClearGeo(win);
     //  Restore the device layers from the journal FIRST -- these are the
     //  ones that would otherwise leave the machine with its location
     //  switched off after disconnecting.
-    try { geoEngine().restoreAll(); }
-    catch (e) { Logger.warn('Device location restore failed: ' + e.message); }
+    //
+    //  MEASURED (.build/probe-uiblock-restore.js): 32 synchronous reg calls,
+    //  ~7 s on this machine. On a disconnect the window is open and expected to
+    //  paint, so that burst is the third "(Not Responding)" in the report and it
+    //  goes to the child. On QUIT it stays here: the parent exits the moment
+    //  this settles, and a child killed mid-restore would leave the Windows
+    //  location platform half restored -- a freeze nobody sees is the better
+    //  trade, and the two paths therefore cannot share one answer.
+    const quitting = !!(opts && opts.quitting);
+    const restored = quitting
+        ? (() => {
+            try { geoEngine().restoreAll(); }
+            catch (e) { Logger.warn('Device location restore failed: ' + e.message); }
+            return Promise.resolve();
+        })()
+        : runGeoRestore();
     //  The force-install entry is deliberately LEFT IN PLACE, and this is
     //  the other half of "browsers stop closing".
     //
@@ -7172,6 +7597,9 @@ clearGeolocationSpoof = function (win) {
     //  for real at UNINSTALL, by GeoExt.restore() plus the forcelist sweep in
     //  lib/installer-tasks.js, and by the no-exe-required fallback in
     //  installer.nsh behind that.
-    return restoreAllBrowsersProxy()
+    //  ...and the browser policies only after the device layers are back, which
+    //  is the order this always ran in when the restore was synchronous.
+    return restored
+        .then(() => restoreAllBrowsersProxy())
         .catch(e => Logger.warn('Browser policy restore failed: ' + e.message));
 };

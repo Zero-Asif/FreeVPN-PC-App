@@ -43,6 +43,12 @@ release/
 # on their first lines. It exists because the one-liner each of them used to
 # carry deleted 890 lines of main.js before a single assertion ran.
 !.build/srcstrip.js
+# And the gate itself. `.build/test-*.js` covered every suite and not the one
+# file that RUNS them, so a clone had 38 suites and no way to run them in one
+# command -- and no way to notice a suite that had been left out of the list.
+# test-vendor.js reads its two exported lists, so it has to be here for that
+# check to exist at all.
+!.build/run-offline.js
 
 # Editor directories and files
 .vscode/

@@ -10,7 +10,7 @@ the machine follows, system proxy on 127.0.0.1, DNS pinned to Tor, ports 53 and 
 elsewhere, IPv6 blocked both ways, 14 browsers told the same country. Five: switching country
 re-pins the exit and clears the cache, cookies and history of map sites only, leaving you signed
 in everywhere, and a list of domains can bypass the tunnel live. Six: check it yourself, from the
-plain text log and the 126
+plain text log and the 159
 probe scripts.</desc>
 <!--
   docs/media/walkthrough.svg
@@ -18,11 +18,11 @@ probe scripts.</desc>
   than typed from memory: 74 countries is Object.keys(GEO_COORDS).length in
   main.js, 14 browsers is the table in lib/browsers.js (8 Chromium browsers,
   5 Gecko browsers, 1 for WinINET), 9 firewall rules is the set of rule names
-  main.js and lib/geo-spoof.js can add, 126 probe scripts is what .build/ holds,
+  main.js and lib/geo-spoof.js can add, 159 probe scripts is what .build/ holds,
   and the seven connect stages are the sendProgress calls flow-connect.svg
   spells out one by one.
 
-  Counted, now, by .build/probe-readme-lines.js, which reads THIS text, the
+  Counted, now, by .build/test-readme-lines.js, which reads THIS text, the
   captions below and the description above, and re-derives every one of those
   numbers from the source. Written after finding that the firewall rule count
   and the probe script count that used to be here, seven and a hundred and
@@ -330,7 +330,7 @@ probe scripts.</desc>
 <g font-size="12.5" fill="#7d8aa5">
   <text x="806" y="490">A plain-text log in ProgramData records</text>
   <text x="806" y="509">what it wrote, and what a read-back then</text>
-  <text x="806" y="528">found. <tspan fill="#c4b5fd">126 probe scripts</tspan> drive the real</text>
+  <text x="806" y="528">found. <tspan fill="#c4b5fd">159 probe scripts</tspan> drive the real</text>
   <text x="806" y="547">registry, and the real browsers.</text>
 </g>
 <rect x="806" y="566" width="276" height="24" rx="7" fill="#0f2a1a" stroke="#1c6b3a"/>

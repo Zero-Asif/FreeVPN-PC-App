@@ -89,7 +89,10 @@ const CHAIN = ['main.js', 'renderer.js', 'index.html', 'style.css',
                //  the shipped code no longer served. These two are now the
                //  difference between a browser being handed the CRX and asking
                //  a dead port, so a stale copy of either is the whole failure.
-               'lib/ext-deliver.js', 'lib/ext-host.js'];
+               'lib/ext-deliver.js', 'lib/ext-host.js',
+               //  The whole-machine half. A stale copy of either is a tunnel
+               //  that reports a failure the source no longer has.
+               'lib/tunnel.js', 'lib/containment.js'];
 let listing = [];
 try { listing = asar.listPackage(ASAR); } catch (e) { console.log('   ERROR: ' + e.message); }
 ok(listing.length > 20, 'the asar can be read at all', String(listing.length) + ' entries');
@@ -169,18 +172,34 @@ ok(b.win && b.win.requestedExecutionLevel === 'requireAdministrator',
    String(b.win && b.win.requestedExecutionLevel));
 ok((b.extraResources || []).some(r => r.to === 'Extension'),
    'the extension is an extraResource, not an asar entry');
-ok(b.asarUnpack.includes('Tor/**/*'), 'and only Tor is unpacked');
+//  Tor, Tun and lib are all unpacked: an .exe cannot run and a .dll cannot be
+//  loaded from inside an asar, and lib/ is spawned as its own process.
+for (const g of ['Tor/**/*', 'Tun/**/*', 'lib/**/*']) {
+    ok(b.asarUnpack.includes(g), `${g} is unpacked`);
+}
 
 console.log('── this artifact is newer than everything in the chain ──');
 //  The one honest statement available about the compiled NSIS script: it went
 //  in after the last edit to it. Nothing in a compressed installer can be
 //  grepped -- see the header.
+//
+//  Asked of every source the build packages, from git, not of a hand list.
+//  CHAIN did not name lib/tunnel.js, so this suite reported 77/77 on an
+//  installer built before the tunnel fix went in -- which is the exact thing
+//  this section exists to catch.
+const PACKED = require('child_process')
+    .execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
+    .split(/\r?\n/).filter(Boolean)
+    .filter(f => /^(main\.js|renderer\.js|globe-controller\.js|vendor-umd-shim\.js|index\.html|style\.css|icon\.png|installer\.nsh|package\.json)$/.test(f)
+              || f.startsWith('lib/') || f.startsWith('Extension/'))
+    .filter(f => fs.existsSync(path.join(ROOT, f)));
 const setupAt = mtime(SETUP);
-for (const f of CHAIN.concat(['installer.nsh', 'package.json'])) {
-    const t = mtime(path.join(ROOT, f));
-    ok(t > 0 && setupAt >= t, `built after ${f}`,
-       new Date(t).toISOString() + ' vs setup ' + new Date(setupAt).toISOString());
-}
+ok(PACKED.length > 20, `git names ${PACKED.length} packaged sources to date-check`);
+const stale = PACKED.filter(f => { const t = mtime(path.join(ROOT, f)); return !(t > 0 && setupAt >= t); });
+ok(stale.length === 0,
+   `the installer is newer than all ${PACKED.length} of them`,
+   stale.map(f => f + ' ' + new Date(mtime(path.join(ROOT, f))).toISOString())
+        .join(', ') + '  vs setup ' + new Date(setupAt).toISOString());
 for (const s of ['fp-uninstall-sweep', '--fp-reboot-pending', 'restart-pending.json']) {
     const buf = fs.readFileSync(SETUP);
     ok(!buf.includes(s),

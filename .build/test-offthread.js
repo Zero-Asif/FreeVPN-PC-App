@@ -142,6 +142,221 @@ function drive(job, payload, { stub = true, allowDir = null, timeoutMs = 60000 }
         try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
     }
 
+    console.log('\n── the Connect button cannot wait forever ──');
+    {
+        //  The reported symptom: the app takes a long time to open after
+        //  install, and a connect asked for during that window has to wait for
+        //  startupSequence(). Every step in there is individually timed out, but
+        //  awaitStartup() is the last thing between the button and the user --
+        //  so it is lifted out of main.js and driven with a startupReady that
+        //  NEVER settles, which no arrangement of timeouts inside can produce.
+        const mainSrc = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8');
+        const FROM = mainSrc.indexOf('const STARTUP_WAIT_MS =');
+        const TO   = mainSrc.indexOf('\n    }', mainSrc.indexOf('async function awaitStartup', FROM));
+        ok(FROM > 0 && TO > FROM, 'main.js declares STARTUP_WAIT_MS above awaitStartup');
+
+        const capMs = Number((mainSrc.slice(FROM, FROM + 60)
+                                     .match(/STARTUP_WAIT_MS = (\d+)/) || [])[1]);
+        //  Generous, not tight: the measured sequence is ~22 s and the slowest
+        //  bounded step in it is 120 s, so a cap under that would fire on a slow
+        //  machine that was going to succeed.
+        ok(capMs >= 120000, 'the cap is longer than the slowest bounded step inside it',
+           capMs + ' ms');
+
+        //  Only the constant is scaled -- the text is otherwise verbatim -- so
+        //  this finishes in a fifth of a second instead of three minutes.
+        const text = mainSrc.slice(FROM, TO + 6)
+                            .replace(/STARTUP_WAIT_MS = \d+/, 'STARTUP_WAIT_MS = 150');
+        const logs = [], progress = [];
+        const Logger = { info: m => logs.push(['info', String(m)]),
+                         warn: m => logs.push(['warn', String(m)]),
+                         debug(){}, error(){}, success(){} };
+        const build = (startupReady, _startupDone) => new Function(
+            'Logger', 'progressToAll', 'startupReady', '_startupDone',
+            text + '\n; return awaitStartup;')(
+                Logger, (wc, p) => progress.push(p), startupReady, _startupDone);
+
+        const t0 = Date.now();
+        await build(new Promise(() => {}), false)(null, 'se');
+        const waited = Date.now() - t0;
+        ok(waited >= 150 && waited < 5000,
+           'a startup sequence that never settles no longer holds the connect',
+           'returned after ' + waited + ' ms');
+        ok(logs.some(l => l[0] === 'warn' && /has not finished/.test(l[1])),
+           'and it says so in the log rather than going quiet',
+           (logs.find(l => l[0] === 'warn') || [, 'no warning'])[1].slice(0, 70));
+        ok(progress.length === 1 && progress[0].percent === 2 &&
+           progress[0].status === 'connecting' && progress[0].serverCode === 'se',
+           'the UI was told it is preparing, under the country asked for',
+           JSON.stringify(progress[0] || null));
+
+        //  The other two paths: already finished is a silent no-op, and a
+        //  sequence that resolves late is waited for rather than abandoned.
+        logs.length = progress.length = 0;
+        await build(new Promise(() => {}), true)(null, 'se');
+        ok(logs.length === 0 && progress.length === 0,
+           'an ordinary connect after startup logs nothing and sends no progress');
+
+        logs.length = progress.length = 0;
+        const t1 = Date.now();
+        await build(new Promise(r => setTimeout(r, 60)), false)(null, 'no');
+        const short = Date.now() - t1;
+        ok(short >= 55 && short < 140, 'a slow-but-finishing startup is waited for, not cut off',
+           short + ' ms');
+        ok(!logs.some(l => l[0] === 'warn'), 'and nothing is warned about when it finishes in time');
+
+        //  A rejection is the case that used to matter most: startupSequence()
+        //  catches everything today, but `await startupReady` on a rejected
+        //  promise would throw straight out of the connect handler.
+        logs.length = 0;
+        let threw = false;
+        await build(Promise.reject(new Error('startup blew up')), false)(null, 'no')
+            .catch(() => { threw = true; });
+        ok(!threw, 'a startup sequence that REJECTS does not throw out of the connect path');
+
+        //  And every way in really goes through it.
+        const entries = [...mainSrc.matchAll(/await awaitStartup\(/g)].length;
+        ok(entries >= 1, 'the connect path awaits it', entries + ' call site(s)');
+
+        //  The last spawn that was still on the pump on the connect/switch path.
+        //  MEASURED (.build/probe-runningbrowsers-cost.js): one synchronous
+        //  `tasklist /FI` per browser was 932-1690 ms of blocked thread for a
+        //  log line, on every connect AND every switch. Both halves are checked,
+        //  because either one alone puts it back: sync would block, and one
+        //  spawn per browser would cost N times as much even async.
+        //  main.js ships CRLF, so the terminator is matched by regex rather than
+        //  by indexOf('\n}\n') -- which finds nothing and hands back the whole
+        //  rest of the file, making every check below pass or fail on the wrong
+        //  text.
+        const rb = mainSrc.slice(mainSrc.indexOf('function runningBrowsers()'));
+        const end = rb.search(/\r?\n\}\r?\n/);
+        ok(end > 0, 'main.js still declares runningBrowsers() as a top-level function');
+        const body = rb.slice(0, end);
+        ok(!/execSync|execFileSync|spawnSync/.test(body),
+           'runningBrowsers() no longer spawns synchronously on the message pump',
+           (body.match(/exec\w*Sync|spawnSync/) || ['clean'])[0]);
+        ok((body.match(/execFile\(|exec\(|spawn\(/g) || []).length === 1,
+           'and it asks Windows once for the whole process list, not once per browser',
+           (body.match(/execFile\(|exec\(|spawn\(/g) || []).join(' '));
+        ok(/EXES\.filter/.test(body) && /'"'/.test(body),
+           'matching each name as a quoted CSV field, so one exe cannot match another');
+        //  Not awaited at the call site: a log line must not add a second of
+        //  wall clock to the connect it is describing.
+        ok(/runningBrowsers\(\)\.then\(/.test(mainSrc) &&
+           !/await runningBrowsers\(/.test(mainSrc),
+           'and the connect does not wait for it -- the line lands when it lands');
+
+        //  execSync survives in main.js in exactly two places where it is right:
+        //  the admin check, which runs before any window exists, and the
+        //  quit-path taskkill, where async work would not finish. A ceiling and
+        //  not a pin -- three today, and removing one is progress; a FOURTH is a
+        //  new freeze on a path that has a window up.
+        const syncSites = [...mainSrc.matchAll(/^.*\b(?:execSync|execFileSync|spawnSync)\(.*$/gm)]
+            .map(m => m[0].trim().slice(0, 46));
+        ok(syncSites.length <= 3, 'main.js has no new synchronous spawns',
+           syncSites.length + ': ' + syncSites.join(' | '));
+    }
+
+    console.log('\n── a .bat that never exits does not wedge the disconnect ──');
+    {
+        //  Eight .bat files go through runBat() -- the WinINET writer, the
+        //  kill-switch lock, the disconnect, the exit -- and every caller awaits
+        //  it. cmd.exe blocked forever on a `net stop dnscache` against a wedged
+        //  service was a disconnect that never finishes and a quit that never
+        //  quits: unbounded, and not the message pump at all. Lifted out of
+        //  main.js and driven with a child that never exits, because no
+        //  arrangement of real commands can be relied on to hang on demand.
+        const mainSrc = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8');
+        const FROM = mainSrc.indexOf('    function runBat(filePath, content');
+        const TO   = mainSrc.indexOf('\r\n    }', mainSrc.indexOf('proc.on(\'error\'', FROM));
+        ok(FROM > 0 && TO > FROM, 'main.js declares runBat with a spawn and an error handler');
+        const text = mainSrc.slice(FROM, TO + 7);
+
+        ok(/function runBat\(filePath, content, \{ timeout = \d+ \} = \{\}\)/.test(text),
+           'runBat takes a timeout, and defaults it rather than making every caller pass one',
+           (text.match(/timeout = \d+/) || ['none'])[0]);
+
+        const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'fp bat ')));
+        const bat = path.join(dir, 'fp_never.bat');
+        const logs = [];
+        const Logger = { error: (m, meta) => logs.push(['error', String(m), meta]),
+                         warn: (m, meta) => logs.push(['warn', String(m), meta]),
+                         debug(){}, info(){}, success(){} };
+
+        //  A child that emits nothing and never exits, and a taskkill that is
+        //  recorded rather than run -- nothing on this machine is killed.
+        const { EventEmitter } = require('events');
+        const killed = [];
+        let liveProc = null;
+        const fakeSpawn = (exe, args) => {
+            if (/taskkill/i.test(exe)) {
+                killed.push(args.join(' '));
+                return Object.assign(new EventEmitter(), { unref() {}, pid: 2, kill() {} });
+            }
+            liveProc = Object.assign(new EventEmitter(), {
+                pid: 4242, stdout: new EventEmitter(), stderr: new EventEmitter(),
+                killCalls: 0, kill() { this.killCalls++; },
+            });
+            return liveProc;
+        };
+        const build = () => new Function('fs', 'Logger', 'spawn',
+            text + '\n; return runBat;')(fs, Logger, fakeSpawn);
+
+        const t0 = Date.now();
+        const r = await build()(bat, '@echo off\r\nrem hello', { timeout: 200 });
+        const waited = Date.now() - t0;
+        ok(waited >= 200 && waited < 4000, 'it gives up and answers instead of waiting forever',
+           'answered after ' + waited + ' ms');
+        ok(r && r.ok === false && /timed out/.test(r.error || ''),
+           'and the answer says it timed out, so the caller is not told it worked',
+           JSON.stringify(r));
+        ok(logs.some(l => l[0] === 'error' && /did not finish within/.test(l[1])),
+           'the log names the file and the cap',
+           (logs.find(l => /did not finish/.test(l[1])) || [, 'nothing logged'])[1].slice(0, 60));
+        //  proc.kill() reaches cmd.exe only; the netsh/reg it started is what
+        //  hangs, and it survives its parent. /T is what takes the tree.
+        ok(killed.length === 1 && /\/F/.test(killed[0]) && /\/T/.test(killed[0]) &&
+           /\b4242\b/.test(killed[0]),
+           'and the whole process TREE is killed, not just cmd.exe', killed[0] || 'no taskkill');
+        ok(liveProc && liveProc.killCalls === 1, 'cmd.exe itself is killed too');
+
+        //  The file really was written before the spawn -- a timeout path that
+        //  skipped the write would pass every check above and ship nothing.
+        ok(fs.existsSync(bat) && /rem hello/.test(fs.readFileSync(bat, 'utf8')),
+           'the script was written before it was run');
+
+        //  A child that exits normally must still settle exactly once, and the
+        //  timer must not fire after it.
+        logs.length = 0; killed.length = 0;
+        const p = build()(bat, '@echo off', { timeout: 5000 });
+        liveProc.stdout.emit('data', Buffer.from('FP_ALL_OK\r\n'));
+        liveProc.emit('exit', 0);
+        const good = await p;
+        ok(good.ok === true && good.code === 0, 'an ordinary run still resolves ok', JSON.stringify(good));
+        await new Promise(r2 => setTimeout(r2, 60));
+        ok(killed.length === 0, 'and nothing is killed on the happy path');
+
+        //  Two settle sources at once: exit AND the timer. resolve() ignores the
+        //  second, but the taskkill would still fire and kill a pid Windows may
+        //  have reused by then.
+        logs.length = 0; killed.length = 0;
+        const p2 = build()(bat, '@echo off', { timeout: 120 });
+        liveProc.emit('exit', 0);
+        await p2;
+        await new Promise(r2 => setTimeout(r2, 250));
+        ok(killed.length === 0,
+           'a child that exits just before the cap is not killed afterwards',
+           killed.join(' | ') || 'none');
+
+        //  And runBatLines, which is the shape the strict callers use, has to
+        //  forward the cap rather than silently keeping the default.
+        ok(/function runBatLines\(filePath, lines, opts\)/.test(mainSrc) &&
+           /runBat\(filePath, body\.join\('\\r\\n'\), opts\)/.test(mainSrc),
+           'runBatLines passes the caller\'s timeout through to runBat');
+
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+    }
+
     console.log('\n── packaging: the script main.js forks has to be there ──');
     {
         ok(fs.existsSync(SCRIPT), 'lib/offthread.js exists next to main.js', SCRIPT);

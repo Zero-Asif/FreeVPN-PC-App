@@ -26,8 +26,20 @@
 //      3  inject BLOCK  for the probe origin                 -> denied
 //      4  scrub the exception back out                       -> prompt
 //
-//  Cell 2 or 3 failing means Chrome ignores outside edits and the whole
-//  approach is wrong. Cell 4 is the fix itself.
+//  Cell 4 is the fix itself, and cell 3 is its control. Cell 2 is NOT a
+//  precondition, and an earlier version of this file said it was.
+//
+//  MEASURED 2026-09-06, Chrome / Brave / Edge, all three identical: cell 2
+//  FAILS in every one of them and cells 1, 3 and 4 pass. An externally
+//  written ALLOW is re-prompted; an externally written BLOCK is honoured;
+//  removing an entry is honoured. Chromium accepts outside edits in the
+//  fail-safe directions only -- injecting a permission GRANT from outside
+//  the browser would be an escalation, so it refuses. That is by design,
+//  not a fault, and nothing this app ships depends on it: main.js:6844
+//  records that GeolocationAllowedForUrls was removed for exactly this
+//  reason, and lib/geo-spoof.js only ever scrubs or restores. So the three
+//  FAILs the gate now shows on this suite are an expected refusal, and the
+//  scrub -- the one cell the fix rests on -- is honoured 3/3.
 // ════════════════════════════════════════════════════════════════════
 const fs = require('fs');
 const os = require('os');
@@ -188,11 +200,20 @@ const show = o => JSON.stringify(o) === '{}' ? '{}' : JSON.stringify(o);
         console.log(`     exceptions after the run: ${show(readGeoExceptions(ud))}`);
 
         console.log('  ' + '-'.repeat(58));
-        console.log('  ' + (allowOk && blockOk && scrubOk
-            ? 'Outside edits to Preferences ARE honoured. Scrubbing the stale\n'
-            + '  ALLOW entries is a deterministic fix, not a bet on precedence.'
-            : 'Outside edits are NOT reliably honoured in this browser -- the\n'
-            + '  scrub cannot be the primary mechanism here.'));
+        //  Keyed on blockOk && scrubOk, not on allowOk. The scrub is the
+        //  mechanism; a refused ALLOW injection does not weaken it, and
+        //  saying it did was a conclusion this suite's own cell 4
+        //  contradicted in all three browsers.
+        console.log('  ' + (blockOk && scrubOk
+            ? 'Outside edits to Preferences ARE honoured in the directions that\n'
+            + '  matter. Scrubbing the stale ALLOW entries is a deterministic\n'
+            + '  fix, not a bet on precedence.'
+            : 'Outside edits are NOT honoured in this browser -- the scrub\n'
+            + '  cannot be the primary mechanism here.'));
+        if (!allowOk) {
+            console.log('  (cell 2 refused: an injected GRANT is re-prompted. Expected --\n'
+                      + '   the app never writes one. See main.js:6844.)');
+        }
 
         try { fs.rmSync(ud, { recursive: true, force: true }); } catch (e) {}
         console.log('');

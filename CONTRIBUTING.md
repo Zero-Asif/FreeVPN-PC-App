@@ -60,18 +60,18 @@ redistributable.
 |---|---|
 | `main.js` | the main process — Tor lifecycle, the torrc, the proxy, DNS, the firewall, the kill switch, the WebSocket server, and 18 IPC channels |
 | `renderer.js`, `index.html`, `style.css` | the window. `globe-controller.js` owns the globe |
-| `lib/` | 12 modules, one job each: `browsers.js` (the 14 browsers), `geo-ext.js` (the four extension routes), `crx.js` (packing and signing), `ext-host.js` (the install-time loopback server), `tor-control.js`, `exit-selector.js`, `offthread.js`, `socks-fetch.js`, `home-location.js`, `geo-spoof.js`, `ext-deliver.js`, `installer-tasks.js` |
+| `lib/` | 15 modules, one job each: `browsers.js` (the 14 browsers), `geo-ext.js` (the four extension routes), `crx.js` (packing and signing), `ext-host.js` (the install-time loopback server), `containment.js` (the default-deny firewall layer), `tunnel.js` (the Wintun full-tunnel), `state-dir.js`, `tor-control.js`, `exit-selector.js`, `offthread.js`, `socks-fetch.js`, `home-location.js`, `geo-spoof.js`, `ext-deliver.js`, `installer-tasks.js` |
 | `Extension/` | the MV3 extension: `background.js` (service worker), `geo-spoof.js` + `geo-bridge.js` (the content-script pair), the popup and the welcome page |
 | `tor/` | `tor.exe`, `lyrebird.exe`, and Tor's GeoIP data. Not ours — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) |
 | `vendor/` | three.js, globe.gl, three earth textures, 74 flags. All pinned by SHA-256 |
 | `installer.nsh` | the NSIS hooks. It contains **no browser-specific registry path** on purpose — only the app can see which browsers are on *this* machine |
-| `.build/` | 126 probe scripts, the screenshot harnesses, the badge generator, the art gate. Not shipped |
+| `.build/` | 159 probe scripts, the screenshot harnesses, the badge generator, the art gate. Not shipped |
 | `docs/media/` | every picture in the README, and a [README of its own](docs/media/README.md) saying which script made each one |
 
 ## The probe suite
 
 There is no test framework, and `.build/` is not a unit-test directory. Each of
-the 126 scripts drives the real thing — the real registry, a real browser
+the 159 scripts drives the real thing — the real registry, a real browser
 profile, the real `tor.exe`, the real uninstall sweep — and then reads the result
 back out of the machine. That is the only kind of check that can tell you whether
 an extension actually landed.

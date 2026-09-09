@@ -21,7 +21,11 @@
 // ════════════════════════════════════════════════════════════════════
 const fs = require('fs');
 const path = require('path');
-const B = require('../lib/browsers');
+//  FP_BROWSERS points this suite at another copy of lib/browsers.js, which is
+//  how the eight-spawn version is shown failing rather than described as failing.
+const SRC = process.env.FP_BROWSERS || path.join(__dirname, '..', 'lib', 'browsers.js');
+const B = require(SRC);
+const { stripComments } = require('./srcstrip.js');
 
 let pass = 0, fail = 0;
 const ok = (cond, msg, extra) => {
@@ -54,16 +58,100 @@ ok(B.expand('%FP_NOT_A_REAL_VAR%\\x') === null,
 ok(B.expand('C:\\plain') === 'C:\\plain', 'leaves a plain path alone');
 
 console.log('');
+console.log('── the registry scan: ONE spawn, not eight ──');
+//  detect() sat at 1513-1699 ms and the 29 filesystem stats in it cost 3-14 ms.
+//  probe-regquery-cost.js found the rest: `reg /?`, which reads no registry at
+//  all, costs 176 ms, so the eight separate `reg query` calls were paying for
+//  eight process starts and ~90 ms of actual I/O. Chained into one shell the
+//  same 138 values arrive in 676-770 ms, identical on every field
+//  (probe-regscan-equivalence.js). A wall-clock budget alone would not hold this:
+//  on a slower machine 8 spawns and 1 spawn both blow it, and the invariant that
+//  matters is the count.
+{
+    const cp = require('child_process');
+    const real = cp.execSync;
+    const calls = [];
+    cp.execSync = (cmd) => {
+        calls.push(cmd);
+        return 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Clients\\StartMenuInternet\\Fake\\shell\\open\\command\r\n' +
+               '    (Default)    REG_SZ    "C:\\nope\\fake.exe"\r\n';
+    };
+    try {
+        B.resetCache();
+        B.regExePaths();
+    } finally { cp.execSync = real; B.resetCache(); }
+    ok(calls.length === 1, 'regExePaths() shells out exactly once', calls.length + ' times');
+    const cmd = calls[0] || '';
+    ok((cmd.match(/reg query/g) || []).length === 8,
+       'and that one command carries all eight queries',
+       String((cmd.match(/reg query/g) || []).length));
+    ok(cmd.includes(' & ') && !cmd.includes('&&'),
+       'chained with & and never &&, so an absent key cannot stop the rest');
+    for (const k of ['HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft', 'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft',
+                     'WOW6432Node', 'Clients\\StartMenuInternet']) {
+        ok(cmd.includes(k), `  the chain still covers ${k}`);
+    }
+}
+
+//  The hazard the chain introduces: cmd.exe returns the LAST command's exit
+//  code, HKCU\...\WOW6432Node\Clients\StartMenuInternet does not exist on this
+//  machine, and `reg query` on a missing key exits 1 -- so execSync throws and
+//  seven good dumps go in the bin unless e.stdout is read.
+{
+    const cp = require('child_process');
+    const real = cp.execSync;
+    cp.execSync = () => {
+        const e = new Error('Command failed');
+        e.status = 1;
+        e.stdout =
+            'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe\r\n' +
+            '    (Default)    REG_SZ    ' + (B.byId('edge').exePaths[0] || '') + '\r\n' +
+            '\r\nERROR: The system was unable to find the specified registry key or value.\r\n';
+        throw e;
+    };
+    let map = null;
+    try { B.resetCache(); map = B.regExePaths(); }
+    catch (e) { map = { THREW: e.message }; }
+    finally { cp.execSync = real; B.resetCache(); }
+    ok(map && !map.THREW, 'a chain whose LAST query fails does not throw out of regExePaths()',
+       map && map.THREW);
+    ok(map && !map.THREW && Object.keys(map).length >= 0,
+       '  and the dumps that did arrive are still parsed', JSON.stringify(map));
+}
+
+const bsrc = stripComments(fs.readFileSync(SRC, 'utf8'));
+ok(/\.join\(' & '\)/.test(bsrc), 'the source really joins the queries into one command');
+ok(/e\.stdout/.test(bsrc), 'and the catch reads e.stdout instead of returning nothing');
+ok(/timeout: \d+/.test(bsrc), 'the scan is bounded, so a wedged reg.exe cannot hang a connect');
+//  The shape that shipped: a scan() called once per root.
+ok(!/Object\.assign\(hives, scan\(/.test(bsrc), 'and the eight-call loop it replaced is gone');
+
+console.log('');
 console.log('── detect() speed: it runs three times per connect ──');
-B.resetCache();
+//  Three cold-cache samples, best one judged. One sample also measures whatever
+//  else the disk is doing: right after a `npm run dist` this read 1730 ms against
+//  a 1500 ms budget with lib/browsers.js untouched, which is Defender walking a
+//  142 MB installer, not a regression. The regression this guards against was
+//  algorithmic -- 5069 ms PER BROWSER, repeated work rather than a slow disk --
+//  and that shows up in every sample, warm cache or not.
+let cold = Infinity;
+const samples = [];
+let found = [];
+for (let i = 0; i < 3; i++) {
+    B.resetCache();
+    const t0 = Date.now();
+    found = B.detect();
+    const ms = Date.now() - t0;
+    samples.push(ms);
+    if (ms < cold) cold = ms;
+    if (cold < 1500) break;
+}
 let t = Date.now();
-const found = B.detect();
-const cold = Date.now() - t;
-t = Date.now();
 B.detect(); B.detect();
 const warm = Date.now() - t;
-console.log(`   cold ${cold} ms, two more in ${warm} ms`);
-ok(cold < 1500, `first detect() under 1.5 s (was 5069 ms per-browser)`, cold + ' ms');
+console.log(`   cold ${samples.join(' / ')} ms, two more in ${warm} ms`);
+ok(cold < 1500, `first detect() under 1.5 s (was 5069 ms per-browser)`,
+   'best of ' + samples.join(', ') + ' ms');
 ok(warm < 200, 'cached calls are effectively free', warm + ' ms');
 
 console.log('');

@@ -41,21 +41,39 @@
 //  measurements. That is test-harness scaffolding and is not shipped; the
 //  read below is what consumes it, and it is a no-op in production.)
 //
-//  THREE STATES, NOT TWO
-//  ---------------------
+//  THREE STATES, NOT TWO -- AND EACH ONE HAS TO BE FRESH
+//  ------------------------------------------------------
 //  active   -- spoof: report the connected country.
-//  inactive -- the app has confirmed it is not connected: hand the page to
-//              the real provider, because refusing would be a lie.
-//  pending  -- not known yet, e.g. the service worker has just started and
-//              its WebSocket has not answered. HOLD the call. Treating this
-//              as "inactive" is what leaked the device's real position on the
-//              first geolocation call of a browser session.
+//  off      -- the app has CONFIRMED it is not connected (record carries
+//              appOff:true): hand the page to the real provider, because
+//              refusing would be a lie.
+//  pending  -- not known yet, e.g. the service worker has just started and its
+//              WebSocket has not answered. HOLD the call.
 //
-//  There is deliberately no "give up and use the real provider" timeout. An
-//  earlier version had one, and a two-second stall was all it took to hand
-//  the page the device's true position -- the exact leak this file exists to
-//  prevent. The only path to the real provider is an explicit inactive, which
-//  is what the app sends when it is not connected.
+//  Anything that is not one of those three -- a bare {active:false}, a record
+//  with no coordinates, no record at all -- is PENDING, never "off". A missing
+//  flag must not be able to authorise the real provider.
+//
+//  Freshness is the other half, and it is the leak that was reported: an
+//  already-open tab received a correct "off" at a disconnect, its service
+//  worker was then evicted by Chromium (nothing wakes it -- the reconnect chain
+//  is an in-memory timer), the app connected again minutes later, and no
+//  storage change ever reached the page. The tab was still holding "off", so
+//  the next geolocation call went to Chromium's real provider and Google Maps
+//  showed the device's true position while the traffic was exiting in the
+//  Netherlands. Every record therefore carries the `stamp` the worker wrote it
+//  at, and a decision older than FRESH_MS is re-asked through geo-bridge.js
+//  before it is acted on -- which also wakes the worker that was supposed to be
+//  keeping it current.
+//
+//  There is still no "give up and use the real provider" timeout for a PENDING
+//  record, and a decision that has gone stale is treated the same way: a stall
+//  must never hand out the real position. The one exception is an extension
+//  whose service worker cannot be reached at all (disabled, being updated,
+//  uninstalled) -- geo-bridge.js says so explicitly with unreachable:true, and
+//  only then does the ceiling delegate, because in that state the browser is not
+//  being proxied by us either and a permanently dead navigator.geolocation would
+//  be a bug of our own making.
 // ════════════════════════════════════════════════════════════════════
 (function () {
     'use strict';
@@ -77,6 +95,9 @@
     //  the only ones whose stored state may be cleared. Sites that never asked
     //  are left completely alone. See purgeLocationTraces() in background.js.
     var USED = '__freeproxy_geo_used__';
+    //  shim -> geo-bridge.js: "ask the worker again". Waking the worker is the
+    //  point: a decision can only go stale while it is dead.
+    var ASK = '__freeproxy_geo_ask__';
     var reported = false;
     function reportUse() {
         if (reported) return;         // once per page is all the worker needs
@@ -95,6 +116,14 @@
     //  force.
     var BRIDGE_WAIT_MS = 4000;
 
+    //  How long a decision may be acted on before it is re-checked, and how
+    //  long a re-check is waited for. FRESH_MS is generous because the worker
+    //  re-stamps its answer whenever its link to the app is live, so a page
+    //  polling a live connection re-asks at most once per interval, and each
+    //  ask is a message to an already-running worker.
+    var FRESH_MS     = 15000;
+    var RECHECK_MS   = 1500;
+
     // ── config ──────────────────────────────────────────────────────
     //  `current` is re-read on every call rather than captured once, so a
     //  country switch while a page is open takes effect on that page's next
@@ -102,21 +131,48 @@
     //  value ever arrived -- absent one, we must not touch the real provider.
     var current = { active: false };
     var haveConfig = false;
+    //  Set only when geo-bridge.js reports that the service worker itself could
+    //  not be reached. It is not an answer about the app, so it never becomes
+    //  `current`; it is the one condition that lets the ceiling delegate.
+    var unreachable = false;
     var resolveCfg;
     var cfgReady = new Promise(function (res) { resolveCfg = res; });
+    var waiters = [];
+
+    function settle() {
+        var list = waiters;
+        waiters = [];
+        list.forEach(function (fn) { try { fn(); } catch (e) {} });
+    }
+
+    function stampOf(rec) {
+        return rec && typeof rec.stamp === 'number' ? rec.stamp : 0;
+    }
 
     function accept(cfg) {
         if (!cfg || typeof cfg !== 'object') return;
-        //  "Not known yet" is not an answer, so it is not recorded. Leaving
-        //  haveConfig false is what makes a call HOLD instead of falling
-        //  through to the real provider, and ignoring the record outright also
-        //  leaves the last good value in place for pages already open -- a
-        //  service worker restarting mid-session must not disturb them.
-        if (cfg.pending && !cfg.active) return;
-        if (cfg.active && (typeof cfg.lat !== 'number' || typeof cfg.lng !== 'number')) return;
+        if (cfg.unreachable) { unreachable = true; settle(); return; }
+        //  Only the two authoritative shapes are recorded: active with real
+        //  coordinates, or inactive that explicitly says the app is off.
+        //  Everything else -- pending, a bare {active:false}, an active record
+        //  with no coordinates -- leaves the last good value in place and keeps
+        //  calls held. That is also what stops a service worker restarting
+        //  mid-session from disturbing pages that are already open.
+        if (cfg.active) {
+            if (typeof cfg.lat !== 'number' || typeof cfg.lng !== 'number') return;
+        } else if (cfg.appOff !== true) {
+            return;
+        }
+        //  An older record must never replace a newer one. geo-bridge.js pushes
+        //  its storage fallback and its forced re-ask unconditionally, so a reply
+        //  in flight can land behind a live change and put the previous country
+        //  back. The waiters are still released: what we hold is a fresher
+        //  answer, not a missing one.
+        if (haveConfig && stampOf(cfg) < stampOf(current)) { settle(); return; }
         current = cfg;
         haveConfig = true;
         resolveCfg();
+        settle();
     }
 
     //  The seed, read synchronously. Removed from the page immediately: it
@@ -146,10 +202,53 @@
     if (typeof realGet !== 'function') return;
 
     /** True when we hold coordinates to report. */
-    function armed() { return haveConfig && current && current.active; }
+    function armed() { return haveConfig && current && current.active === true; }
 
-    /** True when the app has explicitly told us it is not connected. */
-    function passthrough() { return haveConfig && (!current || !current.active); }
+    /** True when the app has explicitly confirmed that it is not connected. */
+    function passthrough() {
+        return haveConfig && current && current.active !== true && current.appOff === true;
+    }
+
+    /** True when the decision is recent enough to act on without re-asking. */
+    function fresh() {
+        return haveConfig && typeof current.stamp === 'number' &&
+               (Date.now() - current.stamp) < FRESH_MS;
+    }
+
+    //  Ask geo-bridge.js to put the question to the service worker again, which
+    //  starts it if Chromium has evicted it. Either an answer arrives -- always
+    //  through accept() -- or RECHECK_MS passes with the old record still in
+    //  hand. A stale ACTIVE record is then acted on, because over-spoofing is
+    //  harmless; a stale OFF is not, because that is the leak, and the caller is
+    //  told which it has (see decided()).
+    var lastAsk = 0;
+    function askAgain() {
+        var now = Date.now();
+        if (now - lastAsk <= 250) return;
+        lastAsk = now;
+        try { document.dispatchEvent(new CustomEvent(ASK)); } catch (e) {}
+    }
+    function recheck(fn) {
+        var done = false;
+        var finish = function () { if (done) return; done = true; fn(); };
+        waiters.push(finish);
+        askAgain();
+        setTimeout(finish, RECHECK_MS);
+    }
+
+    /** Run fn() once the decision is either fresh or has just been re-asked. */
+    function decided(fn) {
+        cfgReady.then(function () {
+            if (fresh() || unreachable) { fn(true); return; }
+            //  fn is told whether the decision can be VOUCHED FOR at the moment
+            //  it runs. A re-ask that goes unanswered leaves the old record in
+            //  place, and a stale "the app is off" must not be allowed to
+            //  authorise Chromium's own provider -- that is the leak. Acting on
+            //  a stale ACTIVE record only over-spoofs, so nothing is gated on
+            //  it.
+            recheck(function () { fn(fresh() || unreachable); });
+        });
+    }
 
     // ── position objects ────────────────────────────────────────────
     //  A little jitter per call: a position that is bit-identical every
@@ -195,16 +294,17 @@
     // ── getCurrentPosition ──────────────────────────────────────────
     Proto.getCurrentPosition = function (success, error, options) {
         var self = this;
-        //  Already seeded? Answer in this turn rather than a microtask later,
-        //  so we are indistinguishable from a fast device.
-        if (armed()) {
+        //  Already seeded, and recently enough to trust? Answer in this turn
+        //  rather than a microtask later, so we are indistinguishable from a
+        //  fast device.
+        if (armed() && fresh()) {
             if (success) { try { success(makePosition(current)); } catch (e) {} }
             return;
         }
-        cfgReady.then(function () {
+        decided(function (trusted) {
             if (armed()) {
                 if (success) { try { success(makePosition(current)); } catch (e) {} }
-            } else if (passthrough()) {
+            } else if (unreachable || (trusted && passthrough())) {
                 try { realGet.call(self, success, error, options); }
                 catch (e) { if (error) { try { error(unavailable()); } catch (e2) {} } }
             } else if (error) {
@@ -226,34 +326,41 @@
         var rec = {};
         watches.set(ourId, rec);
 
-        var start = function () {
+        var start = function (trusted) {
             if (!watches.has(ourId)) return;          // cleared before we got here
 
-            if (passthrough()) {
+            if (armed()) {
+                var emit = function () {
+                    if (!watches.has(ourId) || !success) return;
+                    //  Re-read `current`: if the user switches country mid-watch,
+                    //  the next update reports the new one. If they disconnect,
+                    //  the watch simply stops reporting rather than switching to
+                    //  the real position behind the page's back.
+                    if (!armed()) return;
+                    //  A watch outlives the record it started on. Once that
+                    //  record is too old to vouch for, the worker is asked again
+                    //  -- an evicted one is started by the ask, which is how a
+                    //  switch or a disconnect reaches a long-lived watch at all.
+                    //  The update still goes out: a stale ACTIVE record only
+                    //  over-spoofs, and holding it back would stall the page.
+                    if (!fresh()) askAgain();
+                    try { success(makePosition(current)); } catch (e) {}
+                };
+                emit();
+                //  A stationary device does not need frequent updates; this is
+                //  just enough to satisfy code that waits for a second reading.
+                rec.timer = setInterval(emit, 8000);
+                return;
+            }
+            if (unreachable || (trusted && passthrough())) {
                 try { rec.realId = realWatch.call(self, success, error, options); }
                 catch (e) { if (error) { try { error(unavailable()); } catch (e2) {} } }
                 return;
             }
-            if (!armed()) {
-                if (error) { try { error(unavailable()); } catch (e) {} }
-                return;
-            }
-            var emit = function () {
-                if (!watches.has(ourId) || !success) return;
-                //  Re-read `current`: if the user switches country mid-watch,
-                //  the next update reports the new one. If they disconnect,
-                //  the watch simply stops reporting rather than switching to
-                //  the real position behind the page's back.
-                if (!armed()) return;
-                try { success(makePosition(current)); } catch (e) {}
-            };
-            emit();
-            //  A stationary device does not need frequent updates; this is
-            //  just enough to satisfy code that waits for a second reading.
-            rec.timer = setInterval(emit, 8000);
+            if (error) { try { error(unavailable()); } catch (e) {} }
         };
 
-        if (haveConfig) start(); else cfgReady.then(start);
+        decided(start);
         return ourId;
     };
 

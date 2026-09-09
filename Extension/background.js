@@ -24,6 +24,14 @@ let keepAliveInterval = null;
 let reconnectTimer = null;
 let reconnectDelay = 2000;          // grows on repeated failure, see scheduleReconnect()
 
+//  Set once the app has said another copy of this extension is the one it
+//  installed. Nothing this worker does survives it -- see standDown().
+let stoodDown = false;
+//  'development' | 'sideload' | 'normal' | 'admin', or null until getSelf answers.
+//  Only the app can tell a stray copy from the real one, and this is the half of
+//  the answer only the copy knows.
+let selfInstall = null;
+
 // গ্লোবাল স্ট্যাটাস যা অ্যাপের সাথে সিঙ্ক হবে
 //
 //  `busy` and `progress` mirror the desktop app's own connect progress. They
@@ -252,6 +260,42 @@ function armProxyGuard(on) {
     } catch (e) {}
 }
 
+// ── The link back up, after the worker has been evicted ──────────────
+//  scheduleReconnect() is a setTimeout, so it dies with the worker, and the
+//  proxy guard above is deliberately disarmed while the proxy is off. With the
+//  app down, that left NOTHING able to start this worker again -- so a browser
+//  whose worker had been evicted went on believing the app was off after it came
+//  back, kept the pages it had already told "off" pointed at Chromium's own
+//  location provider, and was not proxied at all while the app said connected.
+//  That is the leak reported on 2026-09-04.
+//
+//  An alarm is the only thing that survives eviction. It runs ONLY while the link
+//  is down and is cleared the moment it opens, so a browser talking to the app
+//  never pays for it.
+const APP_POLL = 'fp-app-poll';
+const APP_POLL_MIN = 1;
+
+function armAppPoll(on) {
+    try {
+        if (!chrome.alarms) return;
+        if (on) chrome.alarms.create(APP_POLL,
+            { delayInMinutes: APP_POLL_MIN, periodInMinutes: APP_POLL_MIN });
+        else chrome.alarms.clear(APP_POLL, () => void chrome.runtime.lastError);
+    } catch (e) {}
+}
+
+//  Dial now instead of at the end of the backoff. Used by anything that has a
+//  reason to believe the app is there RIGHT NOW: an open popup, an alarm, or a
+//  page whose geolocation decision has gone stale.
+function kickReconnect() {
+    const dead = !socket || socket.readyState === WebSocket.CLOSING ||
+                 socket.readyState === WebSocket.CLOSED;
+    if (!dead) return;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    reconnectDelay = 2000;
+    connectToDesktop();
+}
+
 //  WHAT "OFF" HAS TO MEAN, and why clear() was the wrong answer.
 //  .build/probe-socks-catches-brave.js caught Brave sending every request -- pages,
 //  favicons, go-updater.brave.com -- to a stub SOCKS5 server on 127.0.0.1:9050 with
@@ -347,7 +391,12 @@ function setBrowserProxy(enabled, bypassList, done) {
 //  that is neither open nor coming back.
 if (chrome.alarms && chrome.alarms.onAlarm) {
     chrome.alarms.onAlarm.addListener(alarm => {
-        if (!alarm || alarm.name !== PROXY_GUARD) return;
+        const name = alarm && alarm.name;
+        //  The app-poll's whole job is done by the worker having been STARTED to
+        //  deliver this: module evaluation has already re-dialled. All that is
+        //  left is the case of a worker that was awake with a dead socket.
+        if (name === APP_POLL) { kickReconnect(); return; }
+        if (name !== PROXY_GUARD) return;
         //  OPEN: the app is there and this browser is meant to be on Tor.
         //  CONNECTING: a worker that has just started and not heard back yet --
         //  module evaluation has already cleared the proxy in that case, so
@@ -366,7 +415,7 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
         //  And pick the socket back up. The reconnect chain is setTimeout-based,
         //  a torn-down worker loses its timers, and without this the extension
         //  would never notice the app coming back either.
-        if (!reconnectTimer) connectToDesktop();
+        kickReconnect();
     });
 }
 
@@ -515,21 +564,62 @@ function settleStrandRepair(pagesFailed) {
 //  change reaches pages that are already open (via chrome.storage.onChanged in
 //  geo-bridge.js), but it must never be the thing a page's FIRST question is
 //  answered from -- see the GET_GEO handler below.
-let geoRecord = { active: false, pending: true };
+let geoRecord = { active: false, pending: true, stamp: Date.now() };
 
+//  Every record carries the moment it was written. geo-spoof.js will not act on
+//  a decision older than its own freshness window without asking for it again,
+//  which is what stops an evicted worker's last word from being treated as
+//  current minutes later.
 function writeGeo(rec) {
+    rec.stamp = Date.now();
     geoRecord = rec;
     try { chrome.storage.local.set({ geoSpoof: rec }); } catch (e) {}
+    reportGeoState();
 }
 
+//  What this browser is actually holding, told to the app rather than assumed by
+//  it. main.js used to call a browser "spoofed" on the strength of the extension
+//  being INSTALLED there, which says nothing about whether a worker is running or
+//  what record it has. Silence is the honest answer when there is no link: the
+//  app counts only the browsers that have spoken.
+function reportGeoState() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const rec = geoRecord || {};
+    const armed = rec.active === true;
+    try {
+        socket.send(JSON.stringify({
+            command: 'GEO_STATE',
+            armed: armed,
+            cc: armed ? String(rec.cc || '') : '',
+            city: armed ? String(rec.city || '') : '',
+            pending: !armed && rec.appOff !== true,
+            stamp: rec.stamp || 0,
+        }));
+    } catch (e) {}
+}
+
+//  Three outcomes, and the difference between the last two is the whole leak:
+//
+//    active            the app is connected and named coordinates
+//    appOff            the app has CONFIRMED it is not connected
+//    pending           anything else, including "connected but no coordinates"
+//
+//  A bare {active:false} is no longer written anywhere. It used to mean "off"
+//  by the absence of a flag, so a connected app that sent geo:null, a socket
+//  that dropped while the app was still running, and a genuine disconnect all
+//  produced the same record -- and geo-spoof.js sent the page to Chromium's own
+//  provider for all three.
 function syncGeoSpoof(state) {
     const g = state && state.geo;
-    const active = !!(state && state.connected) &&
+    const connected = !!(state && state.connected);
+    const active = connected &&
                    g && typeof g.lat === 'number' && typeof g.lng === 'number';
     const rec = active
         ? { active: true, lat: g.lat, lng: g.lng, accuracy: g.accuracy || 18,
             cc: g.cc || state.serverCode || '', city: g.city || '' }
-        : { active: false };
+        : connected
+            ? { active: false, pending: true }
+            : { active: false, appOff: true };
     //  writeGeo FIRST, always. Pages waiting on the new country are unblocked by
     //  that one call, and they must not be made to wait behind a cookie sweep
     //  and a storage clear. noteLocationChange() is asynchronous throughout and
@@ -642,7 +732,25 @@ function markGeoPending() {
 //  at the moment the app quits would be destroying data to no visible end.
 const GEO_ORIGINS = 'geoOrigins';   // origins that were handed a position
 const GEO_LAST    = 'geoLast';      // the location those origins were told
+const GEO_SEEN    = 'geoSeen';      // every location this browser has been told
 const MAX_ORIGINS = 40;
+const MAX_SEEN    = 12;
+
+//  The same thing as GEO_LAST, in memory, and it exists because the queue that
+//  serialises the compare has a DEADLINE.
+//
+//  noteLocationChange() releases its section after 2 s no matter what, so that a
+//  storage callback which never arrives cannot wedge every later switch. That
+//  deadline is right, and it is also a hole: released early, the next note's
+//  read runs before the previous note's set() has landed, so the 3rd switch in a
+//  row compares against the 2nd-to-last country and clears the wrong one. That
+//  is the reported "brave e 3rd bare ager country show korche" -- switches 1 and
+//  2 land inside the budget, the third overlaps the second's purge.
+//
+//  Updated synchronously the instant a commit is issued, so it is never behind
+//  storage; undefined after a worker restart, which is exactly when storage is
+//  the only record. Preferred over the read for that reason -- see the compare.
+let lastNoted = null;
 //  Cookie names measured to carry a position. A name goes in here when a probe
 //  has shown it holding coordinates -- never on the strength of it sounding
 //  location-ish, because every name in this list costs the user whatever else
@@ -974,6 +1082,77 @@ function repinMaps(url, to) {
     return next === String(url) ? null : next;
 }
 
+// ── The pin on a navigation, not just on a switch ────────────────────
+//  Everything above runs at SWITCH time and reaches tabs that are open at that
+//  moment. A Maps URL opened afterwards -- typed, autocompleted, bookmarked,
+//  restored on startup, or followed from a link -- carries whatever pin it was
+//  saved with, and the pin is the one signal Maps is measured to obey. So it
+//  opens on the country it was saved in, and no switch will ever come along to
+//  correct it. A Maps URL with NO pin is the same defect from the other side:
+//  with no pin and no cookie Maps centres on the requesting IP, which lands the
+//  country at country zoom instead of the city.
+//
+//  Both are fixed at the moment of navigation instead. chrome.tabs.onUpdated is
+//  used rather than webNavigation because `tabs` is already a permission this
+//  extension holds and webNavigation is not -- the manifest does not change.
+const MAPS_URL  = /^(https?:\/\/[^/]*google\.[^/]+\/maps)((?:\/[^?#]*)?)((?:[?#].*)?)$/i;
+const NAV_ZOOM  = '12z';    // measured city zoom; 7z is what the IP fallback gives
+const NEAR_DEG  = 0.5;      // above Maps' own settle drift, below any country change
+
+function nearAny(lat, lng, places) {
+    for (const p of places || []) {
+        if (!p || typeof p.lat !== 'number' || typeof p.lng !== 'number') continue;
+        if (Math.abs(lat - p.lat) < NEAR_DEG && Math.abs(lng - p.lng) < NEAR_DEG) return true;
+    }
+    return false;
+}
+
+/**
+ * @param seen every location this browser has been told, newest last. A pin is
+ *        only moved when it sits on one of them -- a place the user navigated to
+ *        themselves is left exactly where it is, because dragging it back would
+ *        make every other country on earth unbrowsable, which is a worse bug
+ *        than the one being fixed.
+ * @returns the corrected URL, or null when there is nothing to do
+ */
+function mapsNavFix(url, to, seen) {
+    if (!to || typeof to.lat !== 'number' || typeof to.lng !== 'number') return null;
+    const m = MAPS_URL.exec(String(url));
+    if (!m) return null;
+    const pin = /\/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/.exec(m[2] || '');
+    if (pin) {
+        if (nearAny(+pin[1], +pin[2], [to])) return null;      // already right
+        if (!nearAny(+pin[1], +pin[2], seen)) return null;      // not ours to move
+        return repinMaps(url, to);
+    }
+    //  Only the bare entry point gets a pin added. A deeper shape with no pin
+    //  (/maps/place/..., /maps/dir/...) is left alone rather than risk building
+    //  a URL Maps cannot parse.
+    if (!/^\/?$/.test(m[2] || '')) return null;
+    return m[1] + '/@' + to.lat + ',' + to.lng + ',' + NAV_ZOOM + (m[3] || '');
+}
+
+function watchMapNavigation() {
+    if (!chrome.tabs || !chrome.tabs.onUpdated) return;
+    chrome.tabs.onUpdated.addListener((tabId, info) => {
+        if (!info || !info.url) return;
+        const rec = geoRecord;
+        if (!rec || rec.active !== true ||
+            typeof rec.lat !== 'number' || typeof rec.lng !== 'number') return;
+        if (!MAPS_URL.test(String(info.url))) return;
+        const to = { lat: rec.lat, lng: rec.lng };
+        chrome.storage.local.get([GEO_SEEN, GEO_LAST], got => {
+            void chrome.runtime.lastError;
+            const seen = (Array.isArray(got && got[GEO_SEEN]) ? got[GEO_SEEN] : [])
+                .concat((got && got[GEO_LAST]) ? [got[GEO_LAST]] : []);
+            const next = mapsNavFix(info.url, to, seen);
+            if (!next || next === info.url) return;
+            try { chrome.tabs.update(tabId, { url: next }); }
+            catch (e) { /* the tab closed underneath us */ }
+        });
+    });
+}
+
 //  Three kinds of tab have to be made to ask again, and only the first is in
 //  `origins`:
 //
@@ -1155,6 +1334,11 @@ function purgeGeoOriginStorage(from) {
 //  noteGeoUse() is deliberate -- it also means a GEO_USED note that arrived before
 //  a switch is guaranteed to be in the list the switch reads.
 function noteLocationChange(rec) {
+    //  "Not known yet" is not a location change. It is written on every worker
+    //  start and whenever the app is connected without coordinates to give, and
+    //  treating it as a disconnect would run a purge -- cookie sweep, map
+    //  unpin, tab reloads -- against a country that is still in force.
+    if (rec && !rec.active && rec.appOff !== true) return;
     serialiseOrigins(res => {
         //  Released as soon as the record has been written, NOT after the purge --
         //  and that is a requirement, not a preference. purgeGeoOriginStorage()
@@ -1168,8 +1352,12 @@ function noteLocationChange(rec) {
         //  unpurged. Two seconds is ~1000x what a LevelDB get+set costs.
         const release = once(res);
         setTimeout(release, STAGE_COOKIE_MS);
-        chrome.storage.local.get([GEO_LAST, GEO_ORIGINS], got => {
-            const prev = (got && got[GEO_LAST]) || null;
+        chrome.storage.local.get([GEO_LAST, GEO_ORIGINS, GEO_SEEN], got => {
+            //  In-memory first. Within one worker lifetime it is authoritative and
+            //  immune to write latency; the stored value can be one switch behind
+            //  it if this note started before the last one's set() landed, and
+            //  believing the stored one there is what clears the wrong country.
+            const prev = lastNoted || (got && got[GEO_LAST]) || null;
             //  How many origins are on record as having been handed a position. It
             //  can only be non-zero if this browser was connected at some point, so
             //  it is the one thing that can stand in for a previous country when the
@@ -1178,6 +1366,10 @@ function noteLocationChange(rec) {
             //  Write first, purge after: the record is what the NEXT switch is
             //  decided on, so it must be on disk before anything slow starts.
             const commit = (next, purge) => {
+                //  Before the set(), not in its callback: a note released by the
+                //  deadline has to leave the next one a correct answer even though
+                //  its own write is still in flight.
+                if (next && next[GEO_LAST]) lastNoted = next[GEO_LAST];
                 chrome.storage.local.set(next, () => {
                     void chrome.runtime.lastError;
                     release();
@@ -1186,10 +1378,18 @@ function noteLocationChange(rec) {
             };
             if (rec && rec.active) {
                 const now = { cc: rec.cc || '', lat: rec.lat, lng: rec.lng };
+                //  Kept alongside the previous country because mapsNavFix() has to
+                //  recognise a pin from ANY country this browser has been on, not
+                //  just the last one -- a bookmark can be older than that.
+                const ring = (Array.isArray(got && got[GEO_SEEN]) ? got[GEO_SEEN] : [])
+                    .filter(p => p && !sameSpot(p, now));
+                ring.push(now);
+                while (ring.length > MAX_SEEN) ring.shift();
                 if (prev && !sameSpot(prev, now)) {
                     console.info(`FreeProxy: country changed ${prev.cc || '?'} -> ${now.cc || '?'} -- ` +
                                  'clearing the previous location out of this browser');
-                    commit({ [GEO_LAST]: now }, () => purgeLocationTraces(prev, true));
+                    commit({ [GEO_LAST]: now, [GEO_SEEN]: ring },
+                           () => purgeLocationTraces(prev, true));
                 } else if (!prev && held) {
                     //  No remembered previous country, but sites on record as having
                     //  been given one. Something dropped the record -- this worker is
@@ -1208,9 +1408,10 @@ function noteLocationChange(rec) {
                     //  weaker, and the only step that needs the old coordinates.
                     console.info(`FreeProxy: no previous country on record but ${held} site(s) ` +
                                  'were given one -- clearing this browser anyway');
-                    commit({ [GEO_LAST]: now }, () => purgeLocationTraces(null, true));
+                    commit({ [GEO_LAST]: now, [GEO_SEEN]: ring },
+                           () => purgeLocationTraces(null, true));
                 } else {
-                    commit({ [GEO_LAST]: now }, null);
+                    commit({ [GEO_LAST]: now, [GEO_SEEN]: ring }, null);
                 }
                 return;
             }
@@ -1239,7 +1440,7 @@ function keepAlive() {
 }
 
 function scheduleReconnect() {
-    if (reconnectTimer) return;
+    if (stoodDown || reconnectTimer) return;
     //  Backs off to 30 s instead of hammering a closed port every 3 s
     //  forever, which kept waking the service worker all day when the
     //  desktop app was not running.
@@ -1250,19 +1451,110 @@ function scheduleReconnect() {
     reconnectDelay = Math.min(reconnectDelay * 1.6, 30000);
 }
 
+//  MEASURED, Chrome's own Secure Preferences: three FreeProxy records in one
+//  profile -- the packed one the app installed (location 6) plus two location 4
+//  UNPACKED rows whose `path` values are the app's own folders, left behind by
+//  builds that passed --load-extension. Every one of them is this code, so every
+//  one of them connects here and acts on what the app says. Two of them are a
+//  second and third actor the app cannot see, holding stale permission grants,
+//  and the user sees them as duplicate rows in chrome://extensions.
+//
+//  The app knows which id it installed and nothing in a browser does, so the id
+//  goes to the app and the app decides. installType is sent with it because it is
+//  the half only this copy knows: it is what keeps the answer off a store copy
+//  ('normal') and a policy copy ('admin'), which must never be touched.
+function sendHello() {
+    if (stoodDown || !socket || socket.readyState !== WebSocket.OPEN) return;
+    let version = '';
+    try { version = (chrome.runtime.getManifest() || {}).version || ''; } catch (e) {}
+    try {
+        socket.send(JSON.stringify({
+            command: 'HELLO',
+            id: chrome.runtime.id,
+            installType: selfInstall || 'unknown',
+            version,
+        }));
+    } catch (e) {}
+}
+
+//  getSelf() and uninstallSelf() are the two management calls that need no
+//  permission, which is what makes this reachable from a copy whose grant is
+//  years old. Re-sends the greeting because the socket may already be open by
+//  the time this answers, and an 'unknown' installType is never acted on.
+try {
+    if (chrome.management && chrome.management.getSelf) {
+        chrome.management.getSelf(info => {
+            void chrome.runtime.lastError;
+            selfInstall = (info && info.installType) || null;
+            if (selfInstall) sendHello();
+        });
+    }
+} catch (e) {}
+
+//  Stop being a second actor in this browser.
+//
+//  The proxy pref is RELINQUISHED here, not written to mode:direct -- the
+//  opposite of setBrowserProxy(false), and deliberately: masking it would take
+//  the pref away from the copy that stays, and that copy is the one the user's
+//  traffic depends on. Clearing hands it back, so the primary's value applies.
+function standDown(reason) {
+    if (stoodDown) return;
+    stoodDown = true;
+    console.info('FreeProxy: the app installed a different copy of this extension' +
+                 (reason ? ` (${reason})` : '') + ' -- standing down');
+    if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    armAppPoll(false);
+    armProxyGuard(false);
+    markProxy(false);
+    try { chrome.proxy.settings.clear({ scope: 'regular' }, () => void chrome.runtime.lastError); }
+    catch (e) {}
+    try { if (socket) socket.close(); } catch (e) {}
+    socket = null;
+    globalState.appRunning = false;
+    //  An unpacked copy is removed outright: that row IS the duplicate the user is
+    //  looking at, and uninstallSelf() is the only thing that can take it away --
+    //  the app cannot, because Secure Preferences is signed. A store or policy copy
+    //  is left in place; standing down is the whole remedy there.
+    if (selfInstall !== 'development') return;
+    try {
+        if (chrome.management && chrome.management.uninstallSelf) {
+            chrome.management.uninstallSelf({ showConfirmDialog: false },
+                                            () => void chrome.runtime.lastError);
+        }
+    } catch (e) {}
+}
+
 function connectToDesktop() {
+    if (stoodDown) return;
     try { socket = new WebSocket(desktopAppUrl); }
     catch (e) { scheduleReconnect(); return; }
 
     socket.onopen = () => {
         globalState.appRunning = true;
         reconnectDelay = 2000;
+        //  The link is up, so nothing has to wake this worker to find that out.
+        armAppPoll(false);
         keepAlive();
+        //  Identity first: everything after this line is the app talking to a copy
+        //  it has had the chance to recognise.
+        sendHello();
+        //  What this browser is holding, before the app has asked for anything.
+        reportGeoState();
     };
 
     socket.onmessage = (event) => {
         let data;
         try { data = JSON.parse(event.data); } catch (e) { return; }
+        if (stoodDown) return;
+
+        //  The app naming a different copy as the one it installed. Handled before
+        //  anything else so a frame that arrived in the same batch cannot be acted
+        //  on after the answer.
+        if (data.type === 'STAND_DOWN') {
+            standDown(typeof data.reason === 'string' ? data.reason.slice(0, 80) : '');
+            return;
+        }
 
         //  PROGRESS is the app's live connect feed -- about twenty messages
         //  per connect. It carries no authoritative state, so it must not go
@@ -1326,6 +1618,11 @@ function connectToDesktop() {
     socket.onerror = () => { try { socket.close(); } catch (e) {} };
 
     socket.onclose = () => {
+        //  A standby has already released the proxy pref by CLEARING it, and the
+        //  release below MASKS it with mode:direct instead -- so an ordinary close
+        //  after a stand-down would take the pref straight back off the copy the
+        //  app kept. Nothing else in here is a standby's business either.
+        if (stoodDown) return;
         globalState.appRunning = false; globalState.connected = false;
         //  A half-finished connect that died with the app is not still in
         //  flight. Leaving busy set would leave the popup's controls disabled
@@ -1350,6 +1647,9 @@ function connectToDesktop() {
         if (keepAliveInterval) clearInterval(keepAliveInterval);
         chrome.runtime.sendMessage({ type: "UI_UPDATE", state: globalState }).catch(() => {});
         scheduleReconnect();
+        //  scheduleReconnect() is a timer and this worker is about to be evicted
+        //  with it. The alarm is what is still there afterwards.
+        armAppPoll(true);
     };
 }
 
@@ -1373,6 +1673,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     //  So the answer is either the live state or an honest "pending", never
     //  something left over from last time.
     if (msg.type === "GET_GEO") {
+        //  A live link means this record is still the app's word as of now, so it
+        //  is re-stamped: geo-spoof.js measures age, and a page polling a healthy
+        //  connection must not be made to re-ask every fifteen seconds.
+        //  `fresh` says the page is holding something too old to act on -- if the
+        //  link is down, THAT is the news, and the dial has to happen now rather
+        //  than at the end of a backoff the page cannot see.
+        const live = socket && socket.readyState === WebSocket.OPEN;
+        if (live) { if (geoRecord) geoRecord.stamp = Date.now(); }
+        else if (msg.fresh) kickReconnect();
         sendResponse({ geoSpoof: geoRecord });
         return true;
     }
@@ -1398,13 +1707,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         //  surface the user is looking at, so the unread marker has served its
         //  purpose. Idempotent, which is why it can sit in a 1.2 s poll.
         clearBadge();
-        const dead = !socket || socket.readyState === WebSocket.CLOSING ||
-                     socket.readyState === WebSocket.CLOSED;
-        if (dead) {
-            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-            reconnectDelay = 2000;
-            connectToDesktop();
-        }
+        kickReconnect();
         sendResponse({ state: globalState });
         return true;
     }
@@ -1441,4 +1744,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 //  "not connected" -- see markGeoPending().
 setBrowserProxy(false);
 markGeoPending();
+watchMapNavigation();
 connectToDesktop();

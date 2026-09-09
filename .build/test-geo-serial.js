@@ -183,15 +183,26 @@ const PROXY = { host: '127.0.0.1', port: 9050, bypass: 'example.com' };
         ok(src.indexOf('geo.applyAll(') < 0,
            'and nothing in main.js calls applyAll on the main thread outside that fallback',
            'still present at ' + src.indexOf('geo.applyAll('));
-        const direct = [...src.matchAll(/runOffThread\('geo-(apply|gecko)'/g)];
-        ok(direct.length === 2,
-           'there are exactly two places that fork the geo child -- one per job -- so ' +
-           'nothing can bypass the queue', String(direct.length));
-        //  Both must be built on the shared chain, by name. Two `let` chains
-        //  would look identical from the outside and serialise nothing.
-        ok((text.match(/_geoApplyChain\.then\(step, step\)/g) || []).length === 2 &&
-           (text.match(/let _geoApplyChain/g) || []).length === 1,
-           'and both hang off the one chain variable, not a second one of their own');
+        //  Counted, not pinned at two. The set of geo jobs grew -- restore and
+        //  startup moved off the pump after this file was written -- and a check
+        //  that asserted "exactly 2" would have gone red for a change it was
+        //  written to protect rather than forbid. What must stay true is one fork
+        //  site per job, all of them inside the chained block.
+        const jobs = [...src.matchAll(/runOffThread\('(geo-[a-z]+)'/g)].map(m => m[1]);
+        const dupe = jobs.filter((j, i) => jobs.indexOf(j) !== i);
+        ok(jobs.length > 0 && dupe.length === 0,
+           'every geo job has exactly one place that forks it -- so nothing can ' +
+           'bypass the queue', jobs.join(',') + (dupe.length ? '  DUPLICATED: ' + dupe : ''));
+        const inBlock = [...text.matchAll(/runOffThread\('(geo-[a-z]+)'/g)].map(m => m[1]);
+        ok(inBlock.length === jobs.length,
+           'and all of them are inside the chained block, not somewhere that forks ' +
+           'a geo child directly', inBlock.length + '/' + jobs.length);
+        //  Each must be built on the shared chain, by name. Two `let` chains would
+        //  look identical from the outside and serialise nothing.
+        const hooks = (text.match(/_geoApplyChain\.then\(step, step\)/g) || []).length;
+        ok(hooks === jobs.length && (text.match(/let _geoApplyChain/g) || []).length === 1,
+           'and each hangs off the one chain variable, not a second one of its own',
+           hooks + ' chain hook(s) for ' + jobs.length + ' job(s)');
         //  The descriptor is built where SOCKS_PORT and appState are in scope,
         //  and passed in. Read from a global it would be undefined -- the
         //  wrapper is at module scope, outside runAdminApp().

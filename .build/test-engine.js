@@ -134,9 +134,12 @@ function check(label, cond, detail) {
         check('relay index populated', idx.countryCount > 20, idx.countryCount + ' countries');
         check('index reports itself fresh', idx.isFresh === true);
     } catch (e) {
-        check('Onionoo reachable', false, e.message);
-        console.log('\n' + (bad ? bad + ' check(s) failed' : 'all checks passed'));
-        process.exit(bad ? 1 : 0);
+        //  Exit 3, not 1. This suite is in run-offline.js's gate for the country
+        //  capacity check below -- which caught a dead fallback entry -- but a
+        //  machine with no DNS cannot MEASURE that, and a red that only means
+        //  "the network was down" is the kind nobody reads twice. 3 reports n/a.
+        console.log('  n/a  Onionoo unreachable: ' + e.message);
+        process.exit(3);
     }
 
     const stats = idx.countryStats();
@@ -147,8 +150,14 @@ function check(label, cond, detail) {
         lu ? lu.count + ' exits, ' + lu.ipv4Only + ' of them IPv4-only' : 'none');
 
     // The two countries the old fallback list offered but Tor cannot serve.
-    check('Bangladesh correctly absent from exit stats', !stats.bd,
-        stats.bd ? 'UNEXPECTED: ' + stats.bd.count : 'confirmed');
+    // Both are stated as CAPACITY, not as absence: on 2026-09-05 Onionoo began
+    // reporting one Bangladeshi exit, and an absence pinned as permanent turns
+    // red the day the network changes -- which says nothing about this build.
+    // What the old list was wrong about is that these countries can carry
+    // users, and a single-digit pool cannot.
+    check('Bangladesh exit capacity is negligible', !stats.bd || stats.bd.count < 5,
+        stats.bd ? stats.bd.count + ' exits -- not a pool a country entry could use'
+                 : 'none at all');
     check('India exit capacity is negligible', !stats.in || stats.in.count < 5,
         stats.in ? stats.in.count + ' exits' : 'none');
 
