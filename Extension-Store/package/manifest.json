@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "FreeProxy VPN Extension",
   "version": "1.2.0",
-  "description": "Routes this browser through the FreeProxy VPN Tor engine and reports the connected country's location instead of your real one.",
+  "description": "Companion extension for FreeProxy VPN to synchronize browser geolocation with your active exit connection.",
   "minimum_chrome_version": "111",
   "icons": {
     "16": "icons/icon-16.png",
